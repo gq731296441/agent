@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8">
+    <title>agent</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+</head>
+
+<body>
+    <!-- <div class="container">
+        <div class="header">Agent</div>
+        <div class="chat-box">
+            <div class="left-panel">
+                <div class="messages">
+                </div>
+                <div class="input-area">
+                    <textarea id="input" placeholder="请输入你的问题..."></textarea>
+                    <button id="sendBtn" onclick="send()">发送</button>
+                    <button id="stopBtn" onclick="stop()" style="display:none;">停止</button>
+                </div>
+            </div>
+
+            <div class="right-panel">
+                <h3 class="panel-title">🛠️ 状态与工具</h3>
+                <div class="tool-status-area">
+                    <div id="statusUpdates" class="status-list"> </div>
+                </div>
+                <h3 class="panel-title">📁 文件与资源</h3>
+                <div id="fileArea" class="file-list">
+                    <p>暂无文件或资源展示。</p>
+                </div>
+            </div>
+        </div>
+    </div> -->
+    <div class="header">
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <button id="toggle-sessions-btn" onclick="toggleSessionPanel()" style="background: #f0f0f0; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 16px;">☰ 会话</button>
+            Agent
+        </div>
+        <span id="connection-status" class="status-indicator disconnected">●</span>
+    </div>
+    
+    <div class="main-container">
+        <div id="sessions-panel" style="display: block;">
+            <div style="padding: 15px;">
+                <h3 style="margin: 0 0 10px 0; font-size: 16px;">会话列表</h3>
+            </div>
+            <div id="sessions-list" style="padding: 10px;"></div>
+            <div style="padding: 10px; border-top: 1px solid #ddd;">
+                <button class="add-new-session" id="create-new-session">+ 新建会话</button>
+            </div>
+        </div>
+        <div class="panel chat-panel">
+            <div class="panel-header">💬 对话交互</div>
+            <div class="messages" id="messages">
+            </div>
+            <div class="input-area">
+                <!-- <div class="mcp-control">
+                    <div id="mcp-status" class="status-indicator disconnected" onclick="toggleMcpPanel()">● MCP 工具</div>
+                    <div id="mcp-panel" style="display:none; position:absolute; bottom:60px; background:white; border:1px solid #ccc; padding:10px;">
+                        <h4>已连接服务:</h4>
+                        <ul id="mcp-server-list">
+                            </ul>
+                        <hr>
+                        <h4>已加载工具:</h4>
+                        <ul id="mcp-tool-list">
+                            </ul>
+                        <hr>
+                        <h4>添加新服务:</h4>
+                        <input type="text" id="new-mcp-id" placeholder="ID (e.g. email)">
+                        <input type="text" id="new-mcp-port" placeholder="Port (e.g. 8000)">
+                        <button onclick="addMcpServer()">添加</button>
+                    </div>
+                </div> -->
+                <div style="display: flex;">
+                    <textarea id="input" placeholder="输入问题... (Shift+Enter 换行)"></textarea>
+                    <div class="button-group">
+                        <button id="sendBtn" onclick="send()">发送</button>
+                        <button id="stopBtn" onclick="stop()" style="display:none;">停止</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="panel workspace-panel">
+            <div class="tabs-header" id="tabs-header">
+                <div class="tab-item active" onclick="switchTab('tool-logs-tab')">
+                    🛠️ 工作台
+                </div>
+            </div>
+            
+            <div class="tabs-content" id="tabs-content">
+                <div id="tool-logs-tab" class="tab-pane active tool-logs-container">
+                    <div id="statusUpdates" class="status-list"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- <div class="panel file-panel">
+        <div class="panel-header">📁 文件资源</div>
+        <div id="file-list" class="file-list-container">
+            <div class="empty-state">暂无生成文件</div>
+            </div>
+    </div> -->
+    <script src="/static/script.js"></script>
+
+</body>
+
+</html>
