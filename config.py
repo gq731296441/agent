@@ -7,7 +7,7 @@ class Config:
     
     # 数据库配置
     DB_ENGINE = config('DB_ENGINE', default='postgresql')
-    DB_NAME = config('DB_NAME')
+    DB_NAME = config('DB_NAME', default='postgres')
     DB_USER = config('CMTOOL_AGENT_DB_USER')
     DB_PASSWORD = config('CMTOOL_AGENT_DB_PASSWORD')
     DB_HOST = config('CMTOOL_AGENT_DB_HOST', default='localhost')
