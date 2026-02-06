@@ -1,3 +1,5 @@
+// 兼容文件：脚本已模块化到 /static/main.js
+console.log('静态脚本入口已模块化，请使用 /static/main.js');
 // ================= 全局状态与会话管理 =================
 let ws;
 let isNew = false;
@@ -12,7 +14,7 @@ const activeToolCalls = {};
 
 // 会话列表管理
 const sessions = {
-    list: [],  // [{id, title, timestamp}, ...]
+    list: [],  // [{id, title, timestamp, messages}, ...]
     currentId: null,  // 当前活跃会话 ID
     
     load: function() {
@@ -129,6 +131,7 @@ function initSession() {
     }
 }
 
+// 加载历史消息
 async function loadHistoryMessages(sessionId) {
     if (!sessionId) {
         throw new Error('sessionId 是必填参数');
@@ -138,7 +141,7 @@ async function loadHistoryMessages(sessionId) {
     const params = new URLSearchParams();
     params.append('session_id', sessionId);
 
-    const userId = 'user_' + (JSON.parse(localStorage.getItem('user_info') || '{}').id || 'guest');
+    const userId = JSON.parse(localStorage.getItem('user_info') || '{}').id;
     params.append('user_id', userId);
     // 完整的 URL
     const url = `/api/sessions/history?${params.toString()}`;
@@ -152,18 +155,34 @@ async function loadHistoryMessages(sessionId) {
         });
 
         if (!response.ok) {
-        // 根据你的后端约定处理错误
         const errorData = await response.json().catch(() => ({}));
         throw new Error(errorData.message || `HTTP error! status: ${response.status}`);
         }
 
         const data = await response.json();
-
-        // 假设后端返回格式为：{ messages: [...], total?: 123 }
-        return {
-        messages: data.messages || [],
-        total: data.total,
-        };
+        if (data.status && data.messages.length !== 0) {
+            const container = document.getElementById('messages');
+            data.messages.forEach(msg => {
+                const div = document.createElement('div');
+                const isAi = msg.role === 'ai';
+                
+                div.className = `message ${isAi ? 'ai' : (msg.role === 'human' ? 'user' : 'system')}`;
+                
+                let contentHtml = "";
+                if (isAi) {
+                    // 使用 marked 解析 Markdown
+                    contentHtml = marked.parse(msg.content);
+                } else {
+                    contentHtml = msg.content.replace(/\n/g, '<br>');
+                }
+                
+                div.innerHTML = `<div>${contentHtml}</div>`;
+                container.appendChild(div);
+            })
+        }else {
+            console.log("该会话无历史消息");
+        }
+        
     } catch (error) {
         if (error.name === 'AbortError') {
         console.warn('获取历史记录请求被取消');
@@ -243,9 +262,9 @@ function switchSession(sessionId) {
 
     document.getElementById('messages').innerHTML = ''; // 清空消息区域
     document.getElementById('statusUpdates').innerHTML = ''; // 清空状态更新区域
-
-    sessions.save();
     loadHistoryMessages(currentSessionId)
+    sessions.save();
+    
     // connectToSession(sessionId);
 }
 
@@ -555,14 +574,15 @@ function showHitlApproval(msg) {
     }
 
     function submit() {
-        const userId = 'user_' + (JSON.parse(localStorage.getItem('user_info') || '{}').id || 'guest');
+        const userId = JSON.parse(localStorage.getItem('user_info') || '{}').id || 'guest';
+        const userToken = JSON.parse(localStorage.getItem('user_info') || '{}').token || '';
         ws.send(JSON.stringify(
             {
                 action: "resume_hitl",
                 request_id, decisions,
                 user_id: userId,
+                user_token: userToken,
                 session_id: currentSessionId,  // 新建会话时为 null，继续会话时为真实 ID
-                task_id: "task_" + Date.now()
             }
         ));
         // console.log(JSON.stringify({ action: "resume_hitl", request_id, decisions }));
@@ -953,7 +973,7 @@ function send() {
     toggleButtons();
     
     // 每条消息都携带 user_id 和 session_id（若为新建会话则为 null）
-    const userId = 'user_' + (JSON.parse(localStorage.getItem('user_info') || '{}').id || 'guest');
+    const userId = JSON.parse(localStorage.getItem('user_info') || '{}').id || 'guest';
     
     ws.send(JSON.stringify({
         action: "ask",
@@ -967,7 +987,17 @@ function send() {
 }
 
 function stop() {
-    ws.send(JSON.stringify({ action: "stop" }));
+    // 每条消息都携带 user_id 和 session_id（若为新建会话则为 null）
+    const userId = JSON.parse(localStorage.getItem('user_info') || '{}').id || 'guest';
+    
+    ws.send(JSON.stringify({
+        action: "stop",
+        user_id: userId,
+        session_id: currentSessionId,  // 新建会话时为 null，继续会话时为真实 ID
+        task_id: "task_" + Date.now()
+    }));
+    isGenerating = false;
+    toggleButtons();
 }
 
 function toggleButtons() {

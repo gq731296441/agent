@@ -1,12 +1,21 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.websockets import WebSocketState
 import os
 import uuid
+import time
+import asyncio
 from typing import Dict, Set
+from config import setup_logging, get_logger, app_config
+
+logger = get_logger(__name__)
 
 # ============= 代理配置 ============
 os.environ.pop("http_proxy", None)
 os.environ.pop("https_proxy", None)
 os.environ.pop("all_proxy", None)
+
+HEARTBEAT_INTERVAL = app_config.HEARTBEAT_INTERVAL
+HEARTBEAT_TIMEOUT = app_config.HEARTBEAT_TIMEOUT
 
 class WebsocketConnectionManager:
     """
@@ -31,6 +40,10 @@ class WebsocketConnectionManager:
         # WebSocket 对象 → set(session_ids) 的反向映射（追踪该 ws 处理的所有 session，用于断开时查找需要清理的会话）
         self.ws_to_sessions: Dict[WebSocket, Set[str]] = {}
 
+        # websocket -> 心跳状态
+        self.ws_to_heartbeat: Dict[WebSocket, Dict] = {}
+        # 结构示例: {ws: {"last_pong": timestamp, "task": asyncio.Task}}
+
     async def connect(self, ws: WebSocket) -> WebSocket:
         """
         接受新的 WebSocket 连接
@@ -45,6 +58,18 @@ class WebsocketConnectionManager:
         # 初始化该 ws 对应的 session 集合
         if ws not in self.ws_to_sessions:
             self.ws_to_sessions[ws] = set()
+
+        # 初始化心跳状态
+        self.ws_to_heartbeat[ws] = {
+            "last_pong": time.time(),
+            "task": None
+        }
+
+        # 如果 ws 没有心跳任务，启动心跳检测
+        task = asyncio.create_task(self._heartbeat_loop(ws))
+        self.ws_to_heartbeat[ws]["task"] = task
+
+        logger.info(f"【WebSocket】新连接建立, 心跳任务已启动")
         return ws
 
     def bind_session(self, ws: WebSocket, session_id: str) -> bool:
@@ -82,6 +107,13 @@ class WebsocketConnectionManager:
         # 清理反向映射
         for sid in related_sessions:
             self.session_to_ws.pop(sid, None)
+        
+        # 停止心跳任务
+        if ws in self.ws_to_heartbeat:
+            task = self.ws_to_heartbeat[ws].get("task")
+            if task:
+                task.cancel()
+            self.ws_to_heartbeat.pop(ws, None)
             
         return related_sessions
 
@@ -94,12 +126,14 @@ class WebsocketConnectionManager:
             session_id: session_id（对应的 ws 会接收此消息）
         """
         ws = self.session_to_ws.get(session_id)
-        if ws:
+        if ws and ws.application_state == WebSocketState.CONNECTED:
             try:
                 await ws.send_json(msg)
             except Exception as e:
-                print(f"[WS] 发送失败，会话 {session_id} 可能已关闭: {e}")
+                logger.error(f"【websocket】发送失败 (session={session_id}): {e}")
                 # 此处不主动 disconnect，由循环中的 WebSocketDisconnect 统一处理
+        else:
+            logger.warning(f"【websocket】发送失败，找不到会话 {session_id} 对应的连接")
 
     def get_sessions_by_ws(self, ws: WebSocket) -> list:
         """
@@ -112,6 +146,37 @@ class WebsocketConnectionManager:
             该 ws 处理的 session_id 列表，如果不存在返回空列表
         """
         return self.ws_to_sessions.get(ws, set()).copy()
+    
+    def _update_pong(self, ws: WebSocket):
+        """更新收到 pong 的时间"""
+        if ws in self.ws_to_heartbeat:
+            self.ws_to_heartbeat[ws]["last_pong"] = time.time()
+    
+    async def _heartbeat_loop(self, ws: WebSocket):
+        """每个 WebSocket 的独立心跳循环"""
+        while ws.application_state == WebSocketState.CONNECTED:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            
+            current_time = time.time()
+            last_pong = self.ws_to_heartbeat.get(ws, {}).get("last_pong", 0)
+            
+            if current_time - last_pong > HEARTBEAT_TIMEOUT:
+                logger.warning(f"[Heartbeat] 超时未收到 pong，关闭连接")
+                try:
+                    await ws.close(code=1001, reason="Heartbeat timeout")
+                except:
+                    pass
+                break
+            
+            try:
+                await ws.send_json({
+                    "type": "ping",
+                    "server_time": current_time
+                })
+                logger.debug(f"[Heartbeat] 发送 ping 到 ws {id(ws)}")
+            except Exception as e:
+                logger.error(f"[Heartbeat] 发送 ping 失败: {e}")
+                break
 
     def get_connection_status(self) -> dict:
         """
@@ -125,4 +190,5 @@ class WebsocketConnectionManager:
             "active_sessions": len(self.session_to_ws),
             "total_mappings": sum(len(s) for s in self.ws_to_sessions.values())
         }
+    
 

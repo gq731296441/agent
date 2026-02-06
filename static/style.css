@@ -2,6 +2,7 @@
     --primary: #2979ff;
     --bg-color: #f0f2f5;
     --border-color: #e0e0e0;
+    --input-border-color: #fff;
     --panel-bg: #ffffff;
     --text-color: #333;
     --chat-user-bg: #e3f2fd;
@@ -77,7 +78,7 @@ body {
 
 /* 左侧：对话 (flex: 1) */
 .chat-panel {
-    flex: 2;
+    flex: 3;
     min-width: 300px;
 }
 
@@ -129,6 +130,25 @@ body {
     border-radius: 3px;
 }
 
+.message.ai .ai-text-chunk {
+    margin-top: 10px
+}
+
+.message.ai .tool-call-card {
+    margin-top: 12px;
+    padding: 4px 12px;
+    background: #fff;
+    border-radius: 5px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: rgb(68, 68, 68);
+    border: 1px solid #fff;
+    transition: 0.2s;
+}
+
 .input-area {
     padding: 15px;
     border-top: 1px solid var(--border-color);
@@ -136,14 +156,25 @@ body {
 }
 
 #input {
-    width: 100%;
-    height: 80px;
-    border: 1px solid var(--border-color);
+    width: 95%;
+    border: 1px solid var(--input-border-color);
     border-radius: 6px;
     padding: 10px;
-    resize: none;
     font-family: inherit;
-    margin-bottom: 10px;
+
+    min-height: 48px;               /* 初始高度 */
+    max-height: 200px;              /* 最大高度，超出后滚动 */
+    font-size: 14px;
+    line-height: 1.5;
+    box-sizing: border-box;
+    resize: none;                   /* 禁止手动拉伸 */
+    outline: none;
+    overflow-y: hidden;             /* 关键：内容未超高时隐藏滚动条 */
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.textarea:focus-visible {
+    background-color: red;
 }
 
 .button-group {
@@ -164,17 +195,54 @@ button {
 }
 
 #sendBtn {
-    background: var(--primary);
-    color: white;
+    display: inline-block;
+    cursor: pointer;
+    transition: transform 0.2s ease;;
 }
 
 #sendBtn:hover {
-    background: #1e5cbf;
+    transform: scale(1.15);
 }
 
 #stopBtn {
-    background: #f44336;
-    color: white;
+    display: inline-block;
+    cursor: pointer;
+    transition: transform 0.2s ease;;
+}
+#stopBtn:hover {
+    transform: scale(1.15);
+}
+
+.file-upload {
+    display: inline-block;
+    cursor: pointer;
+    transition: transform 0.2s ease;
+    width: 32px;
+    height: 32px;
+    padding: 4px;
+}
+
+.file-upload:hover {
+    transform: scale(1.15);
+    background: #e6e6e6;
+    border-radius: 16px;
+}
+
+.mcp-tools {
+    display: flex;
+    font-size: 14px;
+    margin-left: 10px;
+    cursor: pointer;
+    transition: transform 0.2s ease;
+    height: 30px;
+    width: 50px;
+    padding: 4px 4px 4px 8px;
+}
+
+.mcp-tools:hover {
+    transform: scale(1.15);
+    background: #e6e6e6;
+    border-radius: 16px;
 }
 
 /* 中间：文件 (flex: 1) */
@@ -219,8 +287,7 @@ button {
 
 /* 右侧：工作区 (flex: 2) */
 .workspace-panel {
-    flex: 3;
-    min-width: 400px;
+    flex: 2;
     display: flex;
     flex-direction: column;
 }
@@ -371,7 +438,6 @@ button {
 
 /* 状态指示器/按钮样式 */
 #mcp-status {
-    padding: 5px 10px;
     border-radius: 12px;
     cursor: pointer;
     font-size: 14px;
@@ -396,7 +462,7 @@ button {
 #mcp-panel {
     /* 保持原来的定位 */
     position: absolute;
-    bottom: 30px; /* 调整位置，使其不遮挡输入框 */
+    bottom: 0; /* 调整位置，使其不遮挡输入框 */
     left: 0;
     width: 280px;
     background: white;
@@ -666,16 +732,48 @@ button {
     transform: translateY(-2px);
 }
 
+.toggle-sessions {
+    width: 32px;
+    height: 32px;
+    text-align: center;
+    padding: 4px;
+}
+
+.toggle-sessions:hover {
+    cursor: pointer;
+    background: #e6e6e6;
+    border-radius: 16px;
+}
+
+.add-new-session {
+    margin-top: 10px;
+    width: 120px;
+    height: 32px;
+    text-align: center;
+    padding: 4px;
+    display: flex;
+}
+
+.add-new-session:hover {
+     cursor: pointer;
+    background: #e6e6e6;
+    border-radius: 16px;
+}
+
+.session-top {
+    background: #fafafa;
+    display: flex;
+    flex-direction: column;
+    padding: 10px 10px 10px 10px;
+    border-bottom: solid 1px #dfdfdf;
+}
+
 #sessions-panel {
-    flex: 1;
     height: 100vh;
     background: #fafafa;
-    border-right: 2px solid #e0e0e0;
     overflow-y: auto;
     z-index: 99;
-    box-shadow: 2px 0 12px rgba(0, 0, 0, 0.1);
     display: none;
-    flex-direction: column;
 }
 
 #sessions-panel > div:first-child {
@@ -691,9 +789,6 @@ button {
     font-weight: 600;
 }
 
-.add-new-session {
-
-}
 
 #sessions-panel button:hover {
     background: rgba(177, 177, 177, 0.3);
@@ -707,10 +802,8 @@ button {
 }
 
 .session-item {
-    padding: 12px;
+    padding: 6px;
     margin: 6px 0;
-    background: white;
-    border: 1px solid #e0e0e0;
     border-radius: 6px;
     cursor: pointer;
     display: flex;
@@ -721,14 +814,10 @@ button {
 
 .session-item:hover {
     background: #f0f0f0;
-    border-color: #2196F3;
-    box-shadow: 0 2px 8px rgba(33, 150, 243, 0.15);
 }
 
 .session-item.active {
     background: #e3f2fd;
-    border-color: #2196F3;
-    border-left: 4px solid #2196F3;
 }
 
 .session-item-info {
@@ -784,4 +873,153 @@ button {
 
 #sessions-list::-webkit-scrollbar-thumb:hover {
     background: #999;
+}
+
+/* ================= 思考过程样式 ================= */
+
+.thinking-process {
+  background-color: #f8f9fa;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  font-size: 0.9em;
+  color: #555;
+  border: 1px solid #e1e4e8;
+}
+
+.thinking-title {
+  cursor: pointer;
+  font-weight: 600;
+  outline: none;
+  list-style: none;
+  color: #5a6a7a;
+  user-select: none;
+}
+
+.thinking-title::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-title::before {
+  content: '▶ ';
+  font-size: 0.8em;
+}
+
+.thinking-process[open] .thinking-title::before {
+  content: '▼ ';
+}
+
+.thinking-content-area {
+  margin-top: 10px;
+  border-top: 1px solid #e1e4e8;
+  padding-top: 10px;
+}
+
+/* 单个思考块样式 */
+.thinking-block {
+  background: #fff;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.thinking-block:last-child {
+  margin-bottom: 0;
+}
+
+.thinking-block-header {
+  font-weight: 600;
+  font-size: 0.85em;
+  color: #6a737d;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.thinking-block.in-progress .thinking-block-header::after {
+  content: '';
+  width: 8px;
+  height: 8px;
+  background: #f59e0b;
+  border-radius: 50%;
+  animation: pulse 1.5s infinite;
+}
+
+.thinking-block.completed .thinking-block-header::before {
+  content: '✓';
+  color: #22c55e;
+  font-weight: bold;
+}
+
+.thinking-block-content {
+  white-space: pre-wrap;
+  line-height: 1.6;
+  color: #666;
+  font-size: 0.92em;
+}
+
+/* 思考框内的工具调用包装器 */
+.thinking-tool-wrapper {
+  margin: 10px 0;
+}
+
+.thinking-tool-wrapper .tool-call-card {
+  margin: 0;
+  background: #fff;
+  border: 1px solid #d1d5db;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* 兼容旧版单个思考内容样式 */
+.thinking-content {
+  margin-top: 8px;
+  white-space: pre-wrap;
+  border-top: 1px solid #ddd;
+  padding-top: 8px;
+  line-height: 1.5;
+}
+
+/* 历史消息加载指示器 */
+.history-loading-indicator {
+  text-align: center;
+  padding: 12px;
+  color: #888;
+  font-size: 14px;
+  background: linear-gradient(to bottom, rgba(240, 242, 245, 0.9), transparent);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.history-loading-indicator::before {
+  content: '';
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid #ddd;
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 无更多历史消息提示 */
+.history-end-indicator {
+  text-align: center;
+  padding: 10px;
+  color: #aaa;
+  font-size: 12px;
+  border-bottom: 1px dashed #e0e0e0;
+  margin-bottom: 10px;
 }

@@ -1,99 +1,66 @@
-import hashlib
 import asyncio
-import time
-from typing import Dict, Any, Optional, List, Tuple
-from agent_server.agents import LangGraphAgent
-from agent_server import storage
+from typing import Dict, Any, Optional, Tuple, AsyncGenerator
+from agent_server.agents import LangGraphAgent, create_base_agent
+from agent_server.llm import create_agent_llm
+from agent_server.prompts import build_system_prompt
+from mcp_server.mcp_manager import McpToolService
+from db import storage
+from config import setup_logging, get_logger
 
+# 公共模块导入
+from common.enums import MessageType, SenderType, EndReason
+from common.schemas import AgentMessage
+
+logger = get_logger(__name__)
 
 class AgentManager:
     """
-    AgentManager两层架构：
+    AgentManager 负责管理 Agent 的创建和会话交互。
     
-    第一层（数据库存储）：session_id -> config_json
-    - 持久化存储 agent 配置（工具、模型、System Prompt）
-    - 目的：服务器重启后恢复配置
-    
-    第二层（内存缓存）：config_hash -> CompiledAgent
-    - 缓存已初始化的 Agent 实例
-    - TTL 机制：10 分钟无活动则销毁
-    - 目的：避免重复初始化，支持配置复用
+    主要功能：
+    - 根据 session_id 和 mcp_list 创建 Agent 实例
+    - 将 agent 配置持久化到数据库
+    - 管理会话的停止事件
     """
 
-    def __init__(self, checkpointer=None, ttl_seconds: int = 600):
+    def __init__(self, checkpointer=None):
         """
         初始化 AgentManager
         
         Args:
             checkpointer: LangGraph checkpointer 实例
                          如果不提供，各 Agent 将使用内存保存器
-            ttl_seconds: Agent 实例的生存时间（秒），默认 600 秒（10 分钟）
         """
         self.checkpointer = checkpointer
-        self.ttl_seconds = ttl_seconds
         
-        # 内存缓存：config_hash -> (agent_instance, last_access_time, ttl_task)
-        self._agent_cache: Dict[str, Tuple[LangGraphAgent, float, Optional[asyncio.Task]]] = {}
-        
-        # 会话路由：session_id -> config_hash，支持一个 ws 处理多个 session，每条消息根据 session_id 动态获取对应的 agent
-        self._session_to_config_hash: Dict[str, str] = {}
+        # session_id -> asyncio.Task
+        self._active_tasks: Dict[str, asyncio.Task] = {}
+        # session_id -> asyncio.Event
+        self._stop_events: Dict[str, asyncio.Event] = {}
 
-        # 初始化锁：用于防止多个请求同时初始化同一个配置的 Agent
-        self._init_locks: Dict[str, asyncio.Lock] = {}
-
-    def _compute_config_hash(self, config: Dict[str, Any]) -> str:
-        """计算配置的哈希值，用于内存缓存复用"""
-        import json
-        config_str = json.dumps(config, sort_keys=True)
-        # 使用 MD5 哈希算法，相同配置必然得到相同哈希值，内存复用：如果有 100 个用户都使用了默认的工具配置，
-        # 他们的 config_hash 会完全一样。AgentManager 只需要在内存里维持 1 个 LangGraphAgent 实例。
-        return hashlib.md5(config_str.encode()).hexdigest()
-
-    def _reset_ttl(self, config_hash: str):
-        """重置 Agent 实例的 TTL 计时器"""
-        if config_hash not in self._agent_cache:
-            return
-
-        agent, _, old_task = self._agent_cache[config_hash]
-        
-        # 取消旧的 TTL 任务
-        if old_task:
-            old_task.cancel()
-
-        # 创建新的 TTL 任务
-        new_task = asyncio.create_task(self._ttl_handler(config_hash))
-        
-        # 更新缓存的最后访问时间和任务
-        self._agent_cache[config_hash] = (agent, time.time(), new_task)
-
-    async def _ttl_handler(self, config_hash: str):
-        """处理 Agent 实例的 TTL，超时后销毁"""
-        try:
-            await asyncio.sleep(self.ttl_seconds)
-            
-            # TTL 超时，从缓存中移除
-            if config_hash in self._agent_cache:
-                del self._agent_cache[config_hash]
-                # 清理对应的锁对象以释放内存
-                self._init_locks.pop(config_hash, None)
-                print(f"[TTL] Agent实例 {config_hash} 已过期回收")
-        except asyncio.CancelledError:
-            # TTL 被重置，正常退出
-            pass
-
-    async def get_or_create_agent(
+    async def create_agent(
         self, 
         user_id: str, 
-        session_id: str
+        user_token: str,
+        session_id: str,
+        mcp_list: list = None
     ) -> Tuple[Optional[LangGraphAgent], Optional[str]]:
         """
-        初始化 agent，建立 session_id ↔ config_hash 映射
+        创建新的 Agent 实例，并将配置存储到数据库。
         
-        从数据库查询配置，初始化 Agent，建立会话与配置的对应关系
+        每次调用都会创建新的 Agent 实例（不使用缓存）。
         
         Args:
             user_id: 用户 ID
+            user_token: 用户 Token
             session_id: 会话 ID
+            mcp_list: MCP 工具配置列表，格式为：
+                [{
+                    "name": "AI空间搜索",
+                    "type": "http",
+                    "url": "http://10.57.83.61:6002/mcp",
+                    "id": "xxx-xxx-xxx"
+                }, ...]
             
         Returns:
             (agent_instance, error_message)
@@ -101,112 +68,188 @@ class AgentManager:
             失败：(None, error_msg)
         """
 
+        # 初始化 MCP 工具列表
+        if mcp_list is None:
+            mcp_list = []
+        # 初始化模型
+        model = create_agent_llm()
+        # 构建系统提示词
+        system_prompt = build_system_prompt(user_id, user_token)
+            
+        mcp_service = McpToolService()
+
         try:
-            # 1. 先查路由表获取 config_hash
-            config_hash = self._session_to_config_hash.get(session_id)
-            
-            # 2. 如果没缓存或缓存已失效，则需要进入初始化流程
-            if not config_hash or config_hash not in self._agent_cache:
-                config = await storage.get_agent_config(user_id, session_id)
-                if not config:
-                    config = {"tools": ["mcp"]} # 默认配置
-                    await storage.save_agent_config(user_id, session_id, config)
-                
-                config_hash = self._compute_config_hash(config)
-                self._session_to_config_hash[session_id] = config_hash
+            # 存储配置到数据库
+            if mcp_list:
+                db_config = {
+                    "selected_mcp_ids": [item.get("id") for item in mcp_list if item.get("id")]
+                }
+                await storage.save_agent_config(session_id, 'nebulacoder-pro-7.0', db_config)
+                logger.info(f"[AgentManager] 已保存 Agent 配置到数据库, session_id: {session_id}")
 
-            # 3. 检查 Agent 实例是否已经在缓存中
-            if config_hash in self._agent_cache:
-                self._reset_ttl(config_hash)
-                return self._agent_cache[config_hash][0], None
+            # 获取 MCP 工具
+            mcp_tools = []
+            if mcp_list:
+                try:
+                    mcp_tools = await mcp_service.get_mcp_toollist(mcp_list)
+                    logger.info(f"[AgentManager] 成功加载 {len(mcp_tools)} 个 MCP 工具")
+                except Exception as e:
+                    logger.error(f"[AgentManager] 加载 MCP 工具失败: {e}")
 
-            # 使用异步锁防止并发初始化 ---
-            if config_hash not in self._init_locks:
-                self._init_locks[config_hash] = asyncio.Lock()
+            # 创建 Agent 实例
+            logger.info(f"[AgentManager] 正在创建新 Agent 实例, session_id: {session_id}")
+
+            agent = create_base_agent(
+                model=model,
+                system_prompt=system_prompt,
+                tools=mcp_tools,
+                checkpointer=self.checkpointer
+            )
             
-            async with self._init_locks[config_hash]:
-                # 再次检查（双检锁），防止等锁期间其他线程已完成初始化
-                if config_hash not in self._agent_cache:
-                    print(f"[AgentManager] 正在初始化新 Agent 实例: {config_hash}")
-                    agent = LangGraphAgent(checkpointer=self.checkpointer)
-                    await agent.initialize_from_config(config)
-                    
-                    self._agent_cache[config_hash] = (agent, time.time(), None)
-                    self._reset_ttl(config_hash)
-                
-            return self._agent_cache[config_hash][0], None
+            return agent, None
 
         except Exception as e:
-            return None, f"初始化 Agent 失败: {str(e)}"
+            import traceback
+            traceback.print_exc()
+            logger.error(f"[AgentManager] 创建 Agent 失败: {e}")
+            return None, f"创建 Agent 失败: {str(e)}"
+
+    def _create_agent_config(self, user_id: str, user_token: str, session_id: str) -> dict:
+        """创建 agent 配置"""
+        thread_id = f"{user_id}#{session_id}"
+       
+        configurable = {
+            "thread_id": thread_id,
+        }
+
+        return {
+            "configurable": configurable
+        }
+
+    async def _save_message_to_db(self, message: Dict[str, Any], user_id: str):
+        """将消息保存到数据库"""
+        session_id = message.get("session_id")
+        sender = message.get("sender")
+        msg_type = message.get("type")
+        content = message.get("content")
+        
+        # llm_text_final 在存库时转为 chat 类型
+        if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
+            msg_type = MessageType.CHAT.value
+        
+        try:
+            db_content = content
+            # 确保存库内容为 dict
+            if not isinstance(db_content, dict):
+                db_content = {"text": str(content)}
+            
+            await storage.add_history_record(
+                session_id=session_id,
+                user_id=user_id,
+                sender=sender,
+                msg_type=msg_type,
+                content=db_content
+            )
+        except Exception as e:
+            logger.error(f">>> [History Error] 保存失败: {e}")
+
+    async def get_agent_stream(
+        self, 
+        user_id: str, 
+        user_token: str, 
+        session_id: str, 
+        input_data: dict,
+        mcp_list: list = None
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        获取 Agent 流式输出的异步生成器。
+        
+        该方法负责：
+        1. 初始化 Agent（调用 get_or_create_agent）
+        2. 创建 stop_event 并存入 self._stop_events
+        3. 构造 config
+        4. 消费 Agent 的原始输出
+        5. 在 yield 消息之前，检查 save 字段并保存到数据库
+        
+        Args:
+            user_id: 用户 ID
+            user_token: 用户 Token
+            session_id: 会话 ID
+            input_data: 输入数据
+            mcp_list: MCP 工具配置列表
+            
+        Yields:
+            标准化的消息字典（不含 save 字段，直接可发送给前端）
+        """
+        if mcp_list is None:
+            mcp_list = []
+            
+        stop_event = asyncio.Event()
+        self._stop_events[session_id] = stop_event
+        
+        try:
+            # 1. 创建 Agent
+            agent, init_err = await self.create_agent(user_id, user_token, session_id, mcp_list)
+            
+            if init_err:
+                yield AgentMessage.error(session_id=session_id, content=init_err).to_frontend_dict()
+                yield AgentMessage.end(session_id=session_id, reason=EndReason.STOP).to_frontend_dict()
+                return
+            
+            # 2. 构造 config
+            config = self._create_agent_config(user_id, user_token, session_id)
+            
+            # 3. 消费 Agent 的原始输出
+            async for message in agent.run(
+                input_data=input_data,
+                config=config,
+                session_id=session_id,
+                stop_event=stop_event
+            ):
+                # 4. 检查 save 字段，若为 True 则保存到数据库
+                should_save = message.pop("save", False)
+                if should_save:
+                    await self._save_message_to_db(message, user_id)
+                
+                # llm_text_final 类型仅存储，不推送给前端
+                msg_type = message.get("type")
+                if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
+                    continue
+                if msg_type == MessageType.REASONING_FINAL or msg_type == MessageType.REASONING_FINAL.value:
+                    continue
+                
+                # 5. yield 消息给外部（WebSocket 或 API）
+                yield message
+                
+        except asyncio.CancelledError:
+            logger.info(f"[AgentManager] 会话 {session_id} 被取消")
+            yield AgentMessage.end(session_id=session_id, reason=EndReason.STOP).to_frontend_dict()
+        except Exception as e:
+            logger.error(f"[AgentManager] 会话 {session_id} 出错: {e}")
+            yield AgentMessage.error(session_id=session_id, content=str(e)).to_frontend_dict()
+            yield AgentMessage.end(session_id=session_id, reason=EndReason.STOP).to_frontend_dict()
+        finally:
+            # 确保清理 stop_event
+            self._stop_events.pop(session_id, None)
+            self._active_tasks.pop(session_id, None)
+
+    def stop_task(self, session_id: str):
+        """触发软停止信号"""
+        # 触发软停止信号（event机制）
+        if session_id in self._stop_events:
+            self._stop_events[session_id].set()
+        # 取消正在运行的任务
+        if session_id in self._active_tasks:
+            self._active_tasks[session_id].cancel()
 
     def disconnect_connection(self, session_id: str = None):
         """
-        断开会话连接时调用
-        
-        移除 session_id ↔ config_hash 的映射
-        Agent 实例留在内存缓存中（TTL 将决定其生存时间）
+        断开会话连接时调用，清理相关资源。
         
         Args:
-            session_id: 会话 ID。如果为 None，则清理所有会话映射
+            session_id: 会话 ID
         """
-        if session_id and session_id in self._session_to_config_hash:
-            del self._session_to_config_hash[session_id]
-            print(f"[AgentManager] 会话 {session_id} 的路由已清理")
-
-    # ==================== 数据库层操作 ====================
-
-    @staticmethod
-    async def create_agent_config(user_id: str, session_id: str, config: Dict[str, Any]) -> bool:
-        """创建 agent 配置"""
-        try:
-            await storage.save_agent_config(user_id, session_id, config)
-            return True
-        except Exception:
-            return False
-
-    @staticmethod
-    async def get_agent_config(user_id: str, session_id: str) -> Optional[Dict[str, Any]]:
-        """获取 agent 配置"""
-        try:
-            return await storage.get_agent_config(user_id, session_id)
-        except Exception:
-            return None
-
-    @staticmethod
-    async def update_agent_config(user_id: str, session_id: str, config: Dict[str, Any]) -> bool:
-        """更新 agent 配置"""
-        try:
-            existing = await storage.get_agent_config(user_id, session_id)
-            if existing is None:
-                return False
-            await storage.save_agent_config(user_id, session_id, config)
-            return True
-        except Exception:
-            return False
-
-    @staticmethod
-    async def delete_agent_config(user_id: str, session_id: str) -> bool:
-        """删除 agent 配置"""
-        try:
-            return await storage.delete_agent_config(user_id, session_id)
-        except Exception:
-            return False
-
-    @staticmethod
-    async def get_user_agent_configs(user_id: str) -> List[Dict[str, Any]]:
-        """获取用户的所有 agent 配置"""
-        try:
-            return await storage.get_user_agent_configs(user_id)
-        except Exception:
-            return []
-
-    # ==================== 缓存状态查询 ====================
-
-    def get_cache_stats(self) -> Dict[str, Any]:
-        """获取内存缓存的统计信息"""
-        return {
-            "cached_agents": len(self._agent_cache),
-            "active_sessions": len(self._session_to_config_hash),
-            "ttl_seconds": self.ttl_seconds,
-            "config_hashes": list(self._agent_cache.keys())
-        }
+        if session_id:
+            self._stop_events.pop(session_id, None)
+            self._active_tasks.pop(session_id, None)
+            logger.info(f"[AgentManager] 会话 {session_id} 已断开连接")
