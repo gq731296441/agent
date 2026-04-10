@@ -1,6 +1,8 @@
 import asyncio
+import uuid
 from typing import Dict, Any, Optional, Tuple, AsyncGenerator
 from agent_server.agents import LangGraphAgent, create_base_agent
+from agent_server.agent_runner import run_agent
 from agent_server.llm import create_agent_llm
 from agent_server.prompts import build_system_prompt
 from mcp_server.mcp_manager import McpToolService
@@ -23,15 +25,18 @@ class AgentManager:
     - 管理会话的停止事件
     """
 
-    def __init__(self, checkpointer=None):
+    def __init__(self, checkpointer=None, store=None):
         """
         初始化 AgentManager
         
         Args:
             checkpointer: LangGraph checkpointer 实例
                          如果不提供，各 Agent 将使用内存保存器
+            store: LangGraph BaseStore 实例（如 InMemoryStore），
+                   用于跨请求持久化中间件状态（如熔断器计数）
         """
         self.checkpointer = checkpointer
+        self.store = store
         
         # session_id -> asyncio.Task
         self._active_tasks: Dict[str, asyncio.Task] = {}
@@ -80,12 +85,14 @@ class AgentManager:
 
         try:
             # 存储配置到数据库
-            if mcp_list:
-                db_config = {
-                    "selected_mcp_ids": [item.get("id") for item in mcp_list if item.get("id")]
-                }
-                await storage.save_agent_config(session_id, 'nebulacoder-pro-7.0', db_config)
-                logger.info(f"[AgentManager] 已保存 Agent 配置到数据库, session_id: {session_id}")
+            db_config = {
+                "selected_mcp_ids": [item.get("id") for item in mcp_list if item.get("id")]
+            }
+            await storage.save_agent_config(session_id, 'nebulacoder-v8', db_config)
+            logger.info(
+                f"[AgentManager] 已保存 Agent 配置到数据库, session_id: {session_id}, "
+                f"mcp工具数: {len(db_config['selected_mcp_ids'])}"
+            )
 
             # 获取 MCP 工具
             mcp_tools = []
@@ -103,7 +110,8 @@ class AgentManager:
                 model=model,
                 system_prompt=system_prompt,
                 tools=mcp_tools,
-                checkpointer=self.checkpointer
+                checkpointer=self.checkpointer,
+                store=self.store,
             )
             
             return agent, None
@@ -122,8 +130,15 @@ class AgentManager:
             "thread_id": thread_id,
         }
 
+        metadata = {
+            # 用于Langfuse的session识别
+            "user_id": user_id,
+            "session_id": session_id
+        }
+
         return {
-            "configurable": configurable
+            "configurable": configurable,
+            "metadata": metadata
         }
 
     async def _save_message_to_db(self, message: Dict[str, Any], user_id: str):
@@ -132,6 +147,9 @@ class AgentManager:
         sender = message.get("sender")
         msg_type = message.get("type")
         content = message.get("content")
+        conversation_id = message.get("conversation_id")
+        group_id = message.get("group_id", 0)
+        step_index = message.get("step_index", 0)
         
         # llm_text_final 在存库时转为 chat 类型
         if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
@@ -148,7 +166,10 @@ class AgentManager:
                 user_id=user_id,
                 sender=sender,
                 msg_type=msg_type,
-                content=db_content
+                content=db_content,
+                conversation_id=conversation_id,
+                group_id=group_id,
+                step_index=step_index
             )
         except Exception as e:
             logger.error(f">>> [History Error] 保存失败: {e}")
@@ -199,23 +220,31 @@ class AgentManager:
             # 2. 构造 config
             config = self._create_agent_config(user_id, user_token, session_id)
             
-            # 3. 消费 Agent 的原始输出
-            async for message in agent.run(
+            # 3. 生成本轮会话的 conversation_id
+            conversation_id = str(uuid.uuid4())
+            
+            # 4. 消费 Agent 的原始输出
+            async for message in run_agent(
+                agent=agent,
                 input_data=input_data,
                 config=config,
                 session_id=session_id,
-                stop_event=stop_event
+                stop_event=stop_event,
+                conversation_id=conversation_id
             ):
                 # 4. 检查 save 字段，若为 True 则保存到数据库
                 should_save = message.pop("save", False)
                 if should_save:
                     await self._save_message_to_db(message, user_id)
                 
+                # 用户消息仅存储，不推送给前端
+                msg_sender = message.get("sender")
+                if msg_sender == SenderType.USER or msg_sender == SenderType.USER.value:
+                    continue
+                
                 # llm_text_final 类型仅存储，不推送给前端
                 msg_type = message.get("type")
                 if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
-                    continue
-                if msg_type == MessageType.REASONING_FINAL or msg_type == MessageType.REASONING_FINAL.value:
                     continue
                 
                 # 5. yield 消息给外部（WebSocket 或 API）

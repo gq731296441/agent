@@ -61,12 +61,14 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
         return gen_chunk
 
 llm_config = {
-    "model": "nebulacoder-cot-v7.0", # nebulacoder-lite-v7.0, nebulacoder-v6.0, nebulacoder-cot-v6.0, nebulacoder-v7.0, nebulacoder-cot-v7.0都可以
+    "model": "nebulacoder-cot-v8.0", # nebulacoder-v8.0
     "base_url":"https://nebulacoder-maas.zte.com.cn/v1",
     "api_key": "508d5fbe-df85-4309-b79f-8c96e3f93732",
+
     # "model": "Qwen3-235B-A22B",
     # "base_url":"https://maas-apigateway.dt.zte.com.cn/model/qwen3-235b-a22b/v1",
     # "api_key": "hy9uux4119wwmcp7gw979k2taklaek7p",
+
     "temperature": 0.1,
     "streaming": True,
     # "model_kwargs": {"stream_options": {"include_usage": True}},
@@ -80,10 +82,6 @@ llm_config = {
 }
 
 def create_agent_llm():
-    # logger.info(
-    #     f"🤖 创建聊天模型: {llm_config} "
-    #     f"(temperature={temperature}, streaming={streaming})"
-    # )
     try:
         llm = ChatOpenAIWithReasoning(**llm_config)
         logger.debug(f"✅ 模型创建成功")
@@ -95,7 +93,9 @@ def create_agent_llm():
 def create_tool_judge_llm():
     tool_judge_llm_config = llm_config.copy()
     tool_judge_llm_config.update({
-        "model": "nebulacoder-lite-v7.0",
+        "model": "nebulacoder-v8.0",
+        "base_url":"https://nebulacoder-maas.zte.com.cn/v1",
+        "api_key": "508d5fbe-df85-4309-b79f-8c96e3f93732",
         "temperature": 0.0,
         "streaming": False,
     })
@@ -106,3 +106,55 @@ def create_tool_judge_llm():
     except Exception as e:
         logger.error(f"❌ 工具结果判断模型创建失败, 错误信息: {e}")
         raise
+
+def create_summary_llm():
+    summary_llm_config = llm_config.copy()
+    summary_llm_config.update({
+        "model": "nebulacoder-v8.0",
+        "base_url":"https://nebulacoder-maas.zte.com.cn/v1",
+        "api_key": "508d5fbe-df85-4309-b79f-8c96e3f93732",
+        "temperature": 0.1,
+        "streaming": False,
+        "max_tokens": 1500,
+    })
+    try:
+        llm = ChatOpenAI(**summary_llm_config)
+        logger.debug(f"✅ 历史总结模型创建成功")
+        return llm
+    except Exception as e:
+        logger.error(f"❌ 历史总结模型创建失败, 错误信息: {e}")
+        raise
+
+def create_title_llm():
+    title_llm_config = llm_config.copy()
+    title_llm_config.update({
+        "model": "nebulacoder-v8.0",
+        "base_url":"https://nebulacoder-maas.zte.com.cn/v1",
+        "api_key": "508d5fbe-df85-4309-b79f-8c96e3f93732",
+        "temperature": 0.1,
+        "streaming": False,
+        "max_tokens": 20,
+    })
+    try:
+        llm = ChatOpenAI(**title_llm_config)
+        logger.debug(f"✅ 标题生成模型创建成功")
+        return llm
+    except Exception as e:
+        logger.error(f"❌ 标题生成模型创建失败, 错误信息: {e}")
+        raise
+
+if __name__ == "__main__":
+    llm = create_agent_llm()
+    try:
+        response = llm.stream("测试问题")
+        for chunk in response:
+            print(chunk.content, end="", flush=True)
+    except Exception as e:
+        print(f"\n❌ 错误类型：{type(e).__name__}")
+        print(f"❌ 错误信息：{str(e)}")
+        print(f"\n📋 完整堆栈:")
+        traceback.print_exc()
+        
+        # 检查是否有底层异常
+        if hasattr(e, '__cause__') and e.__cause__:
+            print(f"\n🔍 根本原因：{type(e.__cause__).__name__}: {e.__cause__}")

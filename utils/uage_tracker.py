@@ -30,9 +30,9 @@ class TokenUsage:
 
 # 模型的 token 限制
 MODEL_LIMITS = {
-    "nebulacoder-lite-v7.0": 64000,
-    "nebulacoder-pro-7.0": 128000,
-    "Qwen3-235B-A22B": 128000,
+    # "nebulacoder-lite-v7.0": 64000,
+    # "nebulacoder-v8": 128000,
+    "Qwen3-235B-A22B": 32768,
 }
 
 

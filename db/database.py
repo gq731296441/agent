@@ -60,7 +60,7 @@ class DatabaseManager:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS agent_configs (
                     session_id UUID PRIMARY KEY REFERENCES user_sessions(session_id) ON DELETE CASCADE,
-                    model_name TEXT DEFAULT 'nebulacoder-pro-7.0',
+                    model_name TEXT DEFAULT 'nebulacoder-v8',
                     config JSONB, -- 包含 {"selected_mcp_ids": []}
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
                 );
@@ -76,10 +76,50 @@ class DatabaseManager:
                     type TEXT NOT NULL,
                     content JSONB NOT NULL,
                     tool_call_id TEXT,
+                    conversation_id UUID,
+                    group_id INTEGER DEFAULT 0,
+                    step_index INTEGER DEFAULT 0,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
                 );
                 CREATE INDEX IF NOT EXISTS idx_chat_history_session_time 
                 ON chat_history(session_id, created_at ASC);
+            """)
+
+            # 为已有表添加新列（已存在则忽略），必须在创建索引之前执行
+            for col_sql in [
+                "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS conversation_id UUID",
+                "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS group_id INTEGER DEFAULT 0",
+                "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS step_index INTEGER DEFAULT 0",
+            ]:
+                try:
+                    await conn.execute(col_sql)
+                except Exception:
+                    pass  # 列已存在则忽略
+
+            # 在确保列存在后，再创建依赖新列的索引
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_history_conversation 
+                ON chat_history(conversation_id);
+            """)
+
+            # 创建 measure schema 及工具调用记录表
+            await conn.execute("CREATE SCHEMA IF NOT EXISTS measure;")
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS measure.tool_call_logs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    session_id UUID NOT NULL,
+                    user_id TEXT NOT NULL,
+                    tool_call_id TEXT,
+                    tool_name TEXT NOT NULL,
+                    tool_args JSONB,
+                    tool_result TEXT,
+                    status TEXT,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+                );
+                CREATE INDEX IF NOT EXISTS idx_tool_call_logs_session
+                ON measure.tool_call_logs(session_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_tool_call_logs_user
+                ON measure.tool_call_logs(user_id, created_at DESC);
             """)
 
     async def close(self):

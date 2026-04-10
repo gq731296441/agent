@@ -20,6 +20,9 @@ class AgentMessage(BaseModel):
     session_id: str = Field(..., description="会话 ID")
     content: Any = Field(..., description="消息内容，可以是字符串或字典")
     save: bool = Field(default=True, description="是否需要保存到数据库")
+    conversation_id: Optional[str] = Field(default=None, description="会话轮次ID，同一轮用户提问及所有回复共享")
+    group_id: int = Field(default=0, description="分组ID，同一处理阶段（模型推理/工具执行）的消息共享")
+    step_index: int = Field(default=0, description="步骤序号，在一轮会话中的全局顺序")
     
     class Config:
         use_enum_values = True  # 序列化时使用枚举值而非枚举对象

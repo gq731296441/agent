@@ -42,8 +42,10 @@ McpToolsResponse = ListApiResponse[McpToolItem]
 MCP_TOOLS_API_URL = "https://aip.zte.com.cn/trial/cmtool/api/v1/component/mcp/mine"
 
 
-@router.get("/tools/{user_id}", response_model=McpToolsResponse, summary="获取用户的MCP工具列表")
-async def get_mcp_tools(user_id: str):
+@router.get("/tools", response_model=McpToolsResponse, summary="获取用户的MCP工具列表")
+async def get_mcp_tools(
+    user_id: str = Query(..., description="用户ID")
+):
     """
     获取用户的 MCP 工具列表，并验证每个工具的可用状态。
     

@@ -62,7 +62,7 @@ class Config(BaseSettings):
     # ==================== 模型配置 ====================
 
     model_name: str = Field(
-        default="nebulacoder-pro-7.0",
+        default="Qwen3-235B-A22B",
         description="默认模型名称"
     )
 
@@ -75,12 +75,12 @@ class Config(BaseSettings):
     # ==================== webocket 超时配置 ====================
 
     HEARTBEAT_INTERVAL: int = Field(
-        default=10,
+        default=30,
         description="WebSocket 心跳间隔（秒）"
     )
 
     HEARTBEAT_TIMEOUT: int = Field(
-        default=60,
+        default=600,
         description="WebSocket 心跳超时（秒）"
     )
 

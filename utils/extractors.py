@@ -1,400 +1,395 @@
 """
-数据提取器
-从 LangChain 的 Agent 输出中提取结构化数据
-用于前端 AI Elements 组件的渲染
+流式数据提取器
+从 LangChain/LangGraph 的 Agent 流式输出中提取结构化数据
+
+主要组件：
+- ThinkTagParser: <think> 标签流式解析器，分离推理内容和正式回答
+- ToolCallAccumulator: 工具调用累积器，处理流式工具调用 chunk 的合并与解析
+- extract_reasoning_from_chunk: 从 message chunk 的 additional_kwargs 提取推理内容
+- extract_tool_result: 从工具执行节点提取工具结果
 """
 
-from typing import Optional, Dict, List, Any
-import re
-from langchain_core.messages import AIMessage, ToolMessage, BaseMessage
+from typing import Optional, Dict, List, Any, Tuple
+import json
+from json_repair import repair_json
 from config import get_logger
 
 logger = get_logger(__name__)
 
 
-def extract_reasoning(message: BaseMessage) -> Optional[Dict[str, Any]]:
+# ==================== 推理内容提取 ====================
+
+class ThinkTagParser:
     """
-    提取推理过程
+    <think> 标签流式解析器
     
-    Args:
-        message: LangChain 消息对象
+    用于从 LLM 流式输出的 content 中分离 <think>...</think> 思考内容和正式回答内容。
+    支持标签跨多个流式 chunk 的情况。
+    
+    状态机：
+        init       -> 检测中，缓冲内容判断是否以 <think> 开头
+        in_think   -> 在 <think> 内，内容作为推理文本累积
+        post_think -> </think> 之后，内容作为正式回答
+        no_think   -> 无 <think> 标签，所有 content 视为正式回答
+    
+    使用示例：
+        parser = ThinkTagParser()
         
-    Returns:
-        推理信息字典，包含 content 和 duration
-    """
-    if not isinstance(message, AIMessage):
-        return None
-    
-    # 检查是否有推理相关的响应元数据
-    response_metadata = getattr(message, "response_metadata", {})
-    
-    # OpenAI o1 模型的推理
-    if "reasoning" in response_metadata:
-        reasoning_data = response_metadata["reasoning"]
-        return {
-            "content": reasoning_data.get("content", ""),
-            "duration": reasoning_data.get("duration_ms", 0) / 1000,  # 转换为秒
-        }
-    
-    # 检查消息内容中是否包含 <thinking> 标签
-    content = message.content
-    if isinstance(content, str):
-        thinking_match = re.search(r'<thinking>(.*?)</thinking>', content, re.DOTALL)
-        if thinking_match:
-            return {
-                "content": thinking_match.group(1).strip(),
-                "duration": 0,
-            }
-    
-    return None
-
-
-def extract_tool_calls(message: BaseMessage) -> List[Dict[str, Any]]:
-    """
-    提取工具调用信息
-    
-    Args:
-        message: LangChain 消息对象
+        # 每次重新进入 model 节点时重置
+        parser.reset()
         
-    Returns:
-        工具调用列表
-    """
-    if not isinstance(message, AIMessage):
-        return []
-    
-    # AIMessage 的 tool_calls 属性
-    tool_calls = getattr(message, "tool_calls", [])
-    
-    if not tool_calls:
-        return []
-    
-    result = []
-    for tool_call in tool_calls:
-        tool_info = {
-            "id": tool_call.get("id", ""),
-            "name": tool_call.get("name", ""),
-            "type": f"tool-call-{tool_call.get('name', 'unknown')}",
-            "state": "input-available",  # 初始状态
-            "parameters": tool_call.get("args", {}),
-            "result": None,
-            "error": None,
-        }
-        result.append(tool_info)
-    
-    logger.debug(f"🔧 提取到 {len(result)} 个工具调用")
-    return result
-
-
-def extract_tool_result(message: ToolMessage) -> Optional[Dict[str, Any]]:
-    """
-    提取工具执行结果
-    
-    Args:
-        message: ToolMessage 对象
+        # 如果检测到 additional_kwargs 中有 reasoning_content，禁用 think 解析
+        if reasoning_from_kwargs:
+            parser.disable()
         
-    Returns:
-        工具结果信息
-    """
-    if not isinstance(message, ToolMessage):
-        return None
-    
-    tool_call_id = getattr(message, "tool_call_id", "")
-    content = message.content
-    
-    # 检查是否有错误
-    is_error = getattr(message, "status", None) == "error"
-    
-    return {
-        "id": tool_call_id,
-        "state": "output-error" if is_error else "output-available",
-        "result": None if is_error else content,
-        "error": content if is_error else None,
-    }
-
-
-def extract_sources(message: BaseMessage, context: Optional[Dict] = None) -> List[Dict[str, str]]:
-    """
-    提取来源引用
-    
-    通常来自 RAG 检索的文档
-    
-    Args:
-        message: LangChain 消息对象
-        context: 额外上下文信息（如 RAG 检索结果）
+        # 处理每个 content chunk
+        reasoning, answer = parser.process_chunk(text_chunk)
         
-    Returns:
-        来源列表
-    """
-    sources = []
-    
-    # 从上下文中获取 RAG 来源
-    if context and "retrieved_docs" in context:
-        docs = context["retrieved_docs"]
-        for doc in docs:
-            source = {
-                "href": doc.get("metadata", {}).get("source", "#"),
-                "title": doc.get("metadata", {}).get("title", "Unknown Source"),
-            }
-            sources.append(source)
-    
-    # 从消息元数据中获取
-    if isinstance(message, AIMessage):
-        response_metadata = getattr(message, "response_metadata", {})
-        if "sources" in response_metadata:
-            sources.extend(response_metadata["sources"])
-    
-    logger.debug(f"📚 提取到 {len(sources)} 个来源")
-    return sources
-
-
-def extract_citations(content: str) -> List[Dict[str, Any]]:
-    """
-    从内容中提取引用标记
-    
-    解析 [1], [2] 等引用标记
-    
-    Args:
-        content: 消息内容
-        
-    Returns:
-        引用列表
-    """
-    citations = []
-    
-    # 查找所有 [数字] 格式的引用
-    pattern = r'\[(\d+)\]'
-    matches = re.finditer(pattern, content)
-    
-    for match in matches:
-        citation_num = int(match.group(1))
-        citations.append({
-            "index": citation_num,
-            "position": match.start(),
-            "text": match.group(0),
-        })
-    
-    return citations
-
-
-def extract_plan(message: BaseMessage) -> Optional[Dict[str, Any]]:
-    """
-    提取 AI 生成的计划
-    
-    适用于 DeepAgents 或 Workflow 模式
-    
-    Args:
-        message: LangChain 消息对象
-        
-    Returns:
-        计划信息
-    """
-    if not isinstance(message, AIMessage):
-        return None
-    
-    content = message.content
-    
-    # 尝试解析计划格式
-    # 常见格式: "## Plan\n1. xxx\n2. yyy\n3. zzz"
-    if not isinstance(content, str):
-        return None
-    
-    plan_match = re.search(
-        r'##?\s*(?:Plan|计划|步骤)\s*\n((?:\d+\.\s*.+\n?)+)',
-        content,
-        re.IGNORECASE | re.MULTILINE
-    )
-    
-    if not plan_match:
-        return None
-    
-    plan_text = plan_match.group(1)
-    steps = []
-    
-    # 解析步骤
-    for line in plan_text.split('\n'):
-        step_match = re.match(r'(\d+)\.\s*(.+)', line.strip())
-        if step_match:
-            steps.append({
-                "id": f"step-{step_match.group(1)}",
-                "title": step_match.group(2).strip(),
-                "status": "pending",
-            })
-    
-    if not steps:
-        return None
-    
-    return {
-        "title": "执行计划",
-        "description": f"共 {len(steps)} 个步骤",
-        "steps": steps,
-    }
-
-
-def extract_tasks(message: BaseMessage) -> List[Dict[str, Any]]:
-    """
-    提取任务列表
-    
-    从消息中解析任务相关内容
-    
-    Args:
-        message: LangChain 消息对象
-        
-    Returns:
-        任务列表
-    """
-    if not isinstance(message, AIMessage):
-        return []
-    
-    content = message.content
-    if not isinstance(content, str):
-        return []
-    
-    tasks = []
-    
-    # 解析任务列表格式
-    # 格式: "- [ ] xxx" 或 "- [x] xxx"
-    task_pattern = r'-\s*\[([ x])\]\s*(.+)'
-    
-    for match in re.finditer(task_pattern, content, re.MULTILINE):
-        is_completed = match.group(1).lower() == 'x'
-        task_title = match.group(2).strip()
-        
-        tasks.append({
-            "id": f"task-{len(tasks) + 1}",
-            "title": task_title,
-            "completed": is_completed,
-        })
-    
-    return tasks
-
-
-def extract_chain_of_thought(message: BaseMessage) -> Optional[Dict[str, Any]]:
-    """
-    提取思维链
-    
-    某些模型会输出逐步推理过程
-    
-    Args:
-        message: LangChain 消息对象
-        
-    Returns:
-        思维链信息
-    """
-    if not isinstance(message, AIMessage):
-        return None
-    
-    # 检查响应元数据
-    response_metadata = getattr(message, "response_metadata", {})
-    
-    if "chain_of_thought" in response_metadata:
-        cot_data = response_metadata["chain_of_thought"]
-        return {
-            "steps": cot_data.get("steps", [])
-        }
-    
-    # 尝试从内容中解析
-    content = message.content
-    if not isinstance(content, str):
-        return None
-    
-    # 查找 <step> 标签或数字序号
-    steps = []
-    
-    # 格式 1: <step>xxx</step>
-    step_matches = re.finditer(
-        r'<step(?:\s+id="([^"]+)")?>(.+?)</step>',
-        content,
-        re.DOTALL
-    )
-    
-    for idx, match in enumerate(step_matches):
-        step_id = match.group(1) or f"step-{idx + 1}"
-        step_content = match.group(2).strip()
-        
-        steps.append({
-            "id": step_id,
-            "label": f"Step {idx + 1}",
-            "description": step_content,
-            "status": "complete",
-        })
-    
-    if steps:
-        return {"steps": steps}
-    
-    return None
-
-
-def extract_queue_items(context: Optional[Dict] = None) -> List[Dict[str, Any]]:
-    """
-    提取队列项目
-    
-    通常从 workflow 或 agent 的执行上下文中获取
-    
-    Args:
-        context: 执行上下文
-        
-    Returns:
-        队列项目列表
-    """
-    if not context:
-        return []
-    
-    # 从上下文中提取队列信息
-    if "queue" in context:
-        return context["queue"]
-    
-    if "pending_tasks" in context:
-        tasks = context["pending_tasks"]
-        return [
-            {
-                "id": task.get("id", f"task-{idx}"),
-                "title": task.get("title", "Unknown Task"),
-                "status": task.get("status", "pending"),
-            }
-            for idx, task in enumerate(tasks)
-        ]
-    
-    return []
-
-
-class MessageExtractor:
-    """
-    消息提取器
-    
-    统一管理所有提取逻辑
+        # 节点切换或结束时刷新缓冲区
+        reasoning, answer = parser.flush()
     """
     
     def __init__(self):
-        self.context: Dict[str, Any] = {}
+        self.reset()
     
-    def set_context(self, context: Dict[str, Any]):
-        """设置额外上下文"""
-        self.context = context
+    def reset(self):
+        """重置解析状态（每次重新进入 model 节点时调用）"""
+        self._state = "init"
+        self._buffer = ""
+        self._post_think_strip = False  # 刚进入 post_think 时需要剥离前导换行
     
-    def extract_all(self, message: BaseMessage) -> Dict[str, Any]:
-        """
-        提取消息的所有结构化信息
+    def disable(self):
+        """禁用 <think> 解析（当检测到 additional_kwargs.reasoning_content 时调用）"""
+        self._state = "no_think"
+        self._buffer = ""
+        self._post_think_strip = False
+    
+    @property
+    def is_in_think(self) -> bool:
+        """是否在 <think> 块内"""
+        return self._state == "in_think"
+    
+    @property
+    def is_detecting(self) -> bool:
+        """是否仍在检测阶段"""
+        return self._state == "init"
+    
+    def process_chunk(self, text_chunk: str) -> Tuple[str, str]:
+        """处理内容 chunk，分离思考内容和正式回答内容。
         
         Args:
-            message: LangChain 消息对象
+            text_chunk: 流式输出的文本片段
             
         Returns:
-            包含所有提取信息的字典
+            (reasoning_part, answer_part) - 任一部分可能为空字符串
         """
-        extracted = {
-            "reasoning": extract_reasoning(message),
-            "tools": extract_tool_calls(message),
-            "sources": extract_sources(message, self.context),
-            "plan": extract_plan(message),
-            "tasks": extract_tasks(message),
-            "chainOfThought": extract_chain_of_thought(message),
-            "queue": extract_queue_items(self.context),
-        }
+        if self._state == "no_think":
+            return "", text_chunk
         
-        # 提取内容中的引用
-        if isinstance(message, AIMessage) and message.content:
-            extracted["citations"] = extract_citations(message.content)
+        if self._state == "post_think":
+            if self._post_think_strip:
+                text_chunk = text_chunk.lstrip("\n")
+                if not text_chunk:
+                    # 整个 chunk 都是换行，继续等待下一个 chunk
+                    return "", ""
+                # 遇到实际内容，停止剥离
+                self._post_think_strip = False
+            return "", text_chunk
         
-        # 移除空值
-        return {k: v for k, v in extracted.items() if v}
+        self._buffer += text_chunk
+        
+        if self._state == "init":
+            return self._process_init()
+        
+        if self._state == "in_think":
+            return self._process_in_think()
+        
+        return "", ""
+    
+    def flush(self) -> Tuple[str, str]:
+        """刷新缓冲区残留内容（节点切换或结束时调用）。
+        
+        Returns:
+            (reasoning_part, answer_part)
+        """
+        if not self._buffer:
+            return "", ""
+        
+        buf = self._buffer
+        self._buffer = ""
+        
+        if self._state == "in_think":
+            # 缓冲区内容属于推理（未闭合的 <think> 块）
+            return buf, ""
+        elif self._state == "init":
+            # 仍在检测阶段，视为普通文本
+            return "", buf
+        
+        return "", ""
+    
+    def _process_init(self) -> Tuple[str, str]:
+        """处理 init 状态：判断 content 是否以 <think> 开头"""
+        stripped = self._buffer.lstrip()
+        if stripped.startswith("<think>"):
+            # 检测到 <think> 标签，切换到 in_think 状态
+            self._state = "in_think"
+            tag_pos = self._buffer.find("<think>")
+            self._buffer = self._buffer[tag_pos + 7:]  # len("<think>") = 7
+            # 继续处理 in_think
+            return self._process_in_think()
+        elif stripped and not "<think>".startswith(stripped):
+            # 内容明确不以 <think> 开头
+            self._state = "no_think"
+            result = self._buffer
+            self._buffer = ""
+            return "", result
+        elif len(stripped) >= 7:
+            # 有足够字符但不是 <think>
+            self._state = "no_think"
+            result = self._buffer
+            self._buffer = ""
+            return "", result
+        else:
+            # 字符不够，继续缓冲等待判断
+            return "", ""
+    
+    def _process_in_think(self) -> Tuple[str, str]:
+        """处理 in_think 状态：寻找 </think> 闭合标签"""
+        close_idx = self._buffer.find("</think>")
+        if close_idx != -1:
+            # 找到 </think> 闭合标签
+            reasoning_part = self._buffer[:close_idx]
+            rest = self._buffer[close_idx + 8:]  # len("</think>") = 8
+            self._state = "post_think"
+            self._buffer = ""
+            self._post_think_strip = True  # 后续 chunk 继续剥离前导换行
+            rest = rest.lstrip("\n")
+            if not rest:
+                # </think> 后同一 chunk 内没有实际内容，等后续 chunk 继续剥离
+                return reasoning_part, ""
+            # 同一 chunk 已有实际内容，停止剥离
+            self._post_think_strip = False
+            return reasoning_part, rest
+        else:
+            # 尚未闭合，保留末尾可能的 </think> 部分匹配（最多 7 字符）
+            safe_len = max(0, len(self._buffer) - 7)
+            reasoning_part = self._buffer[:safe_len]
+            self._buffer = self._buffer[safe_len:]
+            return reasoning_part, ""
+
+
+def extract_reasoning_from_chunk(message_chunk) -> Optional[str]:
+    """从 message chunk 的 additional_kwargs 中提取推理内容。
+    
+    适用于模型通过 additional_kwargs.reasoning_content 返回推理内容的情况
+    （如 DeepSeek 等模型）。
+    
+    Args:
+        message_chunk: LangChain 流式消息 chunk
+        
+    Returns:
+        推理内容字符串，如果没有则返回 None
+    """
+    reasoning = message_chunk.additional_kwargs.get("reasoning_content")
+    return reasoning if reasoning else None
+
+
+# ==================== 工具调用提取 ====================
+
+class ToolCallAccumulator:
+    """
+    工具调用累积器
+    
+    处理 LLM 流式输出中的工具调用 chunk，将分散的 chunk 合并为完整的工具调用，
+    并在解析时自动过滤无效调用。
+    
+    功能：
+    - 累积流式工具调用 chunk（按 index 合并 name、args、id）
+    - 解析累积的工具调用参数（JSON 字符串 → dict）
+    - 过滤不完整的工具调用（缺少 name 或 id）
+    - 过滤不在已注册工具列表中的幻觉工具调用
+    - 检测并记录 invalid_tool_calls
+    
+    使用示例：
+        accumulator = ToolCallAccumulator(valid_tool_names={"工具A", "工具B"})
+        
+        # 累积每个 chunk
+        accumulator.accumulate_chunks(message_chunk.tool_call_chunks)
+        
+        # 解析并获取有效的工具调用
+        tool_calls = accumulator.parse_and_clear()
+        
+        # 检测 invalid_tool_calls
+        ToolCallAccumulator.check_invalid_tool_calls(message_chunk)
+    """
+    
+    def __init__(self, valid_tool_names: set = None):
+        """
+        Args:
+            valid_tool_names: 已注册的有效工具名称集合，用于过滤幻觉工具
+        """
+        self._accumulated: Dict[int, Dict[str, Any]] = {}
+        self._valid_tool_names = valid_tool_names or set()
+    
+    @property
+    def has_pending(self) -> bool:
+        """是否有待处理的累积工具调用"""
+        return bool(self._accumulated)
+    
+    def accumulate_chunk(self, tc_chunk: dict):
+        """累积一个工具调用 chunk。
+        
+        Args:
+            tc_chunk: 工具调用 chunk，包含 index, name, args, id 字段
+        """
+        try:
+            index = tc_chunk.get("index")
+            if index is None:
+                logger.warning(f"【Extractor】工具调用 chunk 缺少 index，已跳过: {tc_chunk}")
+                return
+            
+            if index not in self._accumulated:
+                self._accumulated[index] = {
+                    "name": tc_chunk.get("name"),
+                    "args": tc_chunk.get("args") or "",
+                    "id": tc_chunk.get("id")
+                }
+            else:
+                # 合并
+                if tc_chunk.get("name"):
+                    self._accumulated[index]["name"] = tc_chunk.get("name")
+                if tc_chunk.get("id"):
+                    self._accumulated[index]["id"] = tc_chunk.get("id")
+                if tc_chunk.get("args"):
+                    self._accumulated[index]["args"] += tc_chunk.get("args")
+        except Exception as e:
+            logger.error(f"【Extractor】累积工具调用参数异常: {e}, chunk: {tc_chunk}, 已跳过")
+    
+    def accumulate_chunks(self, tc_chunks: list):
+        """批量累积工具调用 chunks。
+        
+        Args:
+            tc_chunks: 工具调用 chunk 列表
+        """
+        for tc_chunk in tc_chunks:
+            self.accumulate_chunk(tc_chunk)
+    
+    def parse_and_clear(self) -> List[Dict[str, Any]]:
+        """解析所有累积的工具调用并清空缓冲区。
+        
+        自动过滤：
+        1. 不完整（缺少 name 或 id）的无效工具调用
+        2. 不在已注册工具列表中的幻觉工具调用
+        
+        Returns:
+            工具调用数据列表，每项包含 tool_name, args, tool_call_id
+        """
+        if not self._accumulated:
+            return []
+        
+        result = []
+        for idx, tc in self._accumulated.items():
+            try:
+                tool_name = tc.get("name")
+                args_str = tc.get("args", "{}")
+                tool_id = tc.get("id")
+                
+                # 过滤掉不完整的工具调用（LLM 产生的 invalid_tool_calls 可能缺少关键字段）
+                if not tool_name or not tool_id:
+                    logger.warning(f"【Extractor】跳过不完整的工具调用 index={idx}: name={tool_name}, id={tool_id}")
+                    continue
+                
+                # 校验工具是否在已注册的工具列表中，过滤 LLM 幻觉产生的虚假工具
+                if self._valid_tool_names and tool_name not in self._valid_tool_names:
+                    logger.warning(
+                        f"【Extractor】跳过无效工具调用 index={idx}: "
+                        f"工具 '{tool_name}' 不在已注册工具列表中，"
+                        f"可用工具: {self._valid_tool_names}"
+                    )
+                    continue
+                
+                # 解析参数字符串为字典
+                args_dict = {}
+                if args_str:
+                    try:
+                        args_dict = json.loads(args_str)
+                    except (json.JSONDecodeError, TypeError) as e:
+                        # LLM 流式拼接可能产生畸形 JSON（缺括号、缺引号等），
+                        # 使用 json_repair 尝试自动修复
+                        logger.warning(
+                            f"【Extractor】Tool Args 标准解析失败，尝试自动修复: {e}"
+                        )
+                        try:
+                            args_dict = repair_json(args_str, return_objects=True)
+                            if not isinstance(args_dict, dict):
+                                args_dict = {"raw_args": args_dict}
+                            logger.info(
+                                f"【Extractor】Tool Args 自动修复成功: {list(args_dict.keys())}"
+                            )
+                        except Exception as repair_err:
+                            logger.error(
+                                f"【Extractor】Tool Args 自动修复也失败: {repair_err}, "
+                                f"Content: {args_str}"
+                            )
+                            args_dict = {"raw_args": args_str}
+
+                result.append({
+                    "tool_name": tool_name,
+                    "args": args_dict,
+                    "tool_call_id": tool_id
+                })
+            except Exception as e:
+                logger.error(f"【Extractor】解析工具调用 index={idx} 时异常: {e}, 已跳过")
+                continue
+        
+        self._accumulated.clear()
+        return result
+    
+    def clear(self):
+        """清空累积的工具调用"""
+        self._accumulated.clear()
+    
+    @staticmethod
+    def check_invalid_tool_calls(message_chunk):
+        """检测并记录 message_chunk 中的 invalid_tool_calls。
+        
+        Args:
+            message_chunk: LangChain 流式消息 chunk
+        """
+        # if hasattr(message_chunk, "invalid_tool_calls") and message_chunk.invalid_tool_calls:
+        #     for itc in message_chunk.invalid_tool_calls:
+        #         logger.warning(
+        #             f"【Extractor】检测到 invalid_tool_call: "
+        #             f"name={itc.get('name')}, "
+        #             f"id={itc.get('id')}, "
+        #             f"error={itc.get('error')}"
+        #         )
+
+
+# ==================== 工具结果提取 ====================
+
+def extract_tool_result(message_chunk) -> Optional[Dict[str, Any]]:
+    """从工具执行节点的消息中提取工具结果。
+    
+    Args:
+        message_chunk: LangChain 工具消息（ToolMessage/ToolMessageChunk）
+        
+    Returns:
+        工具结果字典，包含 tool_name, tool_result, tool_call_id, artifact（如有）
+        如果不是工具消息则返回 None
+    """
+    if not hasattr(message_chunk, "type") or message_chunk.type != "tool":
+        return None
+    
+    result = {
+        "tool_name": message_chunk.name,
+        "tool_result": message_chunk.content,
+        "tool_call_id": message_chunk.tool_call_id,
+    }
+    
+    # artifact 是可选字段
+    if hasattr(message_chunk, "artifact"):
+        result["artifact"] = message_chunk.artifact
+    
+    return result
 

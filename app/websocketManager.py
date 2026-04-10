@@ -151,6 +151,7 @@ class WebsocketConnectionManager:
         """更新收到 pong 的时间"""
         if ws in self.ws_to_heartbeat:
             self.ws_to_heartbeat[ws]["last_pong"] = time.time()
+            # logger.info(f"【WebSocket】收到 pong, 更新时间戳: {time.time()}")
     
     async def _heartbeat_loop(self, ws: WebSocket):
         """每个 WebSocket 的独立心跳循环"""

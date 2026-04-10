@@ -17,8 +17,8 @@ class MessageType(str, Enum):
     ERROR = "error"                  # 错误消息
     LLM_TEXT_FINAL = "llm_text_final"  # LLM 完整文本（仅存储，不推送）
     SESSION_ALLOCATED = "session_allocated"  # 会话分配通知
-    REASONING = "reasoning"          # 推理内容流式输出
-    REASONING_FINAL = "reasoning_final"  # 推理完整文本（仅存储，不推送）
+    REASONING = "reasoning"          # 推理状态通知（告知前端正在推理中）
+    REASONING_FINAL = "reasoning_final"  # 推理完整文本（存储 + 推送）
 
 
 class SenderType(str, Enum):

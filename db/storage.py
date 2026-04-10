@@ -49,11 +49,11 @@ async def get_user_sessions(user_id: str) -> List[Dict[str, Any]]:
         )
         return [
             {
-                "session_id": str(row["session_id"]),
+                "session_id": row["session_id"], 
                 "session_name": row["session_name"],
-                "last_active_at": str(row["last_active_at"]),
-                "created_at": str(row["created_at"]),
-                "updated_at": str(row["updated_at"])
+                "last_active_at": row["last_active_at"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"]
             }
             for row in rows
         ]
@@ -110,27 +110,41 @@ async def session_exists(session_id: str) -> bool:
 # =================== History 相关操作 ====================
 import json
 
-async def add_history_record(session_id: str, user_id: str, sender: str, msg_type: str, content: dict):
+async def add_history_record(
+    session_id: str, 
+    user_id: str, 
+    sender: str, 
+    msg_type: str, 
+    content: dict,
+    conversation_id: str = None,
+    group_id: int = 0,
+    step_index: int = 0
+):
     """添加历史消息记录。content 是一个字典，会被转换为 JSON 存储。"""
     # 自动提取 tool_call_id
     t_id = content.get("tool_call_id")
     
     # 确保 session_id 是 UUID 类型
     sid = UUID(session_id) if isinstance(session_id, str) else session_id
+    # 确保 conversation_id 是 UUID 类型
+    cid = UUID(conversation_id) if isinstance(conversation_id, str) and conversation_id else None
 
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO chat_history (session_id, user_id, sender, type, content, tool_call_id)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO chat_history (session_id, user_id, sender, type, content, tool_call_id, conversation_id, group_id, step_index)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             """,
             sid,
             user_id,
             sender,
             msg_type,
             json.dumps(content, ensure_ascii=False), # 传入 JSON 字符串, 确保中文不乱码
-            t_id
+            t_id,
+            cid,
+            group_id,
+            step_index
         )
 
 async def fetch_history_by_session(
@@ -143,7 +157,8 @@ async def fetch_history_by_session(
         async with pool.acquire() as conn:
             return await conn.fetch(
                 """
-                SELECT id, sender, type, content, tool_call_id, created_at
+                SELECT id, sender, type, content, tool_call_id, 
+                       conversation_id, group_id, step_index, created_at
                 FROM chat_history
                 WHERE session_id = $1
                 ORDER BY created_at DESC
@@ -161,12 +176,26 @@ async def count_total_by_session(session_id: UUID) -> int:
             session_id
         )
 
+async def delete_history_by_session(session_id: str) -> bool:
+    """删除指定会话的所有历史消息记录（物理删除）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            await conn.execute(
+                "DELETE FROM chat_history WHERE session_id = $1",
+                UUID(session_id) if isinstance(session_id, str) else session_id
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting history for session {session_id}: {e}")
+            return False
+
 
 # ==================== Agent 配置相关操作 ====================
 
 async def save_agent_config(
     session_id: str, 
-    model_name: str = 'nebulacoder-pro-7.0',
+    model_name: str = 'nebulacoder-v8',
     config: Optional[Dict[str, Any]] = None
 ) -> bool:
     """保存 agent 配置。session_id 是主键，包含模型名和选中的 MCP ID 列表。"""
@@ -380,3 +409,52 @@ async def get_mcp_configs_by_ids(mcp_ids: List[str]) -> Dict[str, Dict[str, Any]
         except Exception as e:
             logger.error(f"Error getting MCP configs by IDs: {e}")
             return {}
+
+
+# ==================== measure.tool_call_logs 相关操作 ====================
+
+MAX_TOOL_RESULT_CHARS = 500
+
+
+async def insert_tool_call_log(
+    session_id: str,
+    user_id: str,
+    tool_call_id: str,
+    tool_name: str,
+    tool_args: dict,
+    tool_result: str,
+    status: str,
+) -> None:
+    """将一次 MCP 工具调用信息写入 measure.tool_call_logs 表。
+
+    Args:
+        session_id: 会话 ID
+        user_id: 用户 ID
+        tool_call_id: 工具调用 ID
+        tool_name: 工具名称
+        tool_args: 工具参数（dict，存为 JSONB）
+        tool_result: 工具执行结果（仅保存前 500 字符）
+        status: 快模型质量判断结果（success / fail）
+    """
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            # 截断 tool_result 到 500 字符
+            truncated_result = tool_result[:MAX_TOOL_RESULT_CHARS] if tool_result else ""
+
+            await conn.execute(
+                """
+                INSERT INTO measure.tool_call_logs
+                    (session_id, user_id, tool_call_id, tool_name, tool_args, tool_result, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                UUID(session_id) if isinstance(session_id, str) else session_id,
+                user_id,
+                tool_call_id,
+                tool_name,
+                json.dumps(tool_args, ensure_ascii=False, default=str) if tool_args else "{}",
+                truncated_result,
+                status,
+            )
+        except Exception as e:
+            logger.error(f"Error inserting tool call log: {e}")
