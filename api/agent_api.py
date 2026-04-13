@@ -7,7 +7,7 @@ from config import get_logger
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api/agents", tags=["agents"])
+router = APIRouter(prefix="/agent_config", tags=["agent_config"])
 
 
 # ==================== 数据模型 ====================

@@ -17,7 +17,7 @@ os.environ.pop("all_proxy", None)
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api/mcp", tags=["mcp"])
+router = APIRouter(prefix="/mcp", tags=["mcp"])
 
 # ==================== 数据模型 ====================
 

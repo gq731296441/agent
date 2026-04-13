@@ -9,7 +9,7 @@ import json
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 # ==================== 数据模型 ====================

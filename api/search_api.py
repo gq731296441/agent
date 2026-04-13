@@ -9,7 +9,7 @@ import uuid
 from common.enums import MessageType, SenderType, EndReason, ActionType, DecisionType
 from common.schemas import AgentMessage
 
-router = APIRouter(prefix="/api/search", tags=["search"])
+router = APIRouter(prefix="/search", tags=["search"])
 
 async def process_agent_stream(
     manager_agents,
