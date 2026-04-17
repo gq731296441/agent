@@ -38,25 +38,26 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
         if gen_chunk is None:
             return None
 
-        # 从原始的 chunk 字典中提取被父类丢弃的 reasoning_content
+        # 从原始 chunk 中提取推理内容（兼容 reasoning_content / reasoning）
         try:
-            # 这里的路径完全对应你源码中 choices = chunk.get("choices", []) 的逻辑
+            reasoning = None
             choices = chunk.get("choices", [])
             if choices:
                 delta = choices[0].get("delta", {})
-                reasoning = delta.get("reasoning_content")
-                
-                if reasoning:
-                    # 打印调试信息，确认拦截到数据
-                    # print(f"🔥 [拦截成功] 捕获到推理内容: {reasoning}")
-                    
-                    # 3. 注入到 AIMessageChunk 的 additional_kwargs 中
-                    if hasattr(gen_chunk, "message") and isinstance(gen_chunk.message, AIMessageChunk):
-                        if gen_chunk.message.additional_kwargs is None:
-                            gen_chunk.message.additional_kwargs = {}
-                        gen_chunk.message.additional_kwargs["reasoning_content"] = reasoning
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+
+            if not reasoning:
+                model_extra = chunk.get("model_extra", {})
+                if isinstance(model_extra, dict):
+                    reasoning = model_extra.get("reasoning")
+
+            if reasoning and hasattr(gen_chunk, "message") and isinstance(gen_chunk.message, AIMessageChunk):
+                if gen_chunk.message.additional_kwargs is None:
+                    gen_chunk.message.additional_kwargs = {}
+                # 统一向下游暴露 reasoning_content，兼容现有消费逻辑
+                gen_chunk.message.additional_kwargs["reasoning_content"] = reasoning
         except Exception as e:
-            print(f"⚠️ [拦截异常] 提取推理内容出错: {e}")
+            logger.debug(f"⚠️ [拦截异常] 提取推理内容出错: {e}")
 
         return gen_chunk
 

@@ -179,10 +179,10 @@ class ThinkTagParser:
 
 
 def extract_reasoning_from_chunk(message_chunk) -> Optional[str]:
-    """从 message chunk 的 additional_kwargs 中提取推理内容。
+    """从 message chunk 中提取推理内容。
     
-    适用于模型通过 additional_kwargs.reasoning_content 返回推理内容的情况
-    （如 DeepSeek 等模型）。
+    优先读取 additional_kwargs.reasoning_content，
+    同时兼容 message_chunk.model_extra.reasoning。
     
     Args:
         message_chunk: LangChain 流式消息 chunk
@@ -190,8 +190,18 @@ def extract_reasoning_from_chunk(message_chunk) -> Optional[str]:
     Returns:
         推理内容字符串，如果没有则返回 None
     """
-    reasoning = message_chunk.additional_kwargs.get("reasoning_content")
-    return reasoning if reasoning else None
+    additional_kwargs = getattr(message_chunk, "additional_kwargs", None) or {}
+    reasoning = additional_kwargs.get("reasoning_content")
+    if reasoning:
+        return reasoning
+
+    model_extra = getattr(message_chunk, "model_extra", None)
+    if isinstance(model_extra, dict):
+        reasoning = model_extra.get("reasoning")
+        if reasoning:
+            return reasoning
+
+    return None
 
 
 # ==================== 工具调用提取 ====================

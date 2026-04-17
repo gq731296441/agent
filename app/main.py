@@ -5,6 +5,7 @@ import json
 import uuid
 import asyncio
 import os
+import time
 from typing import Any, Dict
 from contextlib import asynccontextmanager
 
@@ -115,9 +116,30 @@ async def lifespan(app: FastAPI):
 # ==================== 创建 FastAPI 应用 ====================
 
 app = FastAPI(lifespan=lifespan)
-app.mount('/static', StaticFiles(directory='static'), name='static')  # 挂载静态文件
+# app.mount('/static', StaticFiles(directory='static'), name='static')  # 挂载静态文件
 
 # ==================== 中间件配置 ====================
+
+@app.middleware("http")
+async def request_logging_middleware(request, call_next):
+    """统一记录 HTTP 请求路径、状态码与耗时。"""
+    start_time = time.perf_counter()
+    method = request.method
+    path = request.url.path
+
+    try:
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logger.info(
+            f"【HTTP】{method} {path} -> {response.status_code} | duration={duration_ms:.2f}ms"
+        )
+        return response
+    except Exception as e:
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logger.exception(
+            f"【HTTP】{method} {path} -> 500 | duration={duration_ms:.2f}ms | error={e}"
+        )
+        raise
 
 # CORS 中间件 - 允许前端跨域访问
 app.add_middleware(
