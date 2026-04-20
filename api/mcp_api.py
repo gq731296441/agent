@@ -42,6 +42,18 @@ McpToolsResponse = ListApiResponse[McpToolItem]
 MCP_TOOLS_API_URL = "https://aip.zte.com.cn/trial/cmtool/api/v1/component/mcp/mine"
 
 
+def _normalize_mcp_item(raw_item: dict) -> dict:
+    """标准化外部 MCP 工具字段，避免 null/空值导致后续校验与连接失败。"""
+    return {
+        "id": raw_item.get("id") or 0,
+        "componentId": raw_item.get("componentId") or 0,
+        "name": (raw_item.get("name") or "").strip(),
+        "description": raw_item.get("description") or "",
+        "type": (raw_item.get("type") or "http").strip().lower(),
+        "url": (raw_item.get("url") or "").strip(),
+    }
+
+
 @router.get("/tools", response_model=McpToolsResponse, summary="获取用户的MCP工具列表")
 async def get_mcp_tools(
     user_id: str = Query(..., description="用户ID")
@@ -89,22 +101,25 @@ async def get_mcp_tools(
         if not mcp_list:
             # 没有工具，直接返回空列表
             return ListApiResponse.success(data=[], msg="成功")
+
+        # 标准化字段，处理 description/type/url 等为 null 的情况
+        normalized_mcp_list = [_normalize_mcp_item(item) for item in mcp_list]
         
         # 4. 调用 McpToolService 验证工具状态
         mcp_service = McpToolService()
-        validated_tools = await mcp_service.validate_mcp_servers(mcp_list)
+        validated_tools = await mcp_service.validate_mcp_servers(normalized_mcp_list)
         
         # 5. 组装返回数据
         result_data = []
         for tool in validated_tools:
             result_data.append(McpToolItem(
-                id=tool.get("id", 0),
-                componentId=tool.get("componentId", 0),
-                name=tool.get("name", ""),
-                description=tool.get("description", ""),
-                type=tool.get("type", "http"),
-                url=tool.get("url", ""),
-                status=tool.get("status", "unknown")
+                id=tool.get("id") or 0,
+                componentId=tool.get("componentId") or 0,
+                name=(tool.get("name") or "").strip(),
+                description=tool.get("description") or "",
+                type=(tool.get("type") or "http").strip().lower(),
+                url=(tool.get("url") or "").strip(),
+                status=(tool.get("status") or "unknown")
             ))
         
         logger.info(f"[MCP API] 用户 {user_id} 获取到 {len(result_data)} 个 MCP 工具")
