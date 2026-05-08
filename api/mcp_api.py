@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from db import storage
 from mcp_server.mcp_manager import McpToolService
 from common.schemas import ListApiResponse
-from config import get_logger
+from config import get_logger, app_config
 
 # 清除代理环境变量，确保直连
 os.environ.pop("http_proxy", None)
@@ -39,7 +39,7 @@ McpToolsResponse = ListApiResponse[McpToolItem]
 # ==================== 接口实现 ====================
 
 # 外部 MCP 工具列表接口地址
-MCP_TOOLS_API_URL = "https://aip.zte.com.cn/trial/cmtool/api/v1/component/mcp/mine"
+MCP_TOOLS_API_URL = app_config.MCP_TOOLS_API_URL
 
 
 def _normalize_mcp_item(raw_item: dict) -> dict:

@@ -3,16 +3,32 @@ from typing import Optional
 import os
 import sys
 from pathlib import Path
+import asyncio
+import time
+import random
 
 # 添加根目录到路径，以便导入 config
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from config.config import app_config
+from config import get_logger
+
+logger = get_logger(__name__)
 
 
 class DatabaseManager:
-    """数据库连接管理器，负责创建和管理 PostgreSQL 连接池。"""
+    """数据库连接管理器，负责创建和管理 PostgreSQL 连接池。
+
+    支持自动重连机制：
+    - 连接池为空时自动创建
+    - 连接失效时自动重建连接池
+    - 数据库重启后无需重启应用即可恢复连接
+
+    优化策略：
+    - 使用缓存时间窗口避免频繁健康检查
+    - 依赖 asyncpg 内置连接有效性检测
+    """
 
     def __init__(self, host: str = None, port: int = None, user: str = None,
                  password: str = None, database: str = None):
@@ -23,104 +39,204 @@ class DatabaseManager:
         self.password = password or app_config.CMTOOL_AGENT_DB_PASSWORD
         self.database = database or app_config.CMTOOL_AGENT_DB_NAME
         self._pool: Optional[asyncpg.pool.Pool] = None
+        self._reconnect_lock = asyncio.Lock()  # 防止并发重连
+        self._last_health_check = 0.0  # 上次健康检查时间戳
+        self._health_check_interval: float = 30.0  # 30 秒内不重复检查
+
+    def _get_pool_config(self) -> dict:
+        """获取连接池配置参数
+
+        asyncpg 内置连接有效性检测：
+        - acquire() 时自动检查连接是否可用
+        - 自动移除失效连接并创建新连接
+        - max_inactive_connection_lifetime 自动清理空闲连接
+        """
+        return {
+            "host": self.host,
+            "port": self.port,
+            "user": self.user,
+            "password": self.password,
+            "database": self.database,
+            "min_size": 5,
+            "max_size": 20,
+            "timeout": 30,
+            "command_timeout": 60,
+            "max_inactive_connection_lifetime": 300.0,
+        }
+
+    async def _create_pool(self) -> asyncpg.pool.Pool:
+        """创建新的连接池"""
+        pool = await asyncpg.create_pool(**self._get_pool_config())
+        logger.info(f"【数据库】✅ 连接池创建成功 - {self.database}@{self.host}:{self.port}")
+        return pool
+
+    async def _reconnect(self) -> asyncpg.pool.Pool:
+        """重建连接池（线程安全）"""
+        async with self._reconnect_lock:
+            # 双重检查，避免重复创建
+            if self._pool is not None:
+                try:
+                    # 尝试获取一个连接（asyncpg 会自动检测有效性）
+                    async with self._pool.acquire() as conn:
+                        await conn.fetchval("SELECT 1")
+                    self._last_health_check = time.time()
+                    return self._pool
+                except Exception:
+                    # 旧连接失效，关闭并重建
+                    logger.warning("【数据库】⚠️ 检测到旧连接失效，关闭连接池")
+                    await self._pool.close()
+                    self._pool = None
+
+            # 指数退避重试
+            max_retries = 5
+            base_delay = 2.0  # 基础延迟秒数
+
+            for attempt in range(1, max_retries + 1):
+                try:
+                    logger.info(f"【数据库】🔄 重连中... (尝试 {attempt}/{max_retries})")
+                    self._pool = await self._create_pool()
+                    return self._pool
+                except Exception as e:
+                    if attempt < max_retries:
+                        # 指数退避 + 随机抖动，避免惊群效应
+                        delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+                        logger.warning(f"【数据库】❌ 重连失败，{delay:.1f}秒后重试：{e}")
+                        await asyncio.sleep(delay)
+                    else:
+                        logger.error(f"【数据库】❌ 重连失败，已达最大重试次数：{e}")
+                        raise
 
     async def get_pool(self) -> asyncpg.pool.Pool:
-        """获取数据库连接池，如果不存在则创建。"""
-        if self._pool is None:
-            self._pool = await asyncpg.create_pool(
-                host=self.host,
-                port=self.port,
-                user=self.user,
-                password=self.password,
-                database=self.database
-            )
-        return self._pool
+        """获取数据库连接池，如果不存在或失效则自动重建。
+
+        优化策略：
+        - 缓存时间窗口内跳过 SELECT 1 检查
+        - 依赖 asyncpg 内置连接有效性检测
+        - 仅在超时或异常时触发重连
+        """
+        now = time.time()
+
+        # 快速路径：连接池已存在且在缓存窗口期内
+        if self._pool is not None:
+            if now - self._last_health_check < self._health_check_interval:
+                return self._pool
+
+            # 缓存过期，需要健康检查
+            try:
+                async with self._pool.acquire() as conn:
+                    await conn.fetchval("SELECT 1")
+                self._last_health_check = now
+                return self._pool
+            except Exception as e:
+                logger.warning(f"【数据库】⚠️ 连接池健康检查失败：{e}")
+                return await self._reconnect()
+
+        # 慢速路径：连接池不存在，需要创建
+        return await self._reconnect()
 
     async def init_tables(self):
-        """初始化数据库表。"""
+        """初始化所有数据库表（入口方法）。"""
         pool = await self.get_pool()
         async with pool.acquire() as conn:
-            # 创建 user_sessions 表
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS user_sessions (
-                    session_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    user_id TEXT NOT NULL,
-                    session_name TEXT DEFAULT '新会话',
-                    is_deleted BOOLEAN DEFAULT FALSE,
-                    last_active_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-                );
-                CREATE INDEX IF NOT EXISTS idx_user_sessions_list 
-                ON user_sessions(user_id, last_active_at DESC) 
-                WHERE is_deleted = FALSE;
-            """)
+            await self._init_user_sessions_table(conn)
+            await self._init_agent_configs_table(conn)
+            await self._init_chat_history_table(conn)
+            await self._init_measure_schema_and_tables(conn)
 
-            # 创建 agent_configs 表
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS agent_configs (
-                    session_id UUID PRIMARY KEY REFERENCES user_sessions(session_id) ON DELETE CASCADE,
-                    model_name TEXT DEFAULT 'nebulacoder-v8',
-                    config JSONB, -- 包含 {"selected_mcp_ids": []}
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-                );
-            """)
+    async def _init_user_sessions_table(self, conn):
+        """初始化 user_sessions 表（用户会话管理）。"""
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                session_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id TEXT NOT NULL,
+                session_name TEXT DEFAULT '新会话',
+                is_deleted BOOLEAN DEFAULT FALSE,
+                last_active_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_sessions_list
+            ON user_sessions(user_id, last_active_at DESC)
+            WHERE is_deleted = FALSE;
+        """)
+        logger.debug("【数据库】✅ user_sessions 表初始化完成")
 
-            # 创建历史记录表
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS chat_history (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    session_id UUID NOT NULL REFERENCES user_sessions(session_id) ON DELETE CASCADE,
-                    user_id TEXT NOT NULL,
-                    sender TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    content JSONB NOT NULL,
-                    tool_call_id TEXT,
-                    conversation_id UUID,
-                    group_id INTEGER DEFAULT 0,
-                    step_index INTEGER DEFAULT 0,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-                );
-                CREATE INDEX IF NOT EXISTS idx_chat_history_session_time 
-                ON chat_history(session_id, created_at ASC);
-            """)
+    async def _init_agent_configs_table(self, conn):
+        """初始化 agent_configs 表（Agent 配置）。"""
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_configs (
+                session_id UUID PRIMARY KEY REFERENCES user_sessions(session_id) ON DELETE CASCADE,
+                model_name TEXT DEFAULT 'nebulacoder-v8',
+                config JSONB,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+            );
+        """)
+        logger.debug("【数据库】✅ agent_configs 表初始化完成")
 
-            # 为已有表添加新列（已存在则忽略），必须在创建索引之前执行
-            for col_sql in [
-                "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS conversation_id UUID",
-                "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS group_id INTEGER DEFAULT 0",
-                "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS step_index INTEGER DEFAULT 0",
-            ]:
-                try:
-                    await conn.execute(col_sql)
-                except Exception:
-                    pass  # 列已存在则忽略
+    async def _init_chat_history_table(self, conn):
+        """初始化 chat_history 表及索引（聊天记录）。"""
+        # 创建表
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_history (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                session_id UUID NOT NULL REFERENCES user_sessions(session_id) ON DELETE CASCADE,
+                user_id TEXT NOT NULL,
+                sender TEXT NOT NULL,
+                type TEXT NOT NULL,
+                content JSONB NOT NULL,
+                tool_call_id TEXT,
+                conversation_id UUID,
+                group_id INTEGER DEFAULT 0,
+                step_index INTEGER DEFAULT 0,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_history_session_time
+            ON chat_history(session_id, created_at ASC);
+        """)
 
-            # 在确保列存在后，再创建依赖新列的索引
-            await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_chat_history_conversation 
-                ON chat_history(conversation_id);
-            """)
+        # 添加新列（已存在则忽略）
+        alter_columns = [
+            "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS conversation_id UUID",
+            "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS group_id INTEGER DEFAULT 0",
+            "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS step_index INTEGER DEFAULT 0",
+        ]
+        for col_sql in alter_columns:
+            try:
+                await conn.execute(col_sql)
+            except Exception:
+                pass  # 列已存在
 
-            # 创建 measure schema 及工具调用记录表
-            await conn.execute("CREATE SCHEMA IF NOT EXISTS measure;")
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS measure.tool_call_logs (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    session_id UUID NOT NULL,
-                    user_id TEXT NOT NULL,
-                    tool_call_id TEXT,
-                    tool_name TEXT NOT NULL,
-                    tool_args JSONB,
-                    tool_result TEXT,
-                    status TEXT,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
-                );
-                CREATE INDEX IF NOT EXISTS idx_tool_call_logs_session
-                ON measure.tool_call_logs(session_id, created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_tool_call_logs_user
-                ON measure.tool_call_logs(user_id, created_at DESC);
-            """)
+        # 创建索引
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_chat_history_conversation
+            ON chat_history(conversation_id);
+        """)
+        logger.debug("【数据库】✅ chat_history 表及索引初始化完成")
+
+    async def _init_measure_schema_and_tables(self, conn):
+        """初始化 measure schema 及 tool_call_logs 表（工具调用统计）。"""
+        # 创建 schema
+        await conn.execute("CREATE SCHEMA IF NOT EXISTS measure;")
+
+        # 创建工具调用记录表
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS measure.tool_call_logs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                session_id UUID NOT NULL,
+                user_id TEXT NOT NULL,
+                tool_call_id TEXT,
+                tool_name TEXT NOT NULL,
+                tool_args JSONB,
+                tool_result TEXT,
+                status TEXT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_call_logs_session
+            ON measure.tool_call_logs(session_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_tool_call_logs_user
+            ON measure.tool_call_logs(user_id, created_at DESC);
+        """)
+        logger.debug("【数据库】✅ measure.tool_call_logs 表初始化完成")
 
     async def close(self):
         """关闭连接池。"""

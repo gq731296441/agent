@@ -3,12 +3,31 @@ import asyncio
 import json
 import logging
 import traceback
+import httpx
 from typing import List, Optional, Any, Dict, Tuple
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MCPManager")
+
+
+def _create_no_proxy_async_client(
+    headers: Dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """创建忽略系统代理的 HTTP 客户端（用于 MCP 连接）。"""
+    kwargs: Dict[str, Any] = {
+        "follow_redirects": True,
+        "trust_env": False,
+        "timeout": timeout or httpx.Timeout(30.0),
+    }
+    if headers is not None:
+        kwargs["headers"] = headers
+    if auth is not None:
+        kwargs["auth"] = auth
+    return httpx.AsyncClient(**kwargs)
 
 class McpToolService:
     def __init__(self, config: Optional[dict] = None):
@@ -76,7 +95,7 @@ class McpToolService:
         logger.info(f"MCP 工具加载完成，共计 {len(all_mcp_tools)} 个可用工具")
         return all_mcp_tools
 
-    def _build_mcp_config(self, mcp_list: list) -> Dict[str, Dict[str, str]]:
+    def _build_mcp_config(self, mcp_list: list) -> Dict[str, Dict[str, Any]]:
         """
         将前端传入的列表结构转换为 MultiServerMCPClient 所需的字典配置
         """
@@ -85,8 +104,20 @@ class McpToolService:
             name = item.get("name")
             if not name:
                 continue
-            mcp_config[name] = {
-                "transport": item.get("type", "http"),
-                "url": item.get("url", "")
+            server_config: Dict[str, Any] = {
+                "transport": (item.get("type") or "http").strip().lower(),
+                "url": (item.get("url") or "").strip(),
+                # 显式禁用系统代理，避免企业代理影响内网 MCP 连接
+                "httpx_client_factory": _create_no_proxy_async_client,
             }
+            headers = item.get("headers")
+            if isinstance(headers, str):
+                try:
+                    headers = json.loads(headers)
+                except Exception:
+                    headers = None
+            if isinstance(headers, dict) and headers:
+                # 透传自定义请求头，适用于需要 Token/鉴权的 MCP 服务
+                server_config["headers"] = headers
+            mcp_config[name] = server_config
         return mcp_config
