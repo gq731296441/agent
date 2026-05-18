@@ -27,7 +27,7 @@ class BaseConfig(BaseSettings):
     CMTOOL_AGENT_DB_PORT: Optional[int] = Field(default=5432, description="数据库端口")
 
     # ==================== 日志配置 ====================
-    log_level: str = Field(default="INFO", description="日志级别")
+    log_level: str = Field(default="DEBUG", description="日志级别")
     log_file: str = Field(default="logs/app.log", description="日志文件路径")
     log_rotation: str = Field(default="100 MB", description="日志文件轮转大小")
     log_retention: str = Field(default="30 days", description="日志文件保留时间")
@@ -52,9 +52,34 @@ class BaseConfig(BaseSettings):
         """获取数据库连接 URI"""
         uri = (f"{self.CMTOOL_AGENT_DB_ENGINE}://{self.CMTOOL_AGENT_DB_USER}:"
                f"{self.CMTOOL_AGENT_DB_PASSWORD}@{self.CMTOOL_AGENT_DB_HOST}:"
-               f"{self.CMTOOL_AGENT_DB_PORT}/{self.CMTOOL_AGENT_DB_NAME}?sslmode=disable")
-        print(f"数据库连接 URI: {uri}")
+               f"{self.CMTOOL_AGENT_DB_PORT}/{self.CMTOOL_AGENT_DB_NAME}")
         return uri
+
+    def get_langgraph_db_uri(self) -> str:
+        """获取 LangGraph 专用的数据库连接 URI（仅基础连接参数）。
+
+        TCP keepalive 等连接行为参数在 get_pool_kwargs() 中通过 psycopg kwargs 设置。
+        """
+        return f"{self.get_db_uri()}?sslmode=disable"
+
+    def get_pool_kwargs(self) -> dict:
+        """返回 psycopg AsyncConnectionPool 的 connection kwargs。
+
+        包含 TCP keepalive 和 row_factory 设置，确保：
+        - idle 连接不会被 PostgreSQL/网络设备断开
+        - 活跃期间的瞬时网络故障也能通过池的重连机制恢复
+        """
+        from psycopg.rows import dict_row
+
+        return {
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "row_factory": dict_row,
+            "keepalives": "1",
+            "keepalives_idle": "60",
+            "keepalives_interval": "10",
+            "keepalives_count": "5",
+        }
 
 
 class DevelopmentConfig(BaseConfig):

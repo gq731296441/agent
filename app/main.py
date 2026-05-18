@@ -17,13 +17,13 @@ os.environ.pop("all_proxy", None)
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
+from psycopg_pool import AsyncConnectionPool
 
 from app.websocketManager import WebsocketConnectionManager
 from app.security import SecurityMiddleware
@@ -36,14 +36,16 @@ from api.search_api import process_agent_stream
 from config import setup_logging, get_logger, app_config
 
 # 公共模块导入
-from common.enums import MessageType, SenderType, ActionType
+from common.enums import ActionType
 from common.schemas import AgentMessage
 
 setup_logging()
 logger = get_logger(__name__)
 
-# 从 config.py 读取数据库DB_URI
+# 业务数据库 URI（asyncpg 连接池用）
 DB_URI = app_config.get_db_uri()
+# LangGraph checkpointer/store 专用 URI（仅基础连接参数，keepalive 在 pool kwargs 中设置）
+LANGGRAPH_DB_URI = app_config.get_langgraph_db_uri()
 
 # 使用 AgentManager 管理 agent 实例 and 配置（将在 lifespan 中初始化）
 manager_agents = None
@@ -54,69 +56,77 @@ title_llm = None
 async def lifespan(app: FastAPI):
     """应用生命周期管理 - FastAPI 官方推荐方式"""
     global manager_agents, title_llm
-    
+
     # ==================== 启动阶段 ====================
     logger.info("=" * 60)
     logger.info("【app】🚀 应用启动中...")
     logger.info("=" * 60)
-    
-    # 初始化 PostgreSQL 连接池（用于通用数据库操作）
+
+    # 初始化业务数据库连接池（asyncpg）
     try:
         await storage.init_db()
         logger.info("【数据库】✅ PostgreSQL 连接池初始化完成")
     except Exception as e:
         logger.error(f"【数据库】⚠️ PostgreSQL 初始化失败: {e}")
-    
-    # 创建并初始化 checkpointer（AsyncPostgresSaver 会自动管理连接）
-    async with AsyncPostgresSaver.from_conn_string(DB_URI) as checkpointer:
-        try:
-            await checkpointer.setup()
-            logger.info("【数据库】✅ LangGraph 数据库表初始化完成")
-        except Exception as e:
-            logger.warning(f"【数据库】⚠️ LangGraph 初始化警告: {e}（可能已存在表）")
-        
-        # 将 checkpointer 保存到 app.state，供其他模块使用
+
+    # 创建共享 psycopg AsyncConnectionPool
+    # checkpointer 和 store 共享同一个池，池自动管理：健康检查、故障恢复、连接回收
+    pool_kwargs = app_config.get_pool_kwargs()
+    pool = AsyncConnectionPool(
+        LANGGRAPH_DB_URI,
+        min_size=2,
+        max_size=10,
+        max_idle=300.0,           # 5 分钟空闲后回收
+        max_lifetime=3600.0,      # 1 小时强制轮换
+        reconnect_timeout=300.0,  # 5 分钟内自动重连（覆盖网络瞬时抖动）
+        kwargs=pool_kwargs,
+        open=False,
+    )
+    await pool.open()
+
+    try:
+        # 用共享池构造 checkpointer 和 store（不再使用 from_conn_string）
+        checkpointer = AsyncPostgresSaver(conn=pool)
+        await checkpointer.setup()
         app.state.checkpointer = checkpointer
-        logger.info("【数据库】✅ Checkpointer 已加载到应用状态")
-        
-        # 初始化 AsyncPostgresStore（PostgreSQL 持久化中间件状态，如熔断器计数）
-        # 与 checkpointer 共享同一个数据库，重启后状态不丢失
-        async with AsyncPostgresStore.from_conn_string(DB_URI) as kv_store:
-            await kv_store.setup()
-            app.state.kv_store = kv_store
-            logger.info("【数据库】✅ AsyncPostgresStore 已初始化（持久化中间件状态）")
+        logger.info("【数据库】✅ Checkpointer 已就绪（共享池）")
 
-            # 初始化 AgentManager，传递 checkpointer 和 store
-            manager_agents = AgentManager(checkpointer=checkpointer, store=kv_store)
-            app.state.manager_agents = manager_agents
-            logger.info("✅ AgentManager 已初始化")
+        kv_store = AsyncPostgresStore(conn=pool)
+        await kv_store.setup()
+        app.state.kv_store = kv_store
+        logger.info("【数据库】✅ AsyncPostgresStore 已就绪（共享池）")
 
-            # 初始化会话标题生成模型
-            try:
-                title_llm = create_title_llm()
-                app.state.title_llm = title_llm
-                logger.info("✅ 会话标题生成模型已初始化")
-            except Exception as e:
-                title_llm = None
-                app.state.title_llm = None
-                logger.warning(f"【app】⚠️ 会话标题生成模型初始化失败，将使用兜底标题: {e}")
+        # 初始化 AgentManager
+        manager_agents = AgentManager(checkpointer=checkpointer, store=kv_store)
+        app.state.manager_agents = manager_agents
+        logger.info("✅ AgentManager 已初始化")
 
-            logger.info("=" * 60)
-            logger.info("【app】✅ 应用启动完成")
-            logger.info("=" * 60)
-            
-            yield
-            
-            # ==================== 关闭阶段 ====================
-            logger.info("【app】👋 应用关闭中...")
-            # AsyncPostgresStore 和 AsyncPostgresSaver 的 __aexit__ 会自动关闭连接
-            logger.info("✅ Store & Checkpointer 已释放")
+        # 初始化会话标题生成模型
+        try:
+            title_llm = create_title_llm()
+            app.state.title_llm = title_llm
+            logger.info("✅ 会话标题生成模型已初始化")
+        except Exception as e:
+            title_llm = None
+            app.state.title_llm = None
+            logger.warning(f"【app】⚠️ 会话标题生成模型初始化失败，将使用兜底标题: {e}")
+
+        logger.info("=" * 60)
+        logger.info("【app】✅ 应用启动完成")
+        logger.info("=" * 60)
+
+        yield
+
+    finally:
+        # ==================== 关闭阶段 ====================
+        logger.info("【app】👋 应用关闭中...")
+        await pool.close()
+        logger.info("✅ 共享连接池已释放")
 
 
 # ==================== 创建 FastAPI 应用 ====================
 
 app = FastAPI(lifespan=lifespan)
-# app.mount('/static', StaticFiles(directory='static'), name='static')  # 挂载静态文件
 
 # ==================== 中间件配置 ====================
 
@@ -246,7 +256,7 @@ async def generate_session_title(app: FastAPI, question: str, session_id: str) -
 async def ws_endpoint(websocket: WebSocket):
     # ==================== 建立连接 ====================
     await manager.connect(websocket)
-    
+
     # 获取应用状态中的 manager_agents
     _manager_agents = websocket.app.state.manager_agents
 
@@ -284,9 +294,8 @@ async def ws_endpoint(websocket: WebSocket):
             # ==================== 处理心跳 ====================
             if msg.get("type") == "pong":
                 manager._update_pong(websocket)
-                # logger.info(f"【websocket】 收到 pong from ws {id(websocket)}")
                 continue
-            
+
             # ==================== 获取用户发送内容 ====================
             user_id = msg.get('user_id', 'guest')
             user_token = msg.get('user_token', '')
@@ -294,13 +303,13 @@ async def ws_endpoint(websocket: WebSocket):
             client_session_id = msg.get('session_id')
 
             logger.info(f"【WebSocket】📨 收到用户{user_id}聊天请求: {question[:50]}...")
-            
+
             # 获取或创建 session_id
             session_id, is_new_session = await get_or_create_session(client_session_id)
 
             # 绑定 session_id 到当前 ws（支持多对一）
             manager.bind_session(websocket, session_id)
-            
+
             if is_new_session:
                 try:
                     session_title = await generate_session_title(websocket.app, question, session_id)
@@ -318,10 +327,10 @@ async def ws_endpoint(websocket: WebSocket):
                                 "session_id": session_id,
                                 "session_title": session_title
                             }
-                        ).to_frontend_dict(), 
+                        ).to_frontend_dict(),
                         session_id
                     )
-                    
+
                     logger.info(f"【WebSocket】用户: {user_id}, 会话id: {session_id} {'(新会话)' if is_new_session else '(已存在会话)'}, action={msg.get('action')}")
                 except Exception as e:
                     logger.error(f"【WebSocket】创建新会话失败: {e}")
@@ -329,7 +338,7 @@ async def ws_endpoint(websocket: WebSocket):
                         AgentMessage.error(
                             session_id=session_id,
                             content=f"会话创建失败: {str(e)}"
-                        ).to_frontend_dict(), 
+                        ).to_frontend_dict(),
                         session_id
                     )
                     manager.disconnect(ws=websocket)
@@ -350,7 +359,7 @@ async def ws_endpoint(websocket: WebSocket):
                 _run_agent_stream(session_id, action, user_id, user_token, msg)
             )
             _stream_tasks[session_id] = task
-    
+
     except WebSocketDisconnect:
         # ==================== 连接断开 ====================
         # 取消所有正在运行的 Agent 流任务
@@ -368,7 +377,7 @@ async def ws_endpoint(websocket: WebSocket):
             # 清理 AgentManager 中的会话信息
             _manager_agents.disconnect_connection(sid)
             logger.info(f"【WebSocket】Cleanup，已注销会话路由: {sid}")
-            
+
         logger.info(f"【WebSocket】Disconnect，物理连接已断开，共清理 {len(affected_sessions)} 个关联会话")
 
     except Exception as e:
@@ -390,6 +399,3 @@ async def ws_endpoint(websocket: WebSocket):
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8002)
-
-
-

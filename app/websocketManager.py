@@ -174,7 +174,7 @@ class WebsocketConnectionManager:
                     "type": "ping",
                     "server_time": current_time
                 })
-                logger.debug(f"[Heartbeat] 发送 ping 到 ws {id(ws)}")
+                # logger.debug(f"[Heartbeat] 发送 ping 到 ws {id(ws)}")
             except Exception as e:
                 logger.error(f"[Heartbeat] 发送 ping 失败: {e}")
                 break

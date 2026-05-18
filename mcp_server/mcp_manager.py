@@ -46,7 +46,7 @@ class McpToolService:
         except Exception as e:
             # 使用 traceback 完整记录异常，包括 ExceptionGroup
             err_detail = "".join(traceback.format_exception(e)).strip()
-            logger.error(f"MCP Server [{name}] validation failed: {err_detail}")
+            logger.error(f"MCP Server [{name}] 连接失败")
             return name, False, [], "unavailable"
     
     async def _run_batch_validation(self, mcp_list: List[Dict]) -> List[Tuple]:
