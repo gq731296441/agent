@@ -2,11 +2,10 @@
 from pathlib import Path
 import sys
 import json
-import uuid
 import asyncio
 import os
 import time
-from typing import Any, Dict
+from typing import Dict
 from contextlib import asynccontextmanager
 
 # ============= 代理配置 ============
@@ -20,7 +19,6 @@ sys.path.append(str(ROOT_DIR))
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg_pool import AsyncConnectionPool
@@ -29,11 +27,11 @@ from app.websocketManager import WebsocketConnectionManager
 from app.security import SecurityMiddleware
 from agent_server.agent_manager import AgentManager
 from agent_server.llm import create_title_llm
-from agent_server.prompts import TITLE_GENERATION_PROMPT
 from db import storage
 from api import session_api, agent_api, mcp_api, search_api
 from api.search_api import process_agent_stream
 from config import setup_logging, get_logger, app_config
+from utils.session_utils import get_or_create_session, generate_session_title
 
 # 公共模块导入
 from common.enums import ActionType
@@ -178,79 +176,6 @@ async def home():
     return FileResponse('static/index.html')
 
 # ==================== Websocket ====================
-async def get_or_create_session(client_session_id: str):
-    """
-    检查或创建 session_id。
-    返回 (session_id, is_new_session)
-    """
-    # 规范化 session_id（处理 None, '', 'null' 等情况）
-    if isinstance(client_session_id, str):
-        client_session_id = client_session_id.strip()
-        if client_session_id.lower() == 'null' or client_session_id == '':
-            client_session_id = None
-
-    session_id = None
-    is_new_session = False
-
-    try:
-        # 检查 session_id 是否存在
-        if client_session_id:
-            exists = await storage.session_exists(client_session_id)
-            if exists:
-                session_id = client_session_id
-            else:
-                # session_id 不存在，生成新的
-                session_id = str(uuid.uuid4())
-                is_new_session = True
-        else:
-            # 没有提供 session_id，生成新的
-            session_id = str(uuid.uuid4())
-            is_new_session = True
-    except Exception as e:
-        logger.error(f"【会话】 session_exists check failed: {e}, 生成新的会话...")
-        session_id = str(uuid.uuid4())
-        is_new_session = True
-
-    return session_id, is_new_session
-
-
-def _build_fallback_session_title(session_id: str) -> str:
-    return f"新会话 {session_id[-8:]}"
-
-
-def _sanitize_session_title(title: str, session_id: str) -> str:
-    """清洗模型生成的标题，避免返回空值或带引号/换行。"""
-    cleaned = (title or "").strip().strip('"').strip("'")
-    cleaned = " ".join(cleaned.split())
-    if not cleaned:
-        return _build_fallback_session_title(session_id)
-    return cleaned[:30]
-
-
-async def generate_session_title(app: FastAPI, question: str, session_id: str) -> str:
-    """基于用户首问生成会话标题，失败时回退到默认标题。"""
-    fallback_title = _build_fallback_session_title(session_id)
-    normalized_question = (question or "").strip()
-    if not normalized_question:
-        return fallback_title
-
-    title_model = getattr(app.state, "title_llm", None)
-    if title_model is None:
-        return fallback_title
-
-    try:
-        prompt = TITLE_GENERATION_PROMPT.format(messages=normalized_question[:1000])
-        response = await title_model.ainvoke([
-            HumanMessage(content=prompt),
-        ])
-        title = getattr(response, "content", "")
-        if isinstance(title, list):
-            title = "".join(str(item) for item in title)
-        return _sanitize_session_title(str(title), session_id)
-    except Exception as e:
-        logger.warning(f"【会话】生成会话标题失败，使用兜底标题: {e}")
-        return fallback_title
-
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
@@ -312,7 +237,8 @@ async def ws_endpoint(websocket: WebSocket):
 
             if is_new_session:
                 try:
-                    session_title = await generate_session_title(websocket.app, question, session_id)
+                    title_llm_model = getattr(websocket.app.state, "title_llm", None)
+                    session_title = await generate_session_title(title_llm_model, question, session_id)
                     # 如果是新会话，先在 user_sessions 表中创建记录（父表）
                     await storage.upsert_user_session(
                         user_id=user_id,

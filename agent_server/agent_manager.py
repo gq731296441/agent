@@ -2,7 +2,7 @@ import asyncio
 import uuid
 from typing import Dict, Any, Optional, Tuple, AsyncGenerator
 from agent_server.agents import LangGraphAgent, create_base_agent
-from agent_server.agent_runner import run_agent
+from agent_server.agent_runner import run_agent, run_agent_ainvoke
 from agent_server.llm import create_agent_llm
 from agent_server.prompts import build_system_prompt
 from mcp_server.mcp_manager import McpToolService
@@ -259,6 +259,115 @@ class AgentManager:
             yield AgentMessage.end(session_id=session_id, reason=EndReason.STOP).to_frontend_dict()
         finally:
             # 确保清理 stop_event
+            self._stop_events.pop(session_id, None)
+            self._active_tasks.pop(session_id, None)
+
+    async def get_agent_result(
+        self,
+        user_id: str,
+        user_token: str,
+        session_id: str,
+        input_data: dict,
+        mcp_list: list = None
+    ) -> Dict[str, Any]:
+        """
+        非流式版 get_agent_stream：运行 Agent 到完成并返回结构化结果。
+
+        与 get_agent_stream 的核心区别：
+        - 使用 run_agent_ainvoke() 调用 compiled_graph.ainvoke() 收集结果
+        - 返回包含 final_answer / tool_calls / messages 的 dict
+        - 同样写入 chat_history 和 agent_configs
+
+        Returns:
+            {
+                "messages": list[dict],       # 前端消息列表（已过滤 USER / LLM_TEXT_FINAL）
+                "final_answer": str,
+                "reasoning": str,
+                "tool_calls": list[dict],
+                "tool_results": list[dict],
+                "status": "completed"|"stopped"|"error"|"interrupted",
+                "error": str,
+                "interrupt": dict,
+            }
+        """
+        if mcp_list is None:
+            mcp_list = []
+
+        stop_event = asyncio.Event()
+        self._stop_events[session_id] = stop_event
+
+        try:
+            agent, init_err = await self.create_agent(user_id, user_token, session_id, mcp_list)
+            if init_err:
+                return {
+                    "messages": [],
+                    "final_answer": "",
+                    "reasoning": "",
+                    "tool_calls": [],
+                    "tool_results": [],
+                    "status": "error",
+                    "error": init_err,
+                    "interrupt": {},
+                }
+
+            config = self._create_agent_config(user_id, user_token, session_id)
+            conversation_id = str(uuid.uuid4())
+
+            result = await run_agent_ainvoke(
+                agent=agent,
+                input_data=input_data,
+                config=config,
+                session_id=session_id,
+                stop_event=stop_event,
+                conversation_id=conversation_id,
+            )
+
+            # 保存消息到 DB（与 get_agent_stream 相同逻辑）
+            for msg in result["messages"]:
+                should_save = msg.pop("save", False)
+                if should_save:
+                    # 注入 user_id（run_agent 不携带 user_id）
+                    await self._save_message_to_db(msg, user_id)
+
+            # 过滤：去除 USER 和 LLM_TEXT_FINAL 消息（前端不需要）
+            frontend_messages = []
+            for msg in result["messages"]:
+                msg_sender = msg.get("sender")
+                if msg_sender == SenderType.USER or msg_sender == SenderType.USER.value:
+                    continue
+                msg_type = msg.get("type")
+                if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
+                    continue
+                frontend_messages.append(msg)
+
+            result["messages"] = frontend_messages
+            return result
+
+        except asyncio.CancelledError:
+            logger.info(f"[AgentManager] 非流式会话 {session_id} 被取消")
+            return {
+                "messages": [],
+                "final_answer": "",
+                "reasoning": "",
+                "tool_calls": [],
+                "tool_results": [],
+                "status": "stopped",
+                "error": "",
+                "interrupt": {},
+            }
+        except Exception as e:
+            logger.error(f"[AgentManager] 非流式会话 {session_id} 出错: {e}")
+            return {
+                "messages": [],
+                "final_answer": "",
+                "reasoning": "",
+                "tool_calls": [],
+                "tool_results": [],
+                "status": "error",
+                "error": str(e),
+                "interrupt": {},
+            }
+        finally:
             self._stop_events.pop(session_id, None)
             self._active_tasks.pop(session_id, None)
 

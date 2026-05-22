@@ -12,8 +12,9 @@ Agent 运行逻辑模块。
 """
 
 from langgraph.types import Command
+from langgraph.errors import GraphInterrupt
 from langchain.messages import HumanMessage
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from typing import AsyncGenerator, Dict, Any
 
 from utils.error_recovery import (
@@ -589,6 +590,207 @@ async def run_agent(
             content=EndReason.STOP,
             save=True
         ).to_dict())
+
+
+async def run_agent_ainvoke(
+    agent,
+    input_data: dict,
+    config: dict,
+    session_id: str,
+    stop_event: asyncio.Event = None,
+    conversation_id: str = None,
+) -> Dict[str, Any]:
+    """
+    非流式版 run_agent：使用 compiled_graph.ainvoke() 执行 Agent 并返回结构化结果。
+
+    与 run_agent() (astream) 的核心区别：
+    - 不逐 token 推送，一次性返回最终结果
+    - 中间件的 get_stream_writer() 输出被静默丢弃
+    - HITL 中断抛出 GraphInterrupt，本函数捕获并返回 "interrupted" 状态
+    - 推理内容（reasoning）在 ainvoke 下不可用（after_model 已剥离）
+
+    Returns:
+        {messages, final_answer, reasoning, tool_calls, tool_results, status, error, interrupt}
+    """
+    compiled_graph = agent.agent
+    messages: list = []
+    final_answer: str = ""
+    tool_calls: list = []
+    tool_results: list = []
+    status: str = "completed"
+    error: str = ""
+    interrupt: dict = {}
+
+    step_index = 0
+
+    def _enrich(msg_dict: dict, track_step: bool = True) -> dict:
+        nonlocal step_index
+        msg_dict["conversation_id"] = conversation_id
+        msg_dict["group_id"] = 1
+        msg_dict["step_index"] = step_index
+        if track_step:
+            step_index += 1
+        return msg_dict
+
+    # ==================== 构建输入 ====================
+    command = input_data.get("command")
+    content_str = ""
+    user_msg_marker = None  # 用于在 final state 中定位本轮的起点
+
+    if command and isinstance(command, Command):
+        stream_input = command
+    else:
+        content_str = input_data.get("content", "")
+        stream_input = {"messages": [HumanMessage(content=content_str)]}
+        user_msg_marker = content_str
+
+    # ==================== 执行 ainvoke ====================
+    try:
+        result = await _ainvoke_with_stop(compiled_graph, stream_input, config, stop_event)
+        state_messages = result.get("messages", [])
+
+        # 定位本轮新消息的起点
+        # 对于 ask：找到我们输入 HumanMessage 的位置，只处理其后的消息
+        # 对于 resume_hitl (Command)：所有消息均为 checkpoint 历史，处理末尾新产生的
+        start_idx = 0
+        if user_msg_marker is not None:
+            for i in range(len(state_messages) - 1, -1, -1):
+                msg = state_messages[i]
+                if isinstance(msg, HumanMessage) and msg.content == user_msg_marker:
+                    start_idx = i + 1
+                    break
+
+        # ==================== 处理本轮新消息 ====================
+        for i in range(start_idx, len(state_messages)):
+            msg = state_messages[i]
+
+            if isinstance(msg, HumanMessage):
+                # 仅处理本轮用户消息（i == start_idx 且是 text 输入时）
+                if i == start_idx and user_msg_marker is not None:
+                    messages.append(_enrich(AgentMessage(
+                        type=MessageType.CHAT,
+                        sender=SenderType.USER,
+                        session_id=session_id,
+                        content={"text": content_str},
+                        save=True,
+                    ).to_dict()))
+
+            elif isinstance(msg, AIMessage):
+                ai_content = msg.content if isinstance(msg.content, str) else ""
+
+                # 提取 tool_calls
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        tc_dict = {
+                            "tool_name": tc.get("name", ""),
+                            "tool_call_id": tc.get("id", ""),
+                            "args": tc.get("args", {}),
+                        }
+                        tool_calls.append(tc_dict)
+                        messages.append(_enrich(AgentMessage(
+                            type=MessageType.TOOL_CALL,
+                            sender=SenderType.SYSTEM,
+                            session_id=session_id,
+                            content=tc_dict,
+                            save=True,
+                        ).to_dict()))
+
+                if ai_content:
+                    final_answer = ai_content
+                    messages.append(_enrich(AgentMessage(
+                        type=MessageType.LLM_TEXT_FINAL,
+                        sender=SenderType.ASSISTANT,
+                        session_id=session_id,
+                        content={"text": ai_content},
+                        save=True,
+                    ).to_dict()))
+
+            elif isinstance(msg, ToolMessage):
+                tr_dict = {
+                    "tool_name": getattr(msg, "name", ""),
+                    "tool_call_id": getattr(msg, "tool_call_id", ""),
+                    "result": str(msg.content) if msg.content else "",
+                }
+                tool_results.append(tr_dict)
+                messages.append(_enrich(AgentMessage(
+                    type=MessageType.TOOL_RESULT,
+                    sender=SenderType.SYSTEM,
+                    session_id=session_id,
+                    content=tr_dict,
+                    save=True,
+                ).to_dict()))
+
+        # 正常结束
+        messages.append(_enrich(AgentMessage(
+            type=MessageType.END,
+            sender=SenderType.SYSTEM,
+            session_id=session_id,
+            content=EndReason.COMPLETED,
+            save=True,
+        ).to_dict()))
+
+    except GraphInterrupt:
+        status = "interrupted"
+        interrupt = {"message": "Agent 执行被中断，请使用 stream 模式查看详情并继续"}
+        messages.append(_enrich(AgentMessage(
+            type=MessageType.INTERRUPT,
+            sender=SenderType.SYSTEM,
+            session_id=session_id,
+            content=interrupt,
+            save=True,
+        ).to_dict()))
+
+    except asyncio.CancelledError:
+        status = "stopped"
+        messages.append(_enrich(AgentMessage(
+            type=MessageType.END,
+            sender=SenderType.SYSTEM,
+            session_id=session_id,
+            content=EndReason.STOP,
+            save=True,
+        ).to_dict()))
+
+    except Exception as e:
+        status = "error"
+        error = str(e)
+        logger.error(f"【Agent】run_agent_ainvoke 异常: {e}")
+        messages.append(_enrich(AgentMessage(
+            type=MessageType.ERROR,
+            sender=SenderType.SYSTEM,
+            session_id=session_id,
+            content=error,
+            save=True,
+        ).to_dict()))
+
+    return {
+        "messages": messages,
+        "final_answer": final_answer,
+        "reasoning": "",
+        "tool_calls": tool_calls,
+        "tool_results": tool_results,
+        "status": status,
+        "error": error,
+        "interrupt": interrupt,
+    }
+
+
+async def _ainvoke_with_stop(
+    compiled_graph, stream_input, config: dict, stop_event: asyncio.Event = None
+):
+    """包装 ainvoke，通过 asyncio.Task + 轮询 stop_event 支持外部取消。"""
+    task = asyncio.ensure_future(
+        compiled_graph.ainvoke(stream_input, config=config)
+    )
+    while not task.done():
+        if stop_event and stop_event.is_set():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            raise asyncio.CancelledError("stopped by user")
+        await asyncio.sleep(0.1)
+    return await task
 
 
 # ==================== 辅助函数 ====================
