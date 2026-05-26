@@ -3,6 +3,7 @@ from fastapi import APIRouter, Body, Request
 from typing import Any, Dict, AsyncGenerator
 from langgraph.types import Command
 import json
+import asyncio
 
 from utils.session_utils import get_or_create_session, generate_session_title
 from db import storage
@@ -10,6 +11,8 @@ from db import storage
 # 公共模块导入
 from common.enums import EndReason, ActionType, DecisionType
 from common.schemas import AgentMessage
+
+AGENT_TIMEOUT = 300  # 非流式请求超时（秒）
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -410,14 +413,37 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
         )
 
     # ==================== 非流式路径（默认） ====================
-    result = await process_agent_result(
-        manager_agents=manager_agents,
-        action=action,
-        user_id=user_id,
-        user_token=user_token,
-        session_id=session_id,
-        payload=params,
-    )
+    try:
+        result = await asyncio.wait_for(
+            process_agent_result(
+                manager_agents=manager_agents,
+                action=action,
+                user_id=user_id,
+                user_token=user_token,
+                session_id=session_id,
+                payload=params,
+            ),
+            timeout=AGENT_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        return JSONResponse(
+            status_code=504,
+            content={
+                "session_id": session_id,
+                "is_new_session": is_new_session,
+                "session_title": session_title,
+                "result": {
+                    "status": "error",
+                    "final_answer": "",
+                    "reasoning": "",
+                    "tool_calls": [],
+                    "tool_results": [],
+                    "messages": [],
+                    "error": f"请求超时（{AGENT_TIMEOUT}秒），请简化问题或稍后重试",
+                    "interrupt": {},
+                },
+            },
+        )
 
     response_data = {
         "session_id": session_id,
