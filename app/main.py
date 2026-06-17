@@ -60,6 +60,13 @@ async def lifespan(app: FastAPI):
     logger.info("【app】🚀 应用启动中...")
     logger.info("=" * 60)
 
+    # NFS 挂载验证（早于数据库初始化，避免在无工作区时浪费 DB 连接）
+    from nfs_test import test_workspace
+    if not test_workspace():
+        logger.error("【app】❌ NFS 工作区不可用，服务启动终止")
+        raise RuntimeError("NFS workspace not writable — check mount and permissions")
+    logger.info("【app】✅ NFS 工作区验证通过")
+
     # 初始化业务数据库连接池（asyncpg）
     try:
         await storage.init_db()
