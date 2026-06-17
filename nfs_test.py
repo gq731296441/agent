@@ -5,14 +5,13 @@
 """
 import os
 import socket
-import time
 from datetime import datetime
 
-from config.config import app_config
+WORKSPACE_ROOT = "/data/cmtool/agent"
 
 
 def test_workspace():
-    root = app_config.get_workspace_root()
+    root = WORKSPACE_ROOT
     hostname = socket.gethostname()
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"nfs_test_{hostname}_{ts}.txt"
@@ -38,7 +37,6 @@ def test_workspace():
         f"时间: {datetime.now().isoformat()}\n"
         f"主机: {hostname}\n"
         f"用户: UID={os.getuid()}\n"
-        f"ENVIRONMENT: {app_config.ENVIRONMENT}\n"
     )
     try:
         with open(filepath, "w") as f:
