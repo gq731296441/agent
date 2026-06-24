@@ -1,0 +1,3 @@
+# 已合并至 requirements.in（deepagents、langgraph-checkpoint-postgres）
+# 保留本文件仅为兼容旧文档；请使用:
+#   pip install -r requirements.txt

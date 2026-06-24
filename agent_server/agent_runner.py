@@ -31,6 +31,8 @@ from utils.extractors import (
     extract_reasoning_from_chunk,
     extract_tool_result
 )
+from utils.hitl_store import save_interrupt
+from utils.run_events import insert_agent_run_event
 
 import uuid
 import asyncio
@@ -75,6 +77,29 @@ async def run_agent(
     _group_id = 0      # 分组ID：同一处理阶段（模型推理/工具执行）的消息共享
     _step_index = 0    # 步骤序号：本轮会话中的全局递增序号
 
+    metadata = config.get("metadata", {}) or {}
+    run_id = metadata.get("run_id")
+    user_id_meta = metadata.get("user_id", "")
+
+    async def _emit_run_event(
+        event_type: str,
+        category: str = None,
+        action: str = None,
+        message: str = None,
+    ) -> None:
+        if not run_id:
+            return
+        await insert_agent_run_event(
+            run_id=run_id,
+            session_id=session_id,
+            user_id=user_id_meta,
+            conversation_id=conversation_id,
+            event_type=event_type,
+            category=category,
+            action=action,
+            message=message,
+        )
+
     def _enrich(msg_dict: dict, track_step: bool = True) -> dict:
         """为消息字典注入 conversation_id / group_id / step_index
 
@@ -87,6 +112,8 @@ async def run_agent(
         msg_dict["conversation_id"] = conversation_id
         msg_dict["group_id"] = _group_id
         msg_dict["step_index"] = _step_index
+        if run_id:
+            msg_dict["run_id"] = run_id
         if track_step:
             _step_index += 1
         return msg_dict
@@ -382,6 +409,20 @@ async def run_agent(
                 # 生成唯一 request_id 供前端识别
                 request_id = str(uuid.uuid4())
 
+                thread_id = config.get("configurable", {}).get("thread_id", "")
+                user_id_meta = config.get("metadata", {}).get("user_id", "")
+                store = getattr(agent, "store", None)
+                await save_interrupt(
+                    store,
+                    request_id=request_id,
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    user_id=user_id_meta,
+                    actions=all_actions,
+                    num_pending=len(all_actions),
+                )
+                await _emit_run_event("interrupted", message=f"request_id={request_id}")
+
                 # yield interrupt 消息
                 yield _enrich(AgentMessage(
                     type=MessageType.INTERRUPT,
@@ -433,6 +474,7 @@ async def run_agent(
 
     except asyncio.CancelledError:
         logger.info(f" 【Agent】会话 {session_id} 收到取消请求，正在中止...")
+        await _emit_run_event("stopped")
 
         # 中止 Agent 任务执行
         await _force_end_run(compiled_graph, config)
@@ -474,6 +516,12 @@ async def run_agent(
             f"恢复策略: {classification.action.value}, "
             f"可重试: {classification.retryable}"
         )
+        await _emit_run_event(
+            "error_classified",
+            category=classification.category.value,
+            action=classification.action.value,
+            message=str(e)[:500],
+        )
 
         # ==================== 注入 AIMessage 修复消息序列 ====================
         # 无论什么错误，都需要向 checkpoint 注入一条 AIMessage，
@@ -488,6 +536,12 @@ async def run_agent(
             logger.info(
                 f"【Agent】可恢复错误，准备重试 "
                 f"({_error_retry_count}/{MAX_ERROR_RETRIES})"
+            )
+            await _emit_run_event(
+                "retry",
+                category=classification.category.value,
+                action=classification.action.value,
+                message=f"attempt={_error_retry_count}",
             )
 
             # 通知前端正在重试
@@ -565,7 +619,7 @@ async def run_agent(
                     type=MessageType.END,
                     sender=SenderType.SYSTEM,
                     session_id=session_id,
-                    content=EndReason.STOP,
+                    content=EndReason.ERROR,
                     save=True
                 ).to_dict())
                 return
@@ -587,7 +641,7 @@ async def run_agent(
             type=MessageType.END,
             sender=SenderType.SYSTEM,
             session_id=session_id,
-            content=EndReason.STOP,
+            content=EndReason.ERROR,
             save=True
         ).to_dict())
 

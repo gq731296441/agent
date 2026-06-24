@@ -1,4 +1,10 @@
 # app/main.py
+import asyncio
+import sys
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from pathlib import Path
 import sys
 import json
@@ -17,21 +23,31 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(ROOT_DIR))
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg_pool import AsyncConnectionPool
 
 from app.websocketManager import WebsocketConnectionManager
 from app.security import SecurityMiddleware
 from agent_server.agent_manager import AgentManager
-from agent_server.llm import create_title_llm
+from agent_server.llm import create_title_llm_for_user
 from db import storage
-from api import session_api, agent_api, mcp_api, search_api
+from db.database import db_manager
+from api import session_api, agent_api, mcp_api, search_api, stats_api
+from api import agent_run_api, artifact_api, user_agent_api, skill_api, skill_internal_api, workspace_api, sandbox_api
+from api import user_llm_api, subscription_agent_api, user_memory_api
 from api.search_api import process_agent_stream
+from deep_agent_server.session.readiness import SessionReadinessService
 from config import setup_logging, get_logger, app_config
-from utils.session_utils import get_or_create_session, generate_session_title
+from utils.session_utils import (
+    get_or_create_session,
+    generate_session_title,
+    validate_session_access,
+    setup_new_session,
+    SESSION_ACCESS_DENIED_MSG,
+)
 
 # 公共模块导入
 from common.enums import ActionType
@@ -45,30 +61,19 @@ DB_URI = app_config.get_db_uri()
 # LangGraph checkpointer/store 专用 URI（仅基础连接参数，keepalive 在 pool kwargs 中设置）
 LANGGRAPH_DB_URI = app_config.get_langgraph_db_uri()
 
-# 使用 AgentManager 管理 agent 实例 and 配置（将在 lifespan 中初始化）
+# 使用 AgentManager 管理 agent 实例（将在 lifespan 中初始化）
 manager_agents = None
 manager = WebsocketConnectionManager()
-title_llm = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理 - FastAPI 官方推荐方式"""
-    global manager_agents, title_llm
+    global manager_agents
 
     # ==================== 启动阶段 ====================
     logger.info("=" * 60)
     logger.info("【app】🚀 应用启动中...")
     logger.info("=" * 60)
-
-        # NFS 挂载验证（早于数据库初始化）
-    try:
-        from nfs_test import test_workspace
-        if not test_workspace():
-            logger.error("【app】❌ NFS 工作区不可用，服务启动终止")
-            raise RuntimeError("NFS workspace not writable")
-        logger.info("【app】✅ NFS 工作区验证通过")
-    except ImportError:
-        logger.warning("【app】⚠️ nfs_test.py 不存在，跳过 NFS 验证")
 
     # 初始化业务数据库连接池（asyncpg）
     try:
@@ -82,8 +87,8 @@ async def lifespan(app: FastAPI):
     pool_kwargs = app_config.get_pool_kwargs()
     pool = AsyncConnectionPool(
         LANGGRAPH_DB_URI,
-        min_size=2,
-        max_size=10,
+        min_size=app_config.PSYCOPG_POOL_MIN,
+        max_size=app_config.PSYCOPG_POOL_MAX,
         max_idle=300.0,           # 5 分钟空闲后回收
         max_lifetime=3600.0,      # 1 小时强制轮换
         reconnect_timeout=300.0,  # 5 分钟内自动重连（覆盖网络瞬时抖动）
@@ -91,6 +96,7 @@ async def lifespan(app: FastAPI):
         open=False,
     )
     await pool.open()
+    app.state.psycopg_pool = pool
 
     try:
         # 用共享池构造 checkpointer 和 store（不再使用 from_conn_string）
@@ -99,25 +105,75 @@ async def lifespan(app: FastAPI):
         app.state.checkpointer = checkpointer
         logger.info("【数据库】✅ Checkpointer 已就绪（共享池）")
 
-        kv_store = AsyncPostgresStore(conn=pool)
-        await kv_store.setup()
+        from agent_server.llm import create_global_embedding_fn
+        from deep_agent_server.store.setup import create_kv_store
+
+        embed_fn = create_global_embedding_fn()
+        kv_store, semantic_search_enabled = await create_kv_store(pool, embed_fn)
         app.state.kv_store = kv_store
+        app.state.store_semantic_search_enabled = semantic_search_enabled
+        if app_config.STORE_TTL_SWEEPER_ENABLED:
+            await kv_store.start_ttl_sweeper()
+            logger.info("【Store】✅ TTL sweeper 已启动")
         logger.info("【数据库】✅ AsyncPostgresStore 已就绪（共享池）")
 
-        # 初始化 AgentManager
-        manager_agents = AgentManager(checkpointer=checkpointer, store=kv_store)
+        # 初始化 AgentManager（辅助 LLM 按用户配置在运行时创建）
+        manager_agents = AgentManager(
+            checkpointer=checkpointer,
+            store=kv_store,
+        )
         app.state.manager_agents = manager_agents
         logger.info("✅ AgentManager 已初始化")
 
-        # 初始化会话标题生成模型
-        try:
-            title_llm = create_title_llm()
-            app.state.title_llm = title_llm
-            logger.info("✅ 会话标题生成模型已初始化")
-        except Exception as e:
-            title_llm = None
-            app.state.title_llm = None
-            logger.warning(f"【app】⚠️ 会话标题生成模型初始化失败，将使用兜底标题: {e}")
+        from deep_agent_server.events import register_processors
+        from deep_agent_server.events.bus import get_event_bus
+        register_processors()
+        await get_event_bus().start()
+        logger.info("✅ EventBus 已启动")
+
+        from deep_agent_server.sandbox import is_docker_sdk_available, start_sandbox_cleanup_loop
+        from deep_agent_server.sandbox.docker_client import format_sandbox_docker_host_for_log
+        from deep_agent_server.workspace import get_sandbox_workspace_root
+
+        docker_host_log = format_sandbox_docker_host_for_log(
+            app_config.SANDBOX_DOCKER_HOST or ""
+        )
+        logger.info(
+            f"【Sandbox】SANDBOX_ENABLED={app_config.SANDBOX_ENABLED}, "
+            f"docker_sdk={is_docker_sdk_available()}, "
+            f"docker_host={docker_host_log}, "
+            f"workspace_root={app_config.get_workspace_root()}, "
+            f"sandbox_bind_root={get_sandbox_workspace_root()}, "
+            f"python={sys.executable}"
+        )
+        await start_sandbox_cleanup_loop()
+
+        if app_config.SKILL_CATALOG_AUTO_SYNC:
+            try:
+                from deep_agent_server.skills.catalog_sync import sync_catalog_from_repo
+
+                sync_result = await sync_catalog_from_repo()
+                logger.info(f"【SkillCatalog】启动同步: {sync_result}")
+            except Exception as e:
+                logger.warning(f"【SkillCatalog】启动同步失败: {e}")
+
+        from deep_agent_server.sandbox.status_notify import set_sandbox_status_notifier
+        from deep_agent_server.hitl.sweeper import (
+            set_hitl_ws_notifier,
+            start_hitl_sweeper,
+            stop_hitl_sweeper,
+        )
+
+        set_sandbox_status_notifier(manager.broadcast_sandbox_status)
+        if app_config.HITL_ENABLED:
+            set_hitl_ws_notifier(manager.send)
+            await start_hitl_sweeper(kv_store)
+            logger.info("【HITL】已启动 sweeper")
+        else:
+            logger.info("【HITL】HITL_ENABLED=False，跳过 sweeper 启动")
+
+        # 会话标题在 ask 时按用户 LLM 配置生成
+        app.state.title_llm = None
 
         logger.info("=" * 60)
         logger.info("【app】✅ 应用启动完成")
@@ -128,6 +184,45 @@ async def lifespan(app: FastAPI):
     finally:
         # ==================== 关闭阶段 ====================
         logger.info("【app】👋 应用关闭中...")
+        try:
+            from deep_agent_server.events.bus import get_event_bus
+            await get_event_bus().stop()
+            logger.info("✅ EventBus 已停止")
+        except Exception as e:
+            logger.warning(f"【app】⚠️ EventBus 关闭失败: {e}")
+        try:
+            from deep_agent_server.sandbox import stop_sandbox_cleanup_loop
+            await stop_sandbox_cleanup_loop()
+            logger.info("✅ Sandbox TTL 清理任务已停止")
+        except Exception as e:
+            logger.warning(f"【app】⚠️ Sandbox 清理任务关闭失败: {e}")
+        try:
+            from deep_agent_server.hitl.sweeper import stop_hitl_sweeper
+
+            await stop_hitl_sweeper()
+            logger.info("✅ HITL sweeper 已停止")
+        except Exception as e:
+            logger.warning(f"【app】⚠️ HITL sweeper 关闭失败: {e}")
+        try:
+            from deep_agent_server.sandbox.status_notify import set_sandbox_status_notifier
+            from deep_agent_server.hitl.sweeper import set_hitl_ws_notifier
+
+            set_sandbox_status_notifier(None)
+            set_hitl_ws_notifier(None)
+        except Exception:
+            pass
+        try:
+            kv_store = getattr(app.state, "kv_store", None)
+            if kv_store and app_config.STORE_TTL_SWEEPER_ENABLED:
+                await kv_store.stop_ttl_sweeper()
+                logger.info("✅ Store TTL sweeper 已停止")
+        except Exception as e:
+            logger.warning(f"【app】⚠️ Store TTL sweeper 关闭失败: {e}")
+        try:
+            await db_manager.close()
+            logger.info("✅ asyncpg 连接池已释放")
+        except Exception as e:
+            logger.warning(f"【app】⚠️ asyncpg 连接池关闭失败: {e}")
         await pool.close()
         logger.info("✅ 共享连接池已释放")
 
@@ -180,6 +275,57 @@ app.include_router(agent_api.router)
 app.include_router(mcp_api.router)
 # 注册search路由
 app.include_router(search_api.router)
+# 注册运营统计路由
+app.include_router(stats_api.router)
+# Deep Agent 扩展路由
+app.include_router(agent_run_api.router)
+app.include_router(artifact_api.router)
+app.include_router(user_memory_api.router)
+app.include_router(user_agent_api.router)
+app.include_router(user_llm_api.router)
+app.include_router(subscription_agent_api.router)
+app.include_router(skill_api.router)
+app.include_router(skill_internal_api.router)
+app.include_router(workspace_api.router)
+app.include_router(sandbox_api.router)
+
+STATIC_DIR = ROOT_DIR / "static"
+app.mount("/css", StaticFiles(directory=str(STATIC_DIR / "css")), name="css")
+app.mount("/js", StaticFiles(directory=str(STATIC_DIR / "js")), name="js")
+
+@app.get("/health")
+async def health_check():
+    """健康检查：asyncpg 业务池 + LangGraph psycopg 共享池。"""
+    asyncpg_ok = False
+    psycopg_ok = False
+    errors = []
+
+    try:
+        pool = await db_manager.get_pool()
+        async with pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        asyncpg_ok = True
+    except Exception as e:
+        errors.append(f"asyncpg: {e}")
+
+    try:
+        psycopg_pool = app.state.psycopg_pool
+        async with psycopg_pool.connection() as conn:
+            await conn.execute("SELECT 1")
+        psycopg_ok = True
+    except Exception as e:
+        errors.append(f"psycopg: {e}")
+
+    status = "ok" if asyncpg_ok and psycopg_ok else "degraded"
+    payload = {
+        "status": status,
+        "asyncpg": asyncpg_ok,
+        "psycopg": psycopg_ok,
+    }
+    if errors:
+        payload["errors"] = errors
+    code = 200 if status == "ok" else 503
+    return JSONResponse(content=payload, status_code=code)
 
 @app.get("/")
 async def home():
@@ -198,7 +344,15 @@ async def ws_endpoint(websocket: WebSocket):
     # 追踪当前 ws 上正在运行的 Agent 流任务（session_id -> Task）
     _stream_tasks: Dict[str, asyncio.Task] = {}
 
-    async def _run_agent_stream(session_id: str, action: str, user_id: str, user_token: str, payload: dict):
+    async def _run_agent_stream(
+        session_id: str,
+        action: str,
+        user_id: str,
+        user_token: str,
+        payload: dict,
+        *,
+        allow_if_missing: bool = False,
+    ):
         """
         后台任务：消费 Agent 流并通过 WebSocket 发送消息。
         与主接收循环解耦，避免阻塞 pong 处理。
@@ -210,7 +364,8 @@ async def ws_endpoint(websocket: WebSocket):
                 user_id=user_id,
                 user_token=user_token,
                 session_id=session_id,
-                payload=payload
+                payload=payload,
+                allow_if_missing=allow_if_missing,
             ):
                 await manager.send(message, session_id)
         except asyncio.CancelledError:
@@ -229,6 +384,17 @@ async def ws_endpoint(websocket: WebSocket):
             # ==================== 处理心跳 ====================
             if msg.get("type") == "pong":
                 manager._update_pong(websocket)
+                pong_uid = (msg.get("user_id") or "").strip()
+                if pong_uid and pong_uid != "guest":
+                    manager.bind_user(websocket, pong_uid)
+                continue
+
+            # ==================== 沙箱状态查询（替代 HTTP 轮询） ====================
+            if msg.get("type") == "get_sandbox_status":
+                user_id = (msg.get("user_id") or "").strip()
+                if user_id:
+                    manager.bind_user(websocket, user_id)
+                    await manager.send_sandbox_status(websocket, user_id)
                 continue
 
             # ==================== 获取用户发送内容 ====================
@@ -236,6 +402,8 @@ async def ws_endpoint(websocket: WebSocket):
             user_token = msg.get('user_token', '')
             question = msg.get('question', '')
             client_session_id = msg.get('session_id')
+
+            manager.bind_user(websocket, user_id)
 
             logger.info(f"【WebSocket】📨 收到用户{user_id}聊天请求: {question[:50]}...")
 
@@ -247,13 +415,17 @@ async def ws_endpoint(websocket: WebSocket):
 
             if is_new_session:
                 try:
-                    title_llm_model = getattr(websocket.app.state, "title_llm", None)
+                    title_llm_model = None
+                    try:
+                        title_llm_model = await create_title_llm_for_user(user_id)
+                    except ValueError:
+                        title_llm_model = None
                     session_title = await generate_session_title(title_llm_model, question, session_id)
-                    # 如果是新会话，先在 user_sessions 表中创建记录（父表）
-                    await storage.upsert_user_session(
+                    resolved_agent_id = await setup_new_session(
                         user_id=user_id,
                         session_id=session_id,
-                        session_name=session_title
+                        session_title=session_title,
+                        agent_id=msg.get("agent_id"),
                     )
                     # 发送 session_allocated 消息
                     await manager.send(
@@ -261,10 +433,50 @@ async def ws_endpoint(websocket: WebSocket):
                             session_id=session_id,
                             content={
                                 "session_id": session_id,
-                                "session_title": session_title
+                                "session_title": session_title,
+                                "agent_id": resolved_agent_id,
                             }
                         ).to_frontend_dict(),
                         session_id
+                    )
+
+                    capabilities = msg.get("capabilities", {})
+                    mcp_list = capabilities.get("mcp", [])
+                    selected_skill_ids = capabilities.get("skills")
+                    if selected_skill_ids is not None and isinstance(selected_skill_ids, list):
+                        selected_skill_ids = [
+                            str(s).strip() for s in selected_skill_ids if str(s).strip()
+                        ]
+                    else:
+                        selected_skill_ids = None
+
+                    async def _on_session_ready(sid: str):
+                        async def _process_pending(_sid, uid, pl):
+                            act = pl.get("action", ActionType.ASK.value)
+                            tok = pl.get("user_token", user_token)
+                            old = _stream_tasks.get(_sid)
+                            if old and not old.done():
+                                old.cancel()
+                            t = asyncio.create_task(
+                                _run_agent_stream(_sid, act, uid, tok, pl)
+                            )
+                            _stream_tasks[_sid] = t
+                            await t
+
+                        await SessionReadinessService.flush_pending(
+                            sid, user_id, _process_pending
+                        )
+
+                    SessionReadinessService.start_warmup(
+                        session_id,
+                        user_id,
+                        user_token,
+                        resolved_agent_id,
+                        mcp_list,
+                        _manager_agents,
+                        on_ready=_on_session_ready,
+                        send_fn=manager.send,
+                        selected_skill_ids=selected_skill_ids,
                     )
 
                     logger.info(f"【WebSocket】用户: {user_id}, 会话id: {session_id} {'(新会话)' if is_new_session else '(已存在会话)'}, action={msg.get('action')}")
@@ -279,6 +491,15 @@ async def ws_endpoint(websocket: WebSocket):
                     )
                     manager.disconnect(ws=websocket)
                     continue
+            elif not await validate_session_access(user_id, session_id):
+                await manager.send(
+                    AgentMessage.error(
+                        session_id=session_id,
+                        content=SESSION_ACCESS_DENIED_MSG,
+                    ).to_frontend_dict(),
+                    session_id,
+                )
+                continue
 
             # ==================== 处理消息 ====================
             action = msg.get('action', ActionType.ASK.value)
@@ -286,13 +507,20 @@ async def ws_endpoint(websocket: WebSocket):
             # 如果该 session 已有正在运行的流任务，先停止旧任务
             old_task = _stream_tasks.get(session_id)
             if old_task and not old_task.done():
-                _manager_agents.stop_task(session_id)
+                _manager_agents.stop_task(session_id, user_id=user_id)
                 old_task.cancel()
                 logger.info(f"【WebSocket】取消 session {session_id} 的旧 Agent 流任务")
 
             # 将 Agent 流处理放入后台任务，主循环继续接收消息（保证 pong 及时处理）
             task = asyncio.create_task(
-                _run_agent_stream(session_id, action, user_id, user_token, msg)
+                _run_agent_stream(
+                    session_id,
+                    action,
+                    user_id,
+                    user_token,
+                    msg,
+                    allow_if_missing=is_new_session,
+                )
             )
             _stream_tasks[session_id] = task
 
@@ -308,7 +536,6 @@ async def ws_endpoint(websocket: WebSocket):
         affected_sessions = manager.disconnect(websocket)
         # 通知 AgentManager 清理这些会话的路由映射
         for sid in affected_sessions:
-            # 停止正在运行的异步协程
             _manager_agents.stop_task(sid)
             # 清理 AgentManager 中的会话信息
             _manager_agents.disconnect_connection(sid)

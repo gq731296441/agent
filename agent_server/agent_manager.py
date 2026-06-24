@@ -3,11 +3,19 @@ import uuid
 from typing import Dict, Any, Optional, Tuple, AsyncGenerator
 from agent_server.agents import LangGraphAgent, create_base_agent
 from agent_server.agent_runner import run_agent, run_agent_ainvoke
-from agent_server.llm import create_agent_llm
+from agent_server.llm import create_agent_llm_for_user, create_user_aux_llms
 from agent_server.prompts import build_system_prompt
 from mcp_server.mcp_manager import McpToolService
-from db import storage
-from config import setup_logging, get_logger
+from db import storage, deep_storage
+from config import get_logger
+from config.config import app_config
+from utils.run_events import insert_agent_run_event
+from deep_agent_server.manager_ext import create_deep_agent_for_session
+from deep_agent_server.runner import run_deep_agent, run_deep_agent_collect
+from deep_agent_server.turn.context import load_turn, mark_resuming, resolve_resume_step_index, start_turn
+
+import hashlib
+import json
 
 # 公共模块导入
 from common.enums import MessageType, SenderType, EndReason
@@ -15,76 +23,138 @@ from common.schemas import AgentMessage
 
 logger = get_logger(__name__)
 
+SESSION_RUN_WAIT_TIMEOUT = 5.0
+
+
 class AgentManager:
     """
     AgentManager 负责管理 Agent 的创建和会话交互。
-    
+
     主要功能：
     - 根据 session_id 和 mcp_list 创建 Agent 实例
     - 将 agent 配置持久化到数据库
-    - 管理会话的停止事件
+    - 管理会话的停止事件与 per-session 互斥
     """
 
-    def __init__(self, checkpointer=None, store=None):
-        """
-        初始化 AgentManager
-        
-        Args:
-            checkpointer: LangGraph checkpointer 实例
-                         如果不提供，各 Agent 将使用内存保存器
-            store: LangGraph BaseStore 实例（如 InMemoryStore），
-                   用于跨请求持久化中间件状态（如熔断器计数）
-        """
+    def __init__(self, checkpointer=None, store=None, summary_llm=None, tool_judge_llm=None):
         self.checkpointer = checkpointer
         self.store = store
-        
-        # session_id -> asyncio.Task
+        self.summary_llm = summary_llm
+        self.tool_judge_llm = tool_judge_llm
+
         self._active_tasks: Dict[str, asyncio.Task] = {}
-        # session_id -> asyncio.Event
         self._stop_events: Dict[str, asyncio.Event] = {}
+        self._session_locks: Dict[str, asyncio.Lock] = {}
+        self._agent_cache: Dict[str, Tuple[Any, str, str, str]] = {}
+
+    @property
+    def is_deep_runtime(self) -> bool:
+        return (app_config.AGENT_RUNTIME or "deep").lower() != "light"
+
+    @staticmethod
+    def _mcp_list_hash(mcp_list: list) -> str:
+        ids = sorted(str(item.get("id")) for item in (mcp_list or []) if item.get("id"))
+        return hashlib.md5(json.dumps(ids, sort_keys=True).encode()).hexdigest()
+
+    @staticmethod
+    def _token_fingerprint(user_token: str) -> str:
+        return hashlib.sha256((user_token or "").encode()).hexdigest()[:16]
+
+    def _get_session_lock(self, session_id: str) -> asyncio.Lock:
+        if session_id not in self._session_locks:
+            self._session_locks[session_id] = asyncio.Lock()
+        return self._session_locks[session_id]
+
+    async def _prepare_session_run(self, session_id: str) -> None:
+        """获取 session 锁并等待/停止上一轮任务。"""
+        lock = self._get_session_lock(session_id)
+        await lock.acquire()
+
+        prev_task = self._active_tasks.get(session_id)
+        current = asyncio.current_task()
+        if prev_task and prev_task is not current and not prev_task.done():
+            self.stop_task(session_id)
+            try:
+                await asyncio.wait_for(prev_task, timeout=SESSION_RUN_WAIT_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[AgentManager] 等待 session {session_id} 旧任务结束超时，继续执行"
+                )
+            except asyncio.CancelledError:
+                pass
+
+    def _register_session_run(self, session_id: str, stop_event: asyncio.Event) -> asyncio.Task:
+        self._stop_events[session_id] = stop_event
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            self._active_tasks[session_id] = current_task
+        return current_task
+
+    def _cleanup_session_run(
+        self,
+        session_id: str,
+        stop_event: asyncio.Event,
+        task: Optional[asyncio.Task],
+    ) -> None:
+        if self._stop_events.get(session_id) is stop_event:
+            self._stop_events.pop(session_id, None)
+        if task is not None and self._active_tasks.get(session_id) is task:
+            self._active_tasks.pop(session_id, None)
+
+        lock = self._session_locks.get(session_id)
+        if lock is not None and lock.locked():
+            lock.release()
 
     async def create_agent(
-        self, 
-        user_id: str, 
+        self,
+        user_id: str,
         user_token: str,
         session_id: str,
-        mcp_list: list = None
-    ) -> Tuple[Optional[LangGraphAgent], Optional[str]]:
-        """
-        创建新的 Agent 实例，并将配置存储到数据库。
-        
-        每次调用都会创建新的 Agent 实例（不使用缓存）。
-        
-        Args:
-            user_id: 用户 ID
-            user_token: 用户 Token
-            session_id: 会话 ID
-            mcp_list: MCP 工具配置列表，格式为：
-                [{
-                    "name": "AI空间搜索",
-                    "type": "http",
-                    "url": "http://10.57.83.61:6002/mcp",
-                    "id": "xxx-xxx-xxx"
-                }, ...]
-            
-        Returns:
-            (agent_instance, error_message)
-            成功：(agent, None)
-            失败：(None, error_msg)
-        """
+        mcp_list: list = None,
+        agent_id: str = None,
+        user_message: str = None,
+        always_on_only: bool = False,
+        skip_sandbox: bool = False,
+        selected_skill_ids: list = None,
+    ) -> Tuple[Optional[Any], Optional[str]]:
+        if self.is_deep_runtime:
+            return await create_deep_agent_for_session(
+                self,
+                user_id,
+                user_token,
+                session_id,
+                mcp_list,
+                agent_id,
+                user_message=user_message,
+                always_on_only=always_on_only,
+                skip_sandbox=skip_sandbox,
+                selected_skill_ids=selected_skill_ids,
+            )
 
-        # 初始化 MCP 工具列表
         if mcp_list is None:
             mcp_list = []
-        # 初始化模型
-        model = create_agent_llm()
-        # 构建系统提示词
+
+        mcp_hash = self._mcp_list_hash(mcp_list)
+        token_fp = self._token_fingerprint(user_token)
+        cache_key = f"{session_id}:{mcp_hash}:{token_fp}"
+
+        if app_config.AGENT_CACHE_ENABLED and cache_key in self._agent_cache:
+            cached_agent, cached_token_fp, cached_mcp_hash = self._agent_cache[cache_key]
+            if cached_token_fp == token_fp and cached_mcp_hash == mcp_hash:
+                logger.info(f"[AgentManager] 命中 Agent 缓存 session_id={session_id}")
+                return cached_agent, None
+
+        meta = await storage.get_session_meta(session_id) if session_id else None
+        agent_kind = (meta or {}).get("agent_kind") or "default"
+        try:
+            model = await create_agent_llm_for_user(user_id, agent_kind)
+            aux = await create_user_aux_llms(user_id)
+        except ValueError as ve:
+            return None, str(ve)
         system_prompt = build_system_prompt(user_id, user_token)
-            
         mcp_service = McpToolService()
 
         try:
-            # 存储配置到数据库
             db_config = {
                 "selected_mcp_ids": [item.get("id") for item in mcp_list if item.get("id")]
             }
@@ -94,7 +164,6 @@ class AgentManager:
                 f"mcp工具数: {len(db_config['selected_mcp_ids'])}"
             )
 
-            # 获取 MCP 工具
             mcp_tools = []
             if mcp_list:
                 try:
@@ -103,7 +172,6 @@ class AgentManager:
                 except Exception as e:
                     logger.error(f"[AgentManager] 加载 MCP 工具失败: {e}")
 
-            # 创建 Agent 实例
             logger.info(f"[AgentManager] 正在创建新 Agent 实例, session_id: {session_id}")
 
             agent = create_base_agent(
@@ -112,8 +180,13 @@ class AgentManager:
                 tools=mcp_tools,
                 checkpointer=self.checkpointer,
                 store=self.store,
+                summary_llm=aux["summary"],
+                tool_judge_llm=aux["tool_judge"],
             )
-            
+
+            if app_config.AGENT_CACHE_ENABLED:
+                self._agent_cache[cache_key] = (agent, token_fp, mcp_hash)
+
             return agent, None
 
         except Exception as e:
@@ -122,27 +195,38 @@ class AgentManager:
             logger.error(f"[AgentManager] 创建 Agent 失败: {e}")
             return None, f"创建 Agent 失败: {str(e)}"
 
-    def _create_agent_config(self, user_id: str, user_token: str, session_id: str) -> dict:
-        """创建 agent 配置"""
+    def _create_agent_config(
+        self,
+        user_id: str,
+        user_token: str,
+        session_id: str,
+        run_id: str = None,
+        conversation_id: str = None,
+        agent_id: str = None,
+    ) -> dict:
         thread_id = f"{user_id}#{session_id}"
-       
+
         configurable = {
             "thread_id": thread_id,
         }
 
         metadata = {
-            # 用于Langfuse的session识别
             "user_id": user_id,
-            "session_id": session_id
+            "session_id": session_id,
         }
+        if run_id:
+            metadata["run_id"] = run_id
+        if conversation_id:
+            metadata["conversation_id"] = conversation_id
+        if agent_id:
+            metadata["agent_id"] = agent_id
 
         return {
             "configurable": configurable,
-            "metadata": metadata
+            "metadata": metadata,
         }
 
     async def _save_message_to_db(self, message: Dict[str, Any], user_id: str):
-        """将消息保存到数据库"""
         session_id = message.get("session_id")
         sender = message.get("sender")
         msg_type = message.get("type")
@@ -150,17 +234,20 @@ class AgentManager:
         conversation_id = message.get("conversation_id")
         group_id = message.get("group_id", 0)
         step_index = message.get("step_index", 0)
-        
-        # llm_text_final 在存库时转为 chat 类型
+        ref_id = message.get("ref_id") or (content.get("ref_id") if isinstance(content, dict) else None)
+        run_id = message.get("run_id") or (content.get("run_id") if isinstance(content, dict) else None)
+        subagent_run_id = message.get("subagent_run_id") or (
+            content.get("subagent_run_id") if isinstance(content, dict) else None
+        )
+
         if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
             msg_type = MessageType.CHAT.value
-        
+
         try:
             db_content = content
-            # 确保存库内容为 dict
             if not isinstance(db_content, dict):
                 db_content = {"text": str(content)}
-            
+
             await storage.add_history_record(
                 session_id=session_id,
                 user_id=user_id,
@@ -169,98 +256,223 @@ class AgentManager:
                 content=db_content,
                 conversation_id=conversation_id,
                 group_id=group_id,
-                step_index=step_index
+                step_index=step_index,
+                ref_id=ref_id,
+                run_id=run_id,
+                subagent_run_id=subagent_run_id,
             )
         except Exception as e:
             logger.error(f">>> [History Error] 保存失败: {e}")
 
     async def get_agent_stream(
-        self, 
-        user_id: str, 
-        user_token: str, 
-        session_id: str, 
+        self,
+        user_id: str,
+        user_token: str,
+        session_id: str,
         input_data: dict,
-        mcp_list: list = None
+        mcp_list: list = None,
+        agent_id: str = None,
+        continue_on_disconnect: bool = True,
+        selected_skill_ids: list = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
-        """
-        获取 Agent 流式输出的异步生成器。
-        
-        该方法负责：
-        1. 初始化 Agent（调用 get_or_create_agent）
-        2. 创建 stop_event 并存入 self._stop_events
-        3. 构造 config
-        4. 消费 Agent 的原始输出
-        5. 在 yield 消息之前，检查 save 字段并保存到数据库
-        
-        Args:
-            user_id: 用户 ID
-            user_token: 用户 Token
-            session_id: 会话 ID
-            input_data: 输入数据
-            mcp_list: MCP 工具配置列表
-            
-        Yields:
-            标准化的消息字典（不含 save 字段，直接可发送给前端）
-        """
         if mcp_list is None:
             mcp_list = []
-            
+
         stop_event = asyncio.Event()
-        self._stop_events[session_id] = stop_event
-        
+        current_task = None
+        is_resume = bool(input_data.get("command"))
+        initial_step_index = 0
+        turn_interrupted = False
+
+        if self.is_deep_runtime:
+            if is_resume:
+                resume_ctx = input_data.get("resume_context") or {}
+                turn = await load_turn(self.store, session_id)
+                run_id = (
+                    resume_ctx.get("run_id")
+                    or (turn or {}).get("run_id")
+                    or str(uuid.uuid4())
+                )
+                conversation_id = (
+                    resume_ctx.get("conversation_id")
+                    or (turn or {}).get("conversation_id")
+                    or str(uuid.uuid4())
+                )
+                initial_step_index = resolve_resume_step_index(turn, resume_ctx)
+                await mark_resuming(self.store, session_id)
+            else:
+                turn = await start_turn(self.store, session_id, user_id)
+                run_id = turn["run_id"]
+                conversation_id = turn["conversation_id"]
+                initial_step_index = 0
+        else:
+            run_id = str(uuid.uuid4())
+            conversation_id = str(uuid.uuid4())
+
+        run_logger = logger.bind(run_id=run_id, session_id=session_id, user_id=user_id)
+
         try:
-            # 1. 创建 Agent
-            agent, init_err = await self.create_agent(user_id, user_token, session_id, mcp_list)
-            
+            await self._prepare_session_run(session_id)
+            current_task = self._register_session_run(session_id, stop_event)
+
+            if self.is_deep_runtime:
+                if is_resume:
+                    await insert_agent_run_event(
+                        run_id=run_id,
+                        session_id=session_id,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        event_type="hitl_resolved",
+                    )
+                else:
+                    await insert_agent_run_event(
+                        run_id=run_id,
+                        session_id=session_id,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        event_type="turn_start",
+                    )
+            else:
+                await insert_agent_run_event(
+                    run_id=run_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    event_type="run_start",
+                )
+
+            user_msg = None
+            if input_data and not input_data.get("command"):
+                user_msg = (input_data.get("content") or "").strip() or None
+
+            agent, init_err = await self.create_agent(
+                user_id,
+                user_token,
+                session_id,
+                mcp_list,
+                agent_id,
+                user_message=user_msg,
+                selected_skill_ids=selected_skill_ids,
+            )
+
             if init_err:
                 yield AgentMessage.error(session_id=session_id, content=init_err).to_frontend_dict()
-                yield AgentMessage.end(session_id=session_id, reason=EndReason.STOP).to_frontend_dict()
+                yield AgentMessage.end(session_id=session_id, reason=EndReason.ERROR).to_frontend_dict()
                 return
-            
-            # 2. 构造 config
-            config = self._create_agent_config(user_id, user_token, session_id)
-            
-            # 3. 生成本轮会话的 conversation_id
-            conversation_id = str(uuid.uuid4())
-            
-            # 4. 消费 Agent 的原始输出
-            async for message in run_agent(
-                agent=agent,
-                input_data=input_data,
-                config=config,
-                session_id=session_id,
-                stop_event=stop_event,
-                conversation_id=conversation_id
-            ):
-                # 4. 检查 save 字段，若为 True 则保存到数据库
+
+            if not agent_id:
+                agent_id = await deep_storage.get_session_agent_id(session_id)
+
+            config = self._create_agent_config(
+                user_id,
+                user_token,
+                session_id,
+                run_id=run_id,
+                conversation_id=conversation_id,
+                agent_id=agent_id,
+            )
+
+            if self.is_deep_runtime:
+                stream_fn = run_deep_agent(
+                    agent,
+                    input_data=input_data,
+                    config=config,
+                    session_id=session_id,
+                    user_id=user_id,
+                    stop_event=stop_event,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    continue_on_disconnect=continue_on_disconnect,
+                    agent_id=agent_id,
+                    initial_step_index=initial_step_index,
+                    is_resume=is_resume,
+                )
+            else:
+                stream_fn = run_agent(
+                    agent=agent,
+                    input_data=input_data,
+                    config=config,
+                    session_id=session_id,
+                    stop_event=stop_event,
+                    conversation_id=conversation_id,
+                )
+
+            async for message in stream_fn:
                 should_save = message.pop("save", False)
                 if should_save:
                     await self._save_message_to_db(message, user_id)
-                
-                # 用户消息仅存储，不推送给前端
+
                 msg_sender = message.get("sender")
                 if msg_sender == SenderType.USER or msg_sender == SenderType.USER.value:
                     continue
-                
-                # llm_text_final 类型仅存储，不推送给前端
+
                 msg_type = message.get("type")
                 if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
                     continue
-                
-                # 5. yield 消息给外部（WebSocket 或 API）
+
+                if (
+                    self.is_deep_runtime
+                    and (msg_type == MessageType.INTERRUPT or msg_type == MessageType.INTERRUPT.value)
+                ):
+                    turn_interrupted = True
+
                 yield message
-                
+
         except asyncio.CancelledError:
-            logger.info(f"[AgentManager] 会话 {session_id} 被取消")
+            run_logger.info(f"[AgentManager] 会话 {session_id} 被取消")
+            if self.is_deep_runtime:
+                await insert_agent_run_event(
+                    run_id=run_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    event_type="turn_end",
+                    category="stopped",
+                )
+            else:
+                await insert_agent_run_event(
+                    run_id=run_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    event_type="stopped",
+                )
             yield AgentMessage.end(session_id=session_id, reason=EndReason.STOP).to_frontend_dict()
         except Exception as e:
-            logger.error(f"[AgentManager] 会话 {session_id} 出错: {e}")
+            run_logger.error(f"[AgentManager] 会话 {session_id} 出错: {e}")
+            if self.is_deep_runtime:
+                await insert_agent_run_event(
+                    run_id=run_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    event_type="turn_end",
+                    category="error",
+                    message=str(e)[:500],
+                )
+            else:
+                await insert_agent_run_event(
+                    run_id=run_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    event_type="error_classified",
+                    message=str(e)[:500],
+                )
             yield AgentMessage.error(session_id=session_id, content=str(e)).to_frontend_dict()
-            yield AgentMessage.end(session_id=session_id, reason=EndReason.STOP).to_frontend_dict()
+            yield AgentMessage.end(session_id=session_id, reason=EndReason.ERROR).to_frontend_dict()
         finally:
-            # 确保清理 stop_event
-            self._stop_events.pop(session_id, None)
-            self._active_tasks.pop(session_id, None)
+            if not self.is_deep_runtime:
+                await insert_agent_run_event(
+                    run_id=run_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    event_type="run_end",
+                )
+            elif turn_interrupted:
+                pass
+            self._cleanup_session_run(session_id, stop_event, current_task)
 
     async def get_agent_result(
         self,
@@ -268,36 +480,85 @@ class AgentManager:
         user_token: str,
         session_id: str,
         input_data: dict,
-        mcp_list: list = None
+        mcp_list: list = None,
+        agent_id: str = None,
+        selected_skill_ids: list = None,
     ) -> Dict[str, Any]:
-        """
-        非流式版 get_agent_stream：运行 Agent 到完成并返回结构化结果。
-
-        与 get_agent_stream 的核心区别：
-        - 使用 run_agent_ainvoke() 调用 compiled_graph.ainvoke() 收集结果
-        - 返回包含 final_answer / tool_calls / messages 的 dict
-        - 同样写入 chat_history 和 agent_configs
-
-        Returns:
-            {
-                "messages": list[dict],       # 前端消息列表（已过滤 USER / LLM_TEXT_FINAL）
-                "final_answer": str,
-                "reasoning": str,
-                "tool_calls": list[dict],
-                "tool_results": list[dict],
-                "status": "completed"|"stopped"|"error"|"interrupted",
-                "error": str,
-                "interrupt": dict,
-            }
-        """
         if mcp_list is None:
             mcp_list = []
 
         stop_event = asyncio.Event()
-        self._stop_events[session_id] = stop_event
+        current_task = None
+        is_resume = bool(input_data.get("command"))
+        initial_step_index = 0
+
+        if self.is_deep_runtime:
+            if is_resume:
+                resume_ctx = input_data.get("resume_context") or {}
+                turn = await load_turn(self.store, session_id)
+                run_id = (
+                    resume_ctx.get("run_id")
+                    or (turn or {}).get("run_id")
+                    or str(uuid.uuid4())
+                )
+                conversation_id = (
+                    resume_ctx.get("conversation_id")
+                    or (turn or {}).get("conversation_id")
+                    or str(uuid.uuid4())
+                )
+                initial_step_index = resolve_resume_step_index(turn, resume_ctx)
+                await mark_resuming(self.store, session_id)
+            else:
+                turn = await start_turn(self.store, session_id, user_id)
+                run_id = turn["run_id"]
+                conversation_id = turn["conversation_id"]
+        else:
+            run_id = str(uuid.uuid4())
+            conversation_id = str(uuid.uuid4())
 
         try:
-            agent, init_err = await self.create_agent(user_id, user_token, session_id, mcp_list)
+            await self._prepare_session_run(session_id)
+            current_task = self._register_session_run(session_id, stop_event)
+
+            if self.is_deep_runtime:
+                if is_resume:
+                    await insert_agent_run_event(
+                        run_id=run_id,
+                        session_id=session_id,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        event_type="hitl_resolved",
+                    )
+                else:
+                    await insert_agent_run_event(
+                        run_id=run_id,
+                        session_id=session_id,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        event_type="turn_start",
+                    )
+            else:
+                await insert_agent_run_event(
+                    run_id=run_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    event_type="run_start",
+                )
+
+            user_msg = None
+            if input_data and not input_data.get("command"):
+                user_msg = (input_data.get("content") or "").strip() or None
+
+            agent, init_err = await self.create_agent(
+                user_id,
+                user_token,
+                session_id,
+                mcp_list,
+                agent_id,
+                user_message=user_msg,
+                selected_skill_ids=selected_skill_ids,
+            )
             if init_err:
                 return {
                     "messages": [],
@@ -308,28 +569,51 @@ class AgentManager:
                     "status": "error",
                     "error": init_err,
                     "interrupt": {},
+                    "agent_mode": "deep" if self.is_deep_runtime else "light",
+                    "run_id": run_id,
                 }
 
-            config = self._create_agent_config(user_id, user_token, session_id)
-            conversation_id = str(uuid.uuid4())
+            if not agent_id:
+                agent_id = await deep_storage.get_session_agent_id(session_id)
 
-            result = await run_agent_ainvoke(
-                agent=agent,
-                input_data=input_data,
-                config=config,
-                session_id=session_id,
-                stop_event=stop_event,
+            config = self._create_agent_config(
+                user_id,
+                user_token,
+                session_id,
+                run_id=run_id,
                 conversation_id=conversation_id,
+                agent_id=agent_id,
             )
 
-            # 保存消息到 DB（与 get_agent_stream 相同逻辑）
+            if self.is_deep_runtime:
+                result = await run_deep_agent_collect(
+                    agent,
+                    input_data=input_data,
+                    config=config,
+                    session_id=session_id,
+                    user_id=user_id,
+                    stop_event=stop_event,
+                    conversation_id=conversation_id,
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    initial_step_index=initial_step_index,
+                    is_resume=is_resume,
+                )
+            else:
+                result = await run_agent_ainvoke(
+                    agent=agent,
+                    input_data=input_data,
+                    config=config,
+                    session_id=session_id,
+                    stop_event=stop_event,
+                    conversation_id=conversation_id,
+                )
+
             for msg in result["messages"]:
                 should_save = msg.pop("save", False)
                 if should_save:
-                    # 注入 user_id（run_agent 不携带 user_id）
                     await self._save_message_to_db(msg, user_id)
 
-            # 过滤：去除 USER 和 LLM_TEXT_FINAL 消息（前端不需要）
             frontend_messages = []
             for msg in result["messages"]:
                 msg_sender = msg.get("sender")
@@ -368,26 +652,25 @@ class AgentManager:
                 "interrupt": {},
             }
         finally:
-            self._stop_events.pop(session_id, None)
-            self._active_tasks.pop(session_id, None)
+            if not self.is_deep_runtime:
+                await insert_agent_run_event(
+                    run_id=run_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    event_type="run_end",
+                )
+            self._cleanup_session_run(session_id, stop_event, current_task)
 
-    def stop_task(self, session_id: str):
-        """触发软停止信号"""
-        # 触发软停止信号（event机制）
+    def stop_task(self, session_id: str, user_id: str = None):
         if session_id in self._stop_events:
             self._stop_events[session_id].set()
-        # 取消正在运行的任务
         if session_id in self._active_tasks:
-            self._active_tasks[session_id].cancel()
+            task = self._active_tasks[session_id]
+            if not task.done():
+                task.cancel()
 
     def disconnect_connection(self, session_id: str = None):
-        """
-        断开会话连接时调用，清理相关资源。
-        
-        Args:
-            session_id: 会话 ID
-        """
         if session_id:
-            self._stop_events.pop(session_id, None)
-            self._active_tasks.pop(session_id, None)
-            logger.info(f"[AgentManager] 会话 {session_id} 已断开连接")
+            self.stop_task(session_id)
+            logger.info(f"[AgentManager] 会话 {session_id} 已断开连接，已触发停止")

@@ -59,3 +59,37 @@ class ListApiResponse(ApiResponse[List[T]], Generic[T]):
     def error(cls, msg: str, code: int = -1) -> "ListApiResponse[T]":
         """创建错误响应的便捷方法"""
         return cls(code=code, msg=msg, data=[], status=False)
+
+
+class PaginatedData(BaseModel, Generic[T]):
+    """分页数据体。"""
+    items: List[T] = Field(default_factory=list)
+    total: int = Field(default=0)
+    page: int = Field(default=1)
+    page_size: int = Field(default=20)
+
+
+class PaginatedApiResponse(ApiResponse[PaginatedData[T]], Generic[T]):
+    """分页 API 响应。"""
+
+    data: Optional[PaginatedData[T]] = Field(default=None)
+
+    @classmethod
+    def success(
+        cls,
+        items: List[T],
+        total: int,
+        page: int,
+        page_size: int,
+        msg: str = "成功",
+    ) -> "PaginatedApiResponse[T]":
+        return cls(
+            code=0,
+            msg=msg,
+            status=True,
+            data=PaginatedData(items=items, total=total, page=page, page_size=page_size),
+        )
+
+    @classmethod
+    def error(cls, msg: str, code: int = -1) -> "PaginatedApiResponse[T]":
+        return cls(code=code, msg=msg, status=False, data=None)

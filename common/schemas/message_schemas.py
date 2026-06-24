@@ -133,6 +133,21 @@ class AgentMessage(BaseModel):
             content=reason,
             save=save
         )
+
+    @classmethod
+    def run_metrics(
+        cls,
+        session_id: str,
+        content: Dict[str, Any],
+    ) -> "AgentMessage":
+        """Deep run 结束指标（不存 chat_history）。"""
+        return cls(
+            type=MessageType.RUN_METRICS,
+            sender=SenderType.SYSTEM,
+            session_id=session_id,
+            content=content,
+            save=False,
+        )
     
     @classmethod
     def interrupt(
@@ -180,3 +195,49 @@ class AgentMessage(BaseModel):
             content=content,
             save=False
         )
+
+    @classmethod
+    def deep_message(
+        cls,
+        msg_type: MessageType,
+        session_id: str,
+        content: Dict[str, Any],
+        *,
+        save: bool = True,
+    ) -> "AgentMessage":
+        """Deep Agent 语义化消息工厂。"""
+        return cls(
+            type=msg_type,
+            sender=SenderType.SYSTEM,
+            session_id=session_id,
+            content=content,
+            save=save,
+        )
+
+    @classmethod
+    def todo_update(cls, session_id: str, content: Dict[str, Any], save: bool = True) -> "AgentMessage":
+        return cls.deep_message(MessageType.TODO_UPDATE, session_id, content, save=save)
+
+    @classmethod
+    def fs_operation(cls, session_id: str, content: Dict[str, Any], save: bool = True) -> "AgentMessage":
+        return cls.deep_message(MessageType.FS_OPERATION, session_id, content, save=save)
+
+    @classmethod
+    def execute_op(cls, session_id: str, content: Dict[str, Any], save: bool = True) -> "AgentMessage":
+        return cls.deep_message(MessageType.EXECUTE, session_id, content, save=save)
+
+    @classmethod
+    def execute_result(cls, session_id: str, content: Dict[str, Any], save: bool = True) -> "AgentMessage":
+        return cls.deep_message(MessageType.EXECUTE_RESULT, session_id, content, save=save)
+
+    @classmethod
+    def subagent_start(cls, session_id: str, content: Dict[str, Any], save: bool = True) -> "AgentMessage":
+        return cls.deep_message(MessageType.SUBAGENT_START, session_id, content, save=save)
+
+    @classmethod
+    def subagent_end(cls, session_id: str, content: Dict[str, Any], save: bool = True) -> "AgentMessage":
+        return cls.deep_message(MessageType.SUBAGENT_END, session_id, content, save=save)
+
+    @classmethod
+    def deep_status(cls, session_id: str, content: Dict[str, Any], save: bool = False) -> "AgentMessage":
+        return cls.deep_message(MessageType.DEEP_STATUS, session_id, content, save=save)

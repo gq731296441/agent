@@ -1,0 +1,8 @@
+# 开发与依赖编译工具（不进入生产镜像）
+# 编译: uv pip compile requirements-dev.in -o requirements-dev.txt --python-version 3.11
+# 安装: pip install -r requirements-dev.txt
+
+-c requirements.txt
+
+pip-tools>=7.4
+pipreqs>=0.4.13

@@ -40,6 +40,9 @@ def setup_logging(
     
     # 移除默认的 handler
     logger.remove()
+
+    is_production = (app_config.ENVIRONMENT or "").lower() == "production"
+    diagnose = not is_production
     
     # ==================== 控制台日志 ====================
     # 添加彩色控制台输出，格式化更易读
@@ -54,7 +57,7 @@ def setup_logging(
         level=log_level,
         colorize=True,
         backtrace=True,  # 显示完整的异常追踪
-        diagnose=True,   # 显示变量值
+        diagnose=diagnose,
     )
     
     # ==================== 文件日志 ====================
@@ -76,7 +79,7 @@ def setup_logging(
         retention=retention,    # 保留指定时间的日志
         compression="zip",      # 压缩旧日志
         backtrace=True,
-        diagnose=True,
+        diagnose=diagnose,
         enqueue=True,          # 异步写入，提高性能
     )
     

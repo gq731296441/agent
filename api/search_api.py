@@ -1,20 +1,106 @@
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi import APIRouter, Body, Request
-from typing import Any, Dict, AsyncGenerator
+from typing import Any, Dict, AsyncGenerator, Optional
 from langgraph.types import Command
 import json
 import asyncio
 
-from utils.session_utils import get_or_create_session, generate_session_title
+from utils.hitl_store import pop_interrupt, get_interrupt, build_hitl_decisions, build_hitl_history_decisions
+from utils.session_utils import (
+    get_or_create_session,
+    generate_session_title,
+    validate_session_access,
+    setup_new_session,
+    SESSION_ACCESS_DENIED_MSG,
+)
 from db import storage
 
+from config.config import app_config
+from deep_agent_server.session.readiness import SessionReadinessService
+
 # 公共模块导入
-from common.enums import EndReason, ActionType, DecisionType
+from common.enums import EndReason, ActionType, MessageType, SenderType
 from common.schemas import AgentMessage
 
 AGENT_TIMEOUT = 300  # 非流式请求超时（秒）
 
+
+async def _persist_hitl_resume_to_history(
+    session_id: str,
+    request_id: str,
+    info: Dict[str, Any],
+    user_decisions: list,
+) -> list:
+    """resume 成功后回写 chat_history：hitl_status=resolved + 逐条 decisions。返回 history decisions。"""
+    decisions = build_hitl_history_decisions(
+        info.get("actions") or [],
+        user_decisions,
+    )
+    ok = await storage.resolve_interrupt_in_history(
+        session_id,
+        request_id,
+        decisions=decisions,
+        hitl_status="resolved",
+    )
+    if not ok:
+        from config import get_logger
+        get_logger(__name__).warning(
+            f"[HITL] chat_history 未找到 request_id={request_id} session={session_id}"
+        )
+    return decisions
+
+
+def _extract_capabilities(payload: Dict[str, Any]) -> tuple[list, Optional[list]]:
+    """从 payload 解析 mcp 与 skills（capabilities.skills）。"""
+    capabilities = payload.get("capabilities") or {}
+    mcp_list = capabilities.get("mcp") or []
+    skills = capabilities.get("skills")
+    if skills is not None and not isinstance(skills, list):
+        skills = None
+    elif skills is not None:
+        skills = [str(s).strip() for s in skills if str(s).strip()]
+    return mcp_list, skills
+
+
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+async def _check_session_readiness(
+    action: str,
+    session_id: str,
+    user_id: str,
+    payload: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Deep 模式下检查就绪/排队。返回 dict 表示应短路 yield；None 表示继续执行。"""
+    if (app_config.AGENT_RUNTIME or "deep").lower() == "light":
+        return None
+
+    if action in (ActionType.STOP, ActionType.STOP.value):
+        return None
+
+    if action in (ActionType.RESUME_HITL, ActionType.RESUME_HITL.value):
+        if not await SessionReadinessService.is_ready(session_id):
+            return {
+                "type": MessageType.ERROR.value,
+                "error": "会话尚未就绪，无法恢复审批",
+            }
+        return None
+
+    if action in (ActionType.ASK, ActionType.ASK.value):
+        result = await SessionReadinessService.enqueue_message(session_id, user_id, payload)
+        if result.get("error"):
+            return {
+                "type": MessageType.ERROR.value,
+                "error": result["error"],
+            }
+        if result.get("queued"):
+            return {
+                "type": MessageType.MESSAGE_QUEUED.value,
+                "position": result.get("position", 0),
+                "status": result.get("status"),
+            }
+    return None
+
 
 async def process_agent_stream(
     manager_agents,
@@ -22,7 +108,10 @@ async def process_agent_stream(
     user_id: str,
     user_token: str,
     session_id: str,
-    payload: Dict[str, Any]
+    payload: Dict[str, Any],
+    *,
+    allow_if_missing: bool = False,
+    wait_on_queue: bool = False,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     统一的 Agent 流处理器，支持多种 action 类型。
@@ -38,9 +127,91 @@ async def process_agent_stream(
     Yields:
         标准化的消息字典
     """
-    # 提取 capabilities 中的 mcp 配置
-    capabilities = payload.get("capabilities", {})
-    mcp_list = capabilities.get("mcp", [])
+    if action != ActionType.STOP and action != ActionType.STOP.value:
+        if not await validate_session_access(
+            user_id, session_id, allow_if_missing=allow_if_missing
+        ):
+            yield AgentMessage.error(
+                session_id=session_id,
+                content=SESSION_ACCESS_DENIED_MSG,
+            ).to_frontend_dict()
+            return
+
+    if action not in (ActionType.STOP, ActionType.STOP.value):
+        from utils.subscription_guard import validate_ask_session
+
+        payload_agent_id = payload.get("agent_id")
+        ok, err_msg = await validate_ask_session(user_id, session_id, payload_agent_id)
+        if not ok:
+            yield AgentMessage.error(session_id=session_id, content=err_msg).to_frontend_dict()
+            return
+
+    if action in (ActionType.ASK, ActionType.ASK.value):
+        question = payload.get("question", "")
+        if question and app_config.USER_MEMORY_REMEMBER_ENABLED:
+            from deep_agent_server.memory.remember import parse_remember_message
+            from deep_agent_server.memory import get_user_memory_service
+
+            parsed = parse_remember_message(question)
+            if parsed:
+                memory_text, source = parsed
+                kv_store = getattr(manager_agents, "store", None)
+                svc = get_user_memory_service(kv_store)
+                row = await svc.create(user_id, memory_text, source=source)
+                yield AgentMessage(
+                    type=MessageType.CHAT,
+                    sender=SenderType.ASSISTANT,
+                    session_id=session_id,
+                    content={"text": f"已记住：{row.get('text', memory_text)}"},
+                    save=True,
+                ).to_frontend_dict()
+                return
+
+        await SessionReadinessService.ensure_warmup_started(
+            session_id,
+            user_id,
+            user_token,
+            payload,
+            manager_agents,
+        )
+
+    readiness = await _check_session_readiness(action, session_id, user_id, payload)
+    if readiness:
+        if readiness.get("type") == MessageType.MESSAGE_QUEUED.value:
+            yield AgentMessage(
+                type=MessageType.MESSAGE_QUEUED,
+                sender=SenderType.SYSTEM,
+                session_id=session_id,
+                content={
+                    "position": readiness.get("position"),
+                    "status": readiness.get("status"),
+                },
+                save=False,
+            ).to_frontend_dict()
+            if wait_on_queue:
+                ready = await SessionReadinessService.wait_until_ready(session_id)
+                if not ready:
+                    yield AgentMessage.error(
+                        session_id=session_id,
+                        content="会话预热超时或失败，请稍后重试",
+                    ).to_frontend_dict()
+                    return
+                from db import deep_storage
+
+                await deep_storage.delete_pending_messages(session_id)
+            else:
+                return
+        else:
+            yield AgentMessage.error(
+                session_id=session_id,
+                content=readiness.get("error", "会话未就绪"),
+            ).to_frontend_dict()
+            return
+
+    # 提取 capabilities
+    mcp_list, selected_skill_ids = _extract_capabilities(payload)
+    agent_id = payload.get("agent_id")
+    continue_on_disconnect = payload.get("continue_on_disconnect", True)
     
     if action == ActionType.ASK or action == ActionType.ASK.value:
         # ==================== 处理普通提问 ====================
@@ -62,70 +233,93 @@ async def process_agent_stream(
             user_token=user_token,
             session_id=session_id,
             input_data=input_data,
-            mcp_list=mcp_list
+            mcp_list=mcp_list,
+            agent_id=agent_id,
+            continue_on_disconnect=continue_on_disconnect,
+            selected_skill_ids=selected_skill_ids,
         ):
             yield message
     
     elif action == ActionType.RESUME_HITL or action == ActionType.RESUME_HITL.value:
-        # ==================== 处理 HITL 恢复 ====================
         request_id = payload.get("request_id")
         user_decisions = payload.get("decisions", [])
-        
-        # 获取 Agent 实例以访问 pending_interrupts（HITL 恢复时不需要重新初始化 MCP）
-        agent, init_err = await manager_agents.create_agent(user_id, user_token, session_id, mcp_list=[])
-        
-        if init_err:
-            yield AgentMessage.error(session_id=session_id, content=init_err).to_frontend_dict()
-            return
-        
-        info = agent.pending_interrupts.pop(request_id, None)
-        
+
+        kv_store = getattr(manager_agents, "store", None)
+        pending = await get_interrupt(
+            kv_store,
+            request_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        if pending:
+            from datetime import datetime, timezone
+            expires_at = pending.get("expires_at")
+            if expires_at:
+                try:
+                    exp = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=timezone.utc)
+                    if datetime.now(timezone.utc) >= exp:
+                        yield AgentMessage.error(
+                            session_id=session_id,
+                            content="审批已超时，本次执行已终止。",
+                        ).to_frontend_dict()
+                        return
+                except (TypeError, ValueError):
+                    pass
+
+        info = await pop_interrupt(
+            kv_store,
+            request_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+
         if not info:
             yield AgentMessage.error(
-                session_id=session_id, 
-                content="错误：中断请求无效或已处理。"
+                session_id=session_id,
+                content="错误：中断请求无效、已处理或已过期。",
             ).to_frontend_dict()
             return
-        
+
         if len(user_decisions) != info["num_pending"]:
             yield AgentMessage.error(
-                session_id=session_id, 
-                content="决策数量不匹配"
+                session_id=session_id,
+                content="决策数量不匹配",
             ).to_frontend_dict()
             return
-        
-        # 构造 decisions
-        decisions = []
-        for dec in user_decisions:
-            dec_type = dec["type"]
-            if dec_type == DecisionType.APPROVE or dec_type == DecisionType.APPROVE.value:
-                decisions.append({"type": dec_type})
-            elif dec_type == DecisionType.REJECT or dec_type == DecisionType.REJECT.value:
-                decisions.append({
-                    "type": dec_type,
-                    "message": "用户拒绝该工具的调用，无需再次发起调用请求"
-                })
-            elif dec_type == DecisionType.EDIT or dec_type == DecisionType.EDIT.value:
-                decisions.append({
-                    "type": dec_type,
-                    "edited_action": dec["edited_action"]
-                })
-        
+
+        history_decisions = await _persist_hitl_resume_to_history(
+            session_id, request_id, info, user_decisions
+        )
+
+        decisions = build_hitl_decisions(user_decisions)
         resume_cmd = Command(resume={"decisions": decisions})
-        
-        # 消费 Agent 流（HITL 恢复不需要重新传递 mcp_list）
+
         async for message in manager_agents.get_agent_stream(
             user_id=user_id,
             user_token=user_token,
             session_id=session_id,
-            input_data={"command": resume_cmd},
-            mcp_list=[]
+            input_data={
+                "command": resume_cmd,
+                "resume_context": {
+                    "run_id": info.get("run_id"),
+                    "conversation_id": info.get("conversation_id"),
+                    "step_index": info.get("step_index"),
+                    "request_id": request_id,
+                    "actions": info.get("actions") or [],
+                    "history_decisions": history_decisions,
+                },
+            },
+            mcp_list=mcp_list,
+            agent_id=agent_id,
+            selected_skill_ids=selected_skill_ids,
         ):
             yield message
     
     elif action == ActionType.STOP or action == ActionType.STOP.value:
         # ==================== 处理停止请求 ====================
-        manager_agents.stop_task(session_id)
+        manager_agents.stop_task(session_id, user_id=user_id)
         yield AgentMessage.status(
             session_id=session_id, 
             content="已停止生成"
@@ -145,7 +339,9 @@ async def process_agent_result(
     user_id: str,
     user_token: str,
     session_id: str,
-    payload: Dict[str, Any]
+    payload: Dict[str, Any],
+    *,
+    allow_if_missing: bool = False,
 ) -> Dict[str, Any]:
     """
     非流式版 process_agent_stream：运行 Agent 并返回结构化结果。
@@ -153,8 +349,39 @@ async def process_agent_result(
     与 process_agent_stream 的 action 分发逻辑完全一致，
     但调用 manager_agents.get_agent_result() 而非 get_agent_stream()。
     """
+    if action != ActionType.STOP and action != ActionType.STOP.value:
+        if not await validate_session_access(
+            user_id, session_id, allow_if_missing=allow_if_missing
+        ):
+            return {
+                "messages": [],
+                "final_answer": "",
+                "reasoning": "",
+                "tool_calls": [],
+                "tool_results": [],
+                "status": "error",
+                "error": SESSION_ACCESS_DENIED_MSG,
+                "interrupt": {},
+            }
+
+    readiness = await _check_session_readiness(action, session_id, user_id, payload)
+    if readiness:
+        return {
+            "messages": [],
+            "final_answer": "",
+            "reasoning": "",
+            "tool_calls": [],
+            "tool_results": [],
+            "status": "error" if readiness.get("type") == MessageType.ERROR.value else "queued",
+            "error": readiness.get("error", ""),
+            "interrupt": {},
+            "queued": readiness.get("type") == MessageType.MESSAGE_QUEUED.value,
+            "queue_position": readiness.get("position"),
+        }
+
     capabilities = payload.get("capabilities", {})
-    mcp_list = capabilities.get("mcp", [])
+    mcp_list, selected_skill_ids = _extract_capabilities(payload)
+    agent_id = payload.get("agent_id")
 
     if action == ActionType.ASK or action == ActionType.ASK.value:
         question = payload.get("question", "")
@@ -173,27 +400,49 @@ async def process_agent_result(
             session_id=session_id,
             input_data=input_data,
             mcp_list=mcp_list,
+            agent_id=agent_id,
+            selected_skill_ids=selected_skill_ids,
         )
 
     elif action == ActionType.RESUME_HITL or action == ActionType.RESUME_HITL.value:
         request_id = payload.get("request_id")
         user_decisions = payload.get("decisions", [])
 
-        agent, init_err = await manager_agents.create_agent(user_id, user_token, session_id, mcp_list=[])
+        kv_store = getattr(manager_agents, "store", None)
+        pending = await get_interrupt(
+            kv_store,
+            request_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        if pending:
+            from datetime import datetime, timezone
+            expires_at = pending.get("expires_at")
+            if expires_at:
+                try:
+                    exp = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00"))
+                    if exp.tzinfo is None:
+                        exp = exp.replace(tzinfo=timezone.utc)
+                    if datetime.now(timezone.utc) >= exp:
+                        return {
+                            "messages": [],
+                            "final_answer": "",
+                            "reasoning": "",
+                            "tool_calls": [],
+                            "tool_results": [],
+                            "status": "error",
+                            "error": "审批已超时，本次执行已终止。",
+                            "interrupt": {},
+                        }
+                except (TypeError, ValueError):
+                    pass
 
-        if init_err:
-            return {
-                "messages": [],
-                "final_answer": "",
-                "reasoning": "",
-                "tool_calls": [],
-                "tool_results": [],
-                "status": "error",
-                "error": init_err,
-                "interrupt": {},
-            }
-
-        info = agent.pending_interrupts.pop(request_id, None)
+        info = await pop_interrupt(
+            kv_store,
+            request_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
         if not info:
             return {
                 "messages": [],
@@ -202,7 +451,7 @@ async def process_agent_result(
                 "tool_calls": [],
                 "tool_results": [],
                 "status": "error",
-                "error": "错误：中断请求无效或已处理。",
+                "error": "错误：中断请求无效、已处理或已过期。",
                 "interrupt": {},
             }
 
@@ -218,34 +467,35 @@ async def process_agent_result(
                 "interrupt": {},
             }
 
-        decisions = []
-        for dec in user_decisions:
-            dec_type = dec["type"]
-            if dec_type == DecisionType.APPROVE or dec_type == DecisionType.APPROVE.value:
-                decisions.append({"type": dec_type})
-            elif dec_type == DecisionType.REJECT or dec_type == DecisionType.REJECT.value:
-                decisions.append({
-                    "type": dec_type,
-                    "message": "用户拒绝该工具的调用，无需再次发起调用请求"
-                })
-            elif dec_type == DecisionType.EDIT or dec_type == DecisionType.EDIT.value:
-                decisions.append({
-                    "type": dec_type,
-                    "edited_action": dec["edited_action"]
-                })
+        history_decisions = await _persist_hitl_resume_to_history(
+            session_id, request_id, info, user_decisions
+        )
 
+        decisions = build_hitl_decisions(user_decisions)
         resume_cmd = Command(resume={"decisions": decisions})
 
         return await manager_agents.get_agent_result(
             user_id=user_id,
             user_token=user_token,
             session_id=session_id,
-            input_data={"command": resume_cmd},
-            mcp_list=[],
+            input_data={
+                "command": resume_cmd,
+                "resume_context": {
+                    "run_id": info.get("run_id"),
+                    "conversation_id": info.get("conversation_id"),
+                    "step_index": info.get("step_index"),
+                    "request_id": request_id,
+                    "actions": info.get("actions") or [],
+                    "history_decisions": history_decisions,
+                },
+            },
+            mcp_list=mcp_list,
+            agent_id=agent_id,
+            selected_skill_ids=selected_skill_ids,
         )
 
     elif action == ActionType.STOP or action == ActionType.STOP.value:
-        manager_agents.stop_task(session_id)
+        manager_agents.stop_task(session_id, user_id=user_id)
         return {
             "messages": [],
             "final_answer": "",
@@ -255,6 +505,11 @@ async def process_agent_result(
             "status": "stopped",
             "error": "",
             "interrupt": {},
+            "agent_mode": "deep",
+            "run_id": None,
+            "subagent_runs": [],
+            "todos": [],
+            "token_usage": {},
         }
 
     else:
@@ -341,15 +596,41 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
     session_id, is_new_session = await get_or_create_session(client_session_id)
 
     session_title = ""
+    resolved_agent_id = None
     if is_new_session:
         try:
-            title_llm = getattr(request.app.state, "title_llm", None)
+            title_llm = None
+            try:
+                from agent_server.llm import create_title_llm_for_user
+
+                title_llm = await create_title_llm_for_user(user_id)
+            except ValueError:
+                title_llm = None
             session_title = await generate_session_title(title_llm, question, session_id)
-            await storage.upsert_user_session(
+            resolved_agent_id = await setup_new_session(
                 user_id=user_id,
                 session_id=session_id,
-                session_name=session_title,
+                session_title=session_title,
+                agent_id=params.get("agent_id"),
             )
+            capabilities = params.get("capabilities", {})
+            mcp_list = capabilities.get("mcp", [])
+            SessionReadinessService.start_warmup(
+                session_id,
+                user_id,
+                user_token,
+                resolved_agent_id,
+                mcp_list,
+                manager_agents,
+            )
+            if not await SessionReadinessService.wait_until_ready(session_id):
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "session_id": session_id,
+                        "error": "会话预热超时或失败，请稍后重试",
+                    },
+                )
         except Exception as e:
             return JSONResponse(
                 status_code=500,
@@ -360,7 +641,7 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
             )
 
     # 取消该 session 的旧任务（避免并发冲突）
-    manager_agents.stop_task(session_id)
+    manager_agents.stop_task(session_id, user_id=user_id)
 
     # ==================== 流式路径 ====================
     if stream_mode:
@@ -374,6 +655,7 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
                         content={
                             "session_id": session_id,
                             "session_title": session_title,
+                            "agent_id": resolved_agent_id,
                         }
                     ).to_frontend_dict()
                     yield f"data: {json.dumps(allocated_msg, ensure_ascii=False)}\n\n"
@@ -385,6 +667,8 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
                     user_token=user_token,
                     session_id=session_id,
                     payload=params,
+                    allow_if_missing=is_new_session,
+                    wait_on_queue=True,
                 ):
                     json_data = json.dumps(message, ensure_ascii=False)
                     yield f"data: {json_data}\n\n"
@@ -422,6 +706,7 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
                 user_token=user_token,
                 session_id=session_id,
                 payload=params,
+                allow_if_missing=is_new_session,
             ),
             timeout=AGENT_TIMEOUT,
         )
@@ -449,6 +734,7 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
         "session_id": session_id,
         "is_new_session": is_new_session,
         "session_title": session_title,
+        "agent_id": resolved_agent_id,
         "result": result,
     }
 

@@ -4,7 +4,7 @@ import os
 import uuid
 import time
 import asyncio
-from typing import Dict, Set
+from typing import Dict, Optional, Set
 from config import setup_logging, get_logger, app_config
 
 logger = get_logger(__name__)
@@ -43,6 +43,10 @@ class WebsocketConnectionManager:
         # websocket -> 心跳状态
         self.ws_to_heartbeat: Dict[WebSocket, Dict] = {}
         # 结构示例: {ws: {"last_pong": timestamp, "task": asyncio.Task}}
+
+        # user_id 绑定（用于心跳附带沙箱状态、按用户推送）
+        self.ws_to_user_id: Dict[WebSocket, str] = {}
+        self.user_to_ws: Dict[str, Set[WebSocket]] = {}
 
     async def connect(self, ws: WebSocket) -> WebSocket:
         """
@@ -93,6 +97,64 @@ class WebsocketConnectionManager:
 
         return True
 
+    def bind_user(self, ws: WebSocket, user_id: str) -> None:
+        """绑定 WebSocket 到用户（用于沙箱状态推送）。"""
+        uid = (user_id or "").strip()
+        if not uid or uid == "guest" or ws not in self.ws_to_sessions:
+            return
+        old = self.ws_to_user_id.get(ws)
+        if old == uid:
+            return
+        if old and old in self.user_to_ws:
+            self.user_to_ws[old].discard(ws)
+            if not self.user_to_ws[old]:
+                self.user_to_ws.pop(old, None)
+        self.ws_to_user_id[ws] = uid
+        self.user_to_ws.setdefault(uid, set()).add(ws)
+
+    def _unbind_user(self, ws: WebSocket) -> None:
+        uid = self.ws_to_user_id.pop(ws, None)
+        if uid and uid in self.user_to_ws:
+            self.user_to_ws[uid].discard(ws)
+            if not self.user_to_ws[uid]:
+                self.user_to_ws.pop(uid, None)
+
+    async def send_to_ws(self, ws: WebSocket, msg: dict) -> bool:
+        if ws.application_state != WebSocketState.CONNECTED:
+            return False
+        try:
+            await ws.send_json(msg)
+            return True
+        except Exception as e:
+            logger.error(f"【websocket】直连发送失败: {e}")
+            return False
+
+    async def send_sandbox_status(self, ws: WebSocket, user_id: str) -> bool:
+        """查询并推送沙箱状态到指定连接。"""
+        from deep_agent_server.sandbox import get_sandbox_user_status
+
+        try:
+            body = await get_sandbox_user_status(user_id)
+        except Exception as e:
+            logger.debug(f"[Sandbox] WS 状态查询失败 user={user_id}: {e}")
+            return False
+        return await self.send_to_ws(
+            ws,
+            {
+                "type": "sandbox_status",
+                "user_id": user_id,
+                "content": body,
+            },
+        )
+
+    async def broadcast_sandbox_status(self, user_id: str) -> None:
+        """向该用户所有 WebSocket 连接推送沙箱状态。"""
+        uid = (user_id or "").strip()
+        if not uid:
+            return
+        for ws in list(self.user_to_ws.get(uid, ())):
+            await self.send_sandbox_status(ws, uid)
+
     def disconnect(self, ws: WebSocket) -> Set[str]:
         """
         断开连接或移除 session 映射
@@ -114,6 +176,8 @@ class WebsocketConnectionManager:
             if task:
                 task.cancel()
             self.ws_to_heartbeat.pop(ws, None)
+
+        self._unbind_user(ws)
             
         return related_sessions
 
@@ -170,11 +234,19 @@ class WebsocketConnectionManager:
                 break
             
             try:
-                await ws.send_json({
+                ping: dict = {
                     "type": "ping",
-                    "server_time": current_time
-                })
-                # logger.debug(f"[Heartbeat] 发送 ping 到 ws {id(ws)}")
+                    "server_time": current_time,
+                }
+                user_id = self.ws_to_user_id.get(ws)
+                if user_id and app_config.SANDBOX_ENABLED:
+                    from deep_agent_server.sandbox import get_sandbox_user_status
+
+                    try:
+                        ping["sandbox_status"] = await get_sandbox_user_status(user_id)
+                    except Exception:
+                        pass
+                await ws.send_json(ping)
             except Exception as e:
                 logger.error(f"[Heartbeat] 发送 ping 失败: {e}")
                 break

@@ -1,149 +1,416 @@
 <!DOCTYPE html>
-<html lang="zh">
-
+<html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <title>agent</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="/static/style.css">
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
-    <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agent 功能测试控制台</title>
+  <link rel="stylesheet" href="/css/app.css" />
 </head>
-
 <body>
-    <div style="display: flex;">
-        <div id="session-container" style="position: relative;background: #fafafa;box-shadow: 2px 0 12px rgba(0, 0, 0, 0.1);width: 250px;transition: 0.3s;">
-            <div class="session-top">
-                <span class="toggle-sessions" id="toggle-sessions-btn" onclick="toggleSessionPanel()" title="会话列表">
-                    <svg t="1767946871054" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="4649" width="24" height="24"><path d="M740.395 188c88.365 0 160 71.635 160 160v329.347c-0.001 88.365-71.635 159.999-160 160H280c-88.366 0-160-71.635-160-160V348c0-88.365 71.634-160 160-160h460.395zM280 252c-53.019 0-96 42.981-96 96v329.347c0 53.019 42.981 96 96 96h134.051V252H280z m198.051 521.347h262.344c53.019-0.001 95.999-42.981 96-96V348c0-53.019-42.981-96-96-96H478.051v521.347zM337.367 456.266c17.673 0 32 14.326 32 32 0 17.673-14.327 32-32 32H264.33c-17.673-0.001-32-14.327-32-32 0-17.673 14.327-32 32-32h73.037z m0-122.86c17.673 0 32 14.327 32 32 0 17.673-14.327 32-32 32H264.33c-17.673 0-32-14.327-32-32 0-17.673 14.327-32 32-32h73.037z" fill="#707070" p-id="4650"></path></svg>
-                </span>
-                <span class="add-new-session" id="create-new-session"  onclick="addNewSessionButton()" title="新建会话">
-                   <svg t="1767950457323" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="5036" width="24" height="24"><path d="M512 188c17.673 0 32 14.327 32 32 0 17.673-14.327 32-32 32H304c-48.601 0-88 39.399-88 88v320.108c0 48.601 39.399 88 88 88h28.935c21.144 0 42.056 4.411 61.399 12.953l82.119 36.261a87.997 87.997 0 0 0 71.094 0l82.119-36.261a151.988 151.988 0 0 1 61.399-12.953H720c48.601 0 88-39.399 88-88V500.054c0-17.673 14.327-32 32-32 17.673 0 32 14.327 32 32v160.054c0 83.948-68.053 152-152 152h-28.935a88.011 88.011 0 0 0-35.546 7.499l-82.12 36.261a151.994 151.994 0 0 1-122.798 0l-82.12-36.261a88.011 88.011 0 0 0-35.546-7.499H304c-83.947 0-152-68.052-152-152V340c0-83.947 68.053-152 152-152h208z m216-32c17.673 0 32 14.327 32 32v96h96c17.673 0 32 14.327 32 32 0 17.673-14.327 32-32 32h-96v96c0 17.673-14.327 32-32 32-17.673 0-32-14.327-32-32v-96h-96c-17.673 0-32-14.327-32-32 0-17.673 14.327-32 32-32h96v-96c0-17.673 14.327-32 32-32z" fill="#707070" p-id="5037"></path></svg>
-                    <span id="add-new-session-text" style="margin-left: 10px;transition: 0.3s;">新建会话</span>
-                </span>
-            </div>
-            <div class="session-bottom">
-                <div id="sessions-panel" style="display: block;">
-                <div id="sessions-list" style="padding: 10px;"></div>
-            </div>
-            </div>
-        </div>
-        <div style="display: flex;flex-direction: column;flex: 1;height: 100vh;">
-            <div class="header">
-                <div style="display: flex; align-items: center; gap: 10px;">
-                    Agent
-                </div>
-                <span id="connection-status" class="status-indicator disconnected">●</span>
-            </div>
-            
-            <div class="main-container">
-                <div class="panel chat-panel">
-                    <div class="panel-header">💬 对话交互</div>
-                    <div class="messages" id="messages">
-                    </div>
-                    <div class="input-area">
-                        <div style="display: flex;flex-direction: column;padding: 5px 10px;border: solid 1px #e0e0e0;border-radius: 12px;">
-                            <div class="input-container" style="display: flex;flex-direction: row;align-items: center;">
-                                <textarea id="input" placeholder="输入问题... (Shift+Enter 换行)"></textarea>
-                            </div>
-                            <div class="bottom-button-container" style="display: flex;align-items: center;justify-content: space-between;">
-                                <div style="display: flex;">
-                                    <div class="file-upload">
-                                        <span>
-                                            <svg t="1767944405770" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="3352" width="24" height="24"><path d="M842.72 259.904a159.04 159.04 0 0 0-113.056-46.912h-0.16a158.592 158.592 0 0 0-112.768 46.656l-0.096 0.064-294.528 294.528a95.968 95.968 0 0 0 68.128 163.712c24.512 0 49.024-9.28 67.648-27.968l294.496-294.496a31.968 31.968 0 1 0-45.248-45.248l-294.496 294.496a31.872 31.872 0 0 1-45.088-0.16 31.552 31.552 0 0 1-0.192-45.088l294.496-294.496a95.04 95.04 0 0 1 67.648-28h0.096a95.52 95.52 0 0 1 67.872 28.16c18.112 18.112 28.096 42.24 28.128 67.84a95.136 95.136 0 0 1-27.968 67.776l-79.52 79.52-0.512 0.48-220.416 220.48a160.32 160.32 0 0 1-226.432 0.096A158.912 158.912 0 0 1 224 628.224c0-42.816 16.672-83.04 46.912-113.28l300.288-300.32a31.968 31.968 0 1 0-45.248-45.248l-300.288 300.288A222.848 222.848 0 0 0 160 628.224c0 59.872 23.264 116.16 65.504 158.4a223.168 223.168 0 0 0 158.336 65.44 223.68 223.68 0 0 0 158.592-65.6l311.456-311.424a31.68 31.68 0 0 0 7.104-11.072c18.496-26.56 28.64-57.92 28.608-91.04a159.104 159.104 0 0 0-46.88-113.024" fill="#707070" p-id="3353"></path></svg>
-                                        </span>
-                                    </div>
-                                    <div class="mcp-tools" onclick="toggleMcpPanel()">
-                                        <span>
-                                            <svg t="1767945826826" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="1333" width="24" height="24"><path d="M358.4 537.6A128 128 0 0 1 486.4 665.6v153.6A128 128 0 0 1 358.4 947.2H204.8A128 128 0 0 1 76.8 819.2v-153.6A128 128 0 0 1 204.8 537.6h153.6zM204.8 614.4a51.2 51.2 0 0 0-51.2 51.2v153.6a51.2 51.2 0 0 0 51.2 51.2h153.6a51.2 51.2 0 0 0 51.2-51.2v-153.6a51.2 51.2 0 0 0-51.2-51.2H204.8z" p-id="1334" fill="#707070"></path><path d="M678.5024 598.3744a27.3408 27.3408 0 0 1 47.2576-12.6464l58.7264 66.4064c3.9424 4.4544 9.216 7.5264 15.0528 8.704l86.9376 17.664c22.1184 4.5056 29.5424 32.256 12.6464 47.2064l-66.4576 58.7264a27.3408 27.3408 0 0 0-8.704 15.0528l-17.6128 86.9888a27.3408 27.3408 0 0 1-47.2576 12.6464l-58.7264-66.56a27.2896 27.2896 0 0 0-15.0016-8.6016l-87.04-17.664a27.3408 27.3408 0 0 1-12.5952-47.2576l66.4576-58.6752a27.392 27.392 0 0 0 8.704-15.0528l17.6128-86.9376z" p-id="1335" fill="#707070"></path><path d="M358.4 76.8A128 128 0 0 1 486.4 204.8v153.6A128 128 0 0 1 358.4 486.4H204.8A128 128 0 0 1 76.8 358.4V204.8A128 128 0 0 1 204.8 76.8h153.6zM204.8 153.6a51.2 51.2 0 0 0-51.2 51.2v153.6a51.2 51.2 0 0 0 51.2 51.2h153.6a51.2 51.2 0 0 0 51.2-51.2V204.8a51.2 51.2 0 0 0-51.2-51.2H204.8zM819.2 76.8A128 128 0 0 1 947.2 204.8v153.6A128 128 0 0 1 819.2 486.4h-153.6A128 128 0 0 1 537.6 358.4V204.8A128 128 0 0 1 665.6 76.8h153.6zM665.6 153.6a51.2 51.2 0 0 0-51.2 51.2v153.6a51.2 51.2 0 0 0 51.2 51.2h153.6a51.2 51.2 0 0 0 51.2-51.2V204.8a51.2 51.2 0 0 0-51.2-51.2h-153.6z" p-id="1336" fill="#707070"></path></svg>
-                                        </span>
-                                        <span style="margin-left: 5px;">
-                                            <span id="mcp-status" class="status-indicator disconnected">●</span>
-                                        </span>
-                                    </div>
-                                    <div class="mcp-control">
-                                        <div id="mcp-panel" style="display:none; position:absolute; background:white; border:1px solid #ccc; padding:10px;">
-                                            <!-- <h4>已连接服务:</h4>
-                                            <ul id="mcp-server-list">
-                                                </ul>
-                                            <hr> -->
-                                            <h4>已加载工具:</h4>
-                                            <ul id="mcp-tool-list">
-                                                </ul>
-                                            <hr>
-                                            <!-- <h4>添加新服务:</h4>
-                                            <input type="text" id="new-mcp-id" placeholder="ID (e.g. email)">
-                                            <input type="text" id="new-mcp-port" placeholder="Port (e.g. 8000)">
-                                            <button onclick="addMcpServer()">添加</button> -->
-                                        </div>
-                                    </div>
-                                </div>
-                                <div>
-                                    <div class="button-group">
-                                        <span id="sendBtn" onclick="send()">
-                                            <svg t="1767944600774" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="1157" width="24" height="24"><path fill="#000" d="M738.707 151.339c95.586-34.49 188.094 58.019 153.605 153.605L695.528 850.316c-34.785 96.406-166.614 107.65-217.225 18.529l-93.595-164.812a120.002 120.002 0 0 0-45.09-45.091l-164.813-93.595c-89.121-50.611-77.876-182.44 18.529-217.225l545.373-196.783z m93.404 131.884c16.095-44.607-27.076-87.779-71.683-71.683L215.056 408.323c-44.989 16.234-50.236 77.754-8.647 101.372l164.813 93.594a183.999 183.999 0 0 1 69.139 69.139l93.595 164.814c23.618 41.589 85.138 36.342 101.371-8.647l196.784-545.372z m-180.648 98.725c12.497 12.497 12.497 32.758 0 45.255l-144.25 144.25c-12.496 12.497-32.758 12.497-45.255 0-12.496-12.497-12.496-32.758 0-45.255l144.25-144.25c12.497-12.496 32.758-12.496 45.255 0z" p-id="1158"></path></svg>
-                                        </span>
-                                        <span id="stopBtn" onclick="stop()" style="display:none;">
-                                            <svg t="1767944998512" class="icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" p-id="2903" width="24" height="24"><path fill="#d81e06" d="M512.438 140c205.693 0 372.44 166.746 372.44 372.438 0 205.693-166.747 372.44-372.44 372.44C306.746 884.878 140 718.131 140 512.438 140 306.746 306.746 140 512.438 140z m0 64C342.093 204 204 342.093 204 512.438c0 170.346 138.093 308.44 308.438 308.44 170.347 0 308.44-138.093 308.44-308.44C820.878 342.093 682.784 204 512.438 204zM592 392c22.091 0 40 17.909 40 40v160c0 22.091-17.909 40-40 40H432c-22.091 0-40-17.909-40-40V432c0-22.091 17.909-40 40-40h160z" p-id="2904"></path></svg>
-                                        </span>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="panel workspace-panel">
-                    <div class="tabs-header" id="tabs-header">
-                        <div class="tab-item active" onclick="switchTab('tool-logs-tab')">
-                            🛠️ 工作台
-                        </div>
-                    </div>
-                    
-                    <div class="tabs-content" id="tabs-content">
-                        <div id="tool-logs-tab" class="tab-pane active tool-logs-container">
-                            <div id="statusUpdates" class="status-list"></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
+  <header class="top-bar">
+    <h1>Agent 测试控制台</h1>
+    <div class="top-fields">
+      <label>user_id <input id="input-user-id" type="text" /></label>
+      <label>user_token <input id="input-user-token" type="password" placeholder="可选" /></label>
+      <label>对比用户 <input id="input-compare-user-id" type="text" /></label>
+      <button type="button" id="btn-save-config" class="btn primary">保存</button>
     </div>
-    
+    <div class="status-bar">
+      <span id="status-ws" class="badge ws-disconnected">WS: disconnected</span>
+      <span id="status-session" class="badge">Session: (new)</span>
+      <span id="status-mcp-count" class="badge">MCP: 0</span>
+      <span id="status-skill-count" class="badge">Skills: 0</span>
+      <span id="status-heartbeat" class="badge">ping 0 / pong 0</span>
+      <span id="status-health" class="badge">Health: —</span>
+      <button type="button" id="btn-check-health" class="btn sm">Health</button>
+      <button type="button" id="btn-llm-config" class="btn sm">模型配置</button>
+      <button type="button" id="btn-ws-connect" class="btn sm">连接 WS</button>
+      <button type="button" id="btn-ws-disconnect" class="btn sm">断开</button>
+    </div>
+  </header>
 
-    <!-- <div class="panel file-panel">
-        <div class="panel-header">📁 文件资源</div>
-        <div id="file-list" class="file-list-container">
-            <div class="empty-state">暂无生成文件</div>
+  <div class="layout">
+    <nav class="sidebar">
+      <button type="button" class="nav-item active" data-tab="connection">连接与身份</button>
+      <button type="button" class="nav-item" data-tab="chat">Agent 对话</button>
+      <button type="button" class="nav-item" data-tab="sessions">会话与存储</button>
+      <button type="button" class="nav-item" data-tab="workspace">工作区</button>
+      <button type="button" class="nav-item" data-tab="mcp">MCP 工具</button>
+      <button type="button" class="nav-item" data-tab="skills">Skills</button>
+      <button type="button" class="nav-item" data-tab="skill-market">Skill 市场</button>
+      <button type="button" class="nav-item" data-tab="subscription-agents">订阅智能体</button>
+      <button type="button" class="nav-item" data-tab="rest">REST 调试</button>
+      <button type="button" class="nav-item" data-tab="stats">运营统计</button>
+      <button type="button" class="nav-item" data-tab="multi">多用户测试</button>
+    </nav>
+
+    <main class="main-content">
+      <!-- 连接与身份 -->
+      <section id="panel-connection" class="panel">
+        <h2>连接与身份</h2>
+        <p>配置保存在 localStorage。切换 user_id 后请刷新会话列表。</p>
+        <pre id="health-result" class="code-block">点击 Health 检测 asyncpg + psycopg 池</pre>
+      </section>
+
+      <!-- Agent 对话 -->
+      <section id="panel-chat" class="panel active">
+        <div class="chat-layout">
+          <aside class="chat-session-sidebar">
+            <div class="chat-sidebar-header">
+              <h3>会话列表</h3>
+              <div class="chat-sidebar-actions">
+                <button type="button" id="btn-chat-refresh-sessions" class="btn sm" title="刷新">↻</button>
+                <button type="button" id="btn-chat-new-session" class="btn sm" title="新会话">+</button>
+              </div>
             </div>
-    </div> -->
-    <!-- <div class="container">
-        <div class="header">Agent</div>
-        <div class="chat-box">
-            <div class="left-panel">
-                <div class="messages">
-                </div>
-                <div class="input-area">
-                    <textarea id="input" placeholder="请输入你的问题..."></textarea>
-                    <button id="sendBtn" onclick="send()">发送</button>
-                    <button id="stopBtn" onclick="stop()" style="display:none;">停止</button>
-                </div>
+            <p class="chat-sidebar-hint">默认与订阅智能体会话分开展示；选择后加载历史继续对话</p>
+            <div id="chat-current-session" class="chat-current-session">当前: (新会话)</div>
+            <div class="chat-session-section">
+              <h4 class="chat-session-section-title">默认智能体</h4>
+              <ul id="chat-session-list-default" class="session-list session-list-compact"></ul>
+            </div>
+            <div class="chat-session-section">
+              <h4 class="chat-session-section-title">订阅智能体</h4>
+              <ul id="chat-session-list-subscription" class="session-list session-list-compact"></ul>
+            </div>
+          </aside>
+          <div class="chat-main">
+            <div class="chat-toolbar">
+              <label><input type="radio" name="transport" id="transport-ws" value="ws" checked /> WebSocket</label>
+              <label><input type="radio" name="transport" id="transport-sse" value="sse" /> SSE</label>
+              <button type="button" id="btn-stop" class="btn warn">Stop</button>
+              <button type="button" id="btn-clear-chat" class="btn sm">清空消息</button>
+              <button type="button" id="btn-reload-chat-history" class="btn sm">重载历史</button>
+              <span class="chat-toolbar-sep">|</span>
+              <button type="button" id="btn-test-subagent-start" class="btn sm" title="注入 subagent_start 测试卡片">SubAgent Start</button>
+              <button type="button" id="btn-test-subagent-end" class="btn sm" title="注入 subagent_end 测试卡片">SubAgent End</button>
+              <button type="button" id="btn-test-subagent-flow" class="btn sm" title="依次注入启动+结束">SubAgent 流程</button>
+            </div>
+            <div id="chat-readonly-banner" class="chat-readonly-banner hidden"></div>
+            <div id="chat-messages" class="chat-messages"></div>
+            <div class="chat-input-row">
+              <textarea id="input-question" rows="2" placeholder="输入问题，Enter 发送…"></textarea>
+              <button type="button" id="btn-send" class="btn primary">发送</button>
             </div>
 
-            <div class="right-panel">
-                <h3 class="panel-title">🛠️ 状态与工具</h3>
-                <div class="tool-status-area">
-                    <div id="statusUpdates" class="status-list"> </div>
-                </div>
-                <h3 class="panel-title">📁 文件与资源</h3>
-                <div id="fileArea" class="file-list">
-                    <p>暂无文件或资源展示。</p>
-                </div>
+            <div id="hitl-panel" class="hitl-panel hidden">
+              <h3>HITL 审批 <code id="hitl-request-id"></code></h3>
+              <div id="hitl-actions"></div>
+              <div class="hitl-actions-bar">
+                <button type="button" id="btn-hitl-submit" class="btn primary">提交决策</button>
+                <button type="button" id="btn-hitl-cancel" class="btn">取消</button>
+              </div>
             </div>
+          </div>
         </div>
-    </div> -->
-    <script type="module" src="/static/main.js"></script>
+      </section>
 
+      <!-- 会话与存储 -->
+      <section id="panel-sessions" class="panel">
+        <div class="toolbar">
+          <button type="button" id="btn-refresh-sessions" class="btn">刷新列表</button>
+          <button type="button" id="btn-new-session" class="btn">新会话</button>
+          <button type="button" id="btn-load-history" class="btn">加载历史</button>
+          <button type="button" id="btn-load-checkpointer" class="btn">加载 Checkpointer</button>
+          <button type="button" id="btn-delete-soft" class="btn warn">软删除</button>
+          <button type="button" id="btn-delete-permanent" class="btn danger">永久删除</button>
+          <button type="button" id="btn-cross-user-test" class="btn">越权测试</button>
+        </div>
+        <div class="sessions-grid">
+          <div>
+            <h3>会话列表</h3>
+            <ul id="session-list" class="session-list"></ul>
+          </div>
+          <div>
+            <h3>chat_history</h3>
+            <pre id="history-json" class="code-block">选择会话后加载</pre>
+          </div>
+          <div>
+            <h3>checkpointer</h3>
+            <pre id="checkpointer-json" class="code-block">点击「加载 Checkpointer」手动拉取</pre>
+          </div>
+          <div>
+            <h3>越权测试结果</h3>
+            <pre id="cross-user-result" class="code-block">—</pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- 工作区 -->
+      <section id="panel-workspace" class="panel">
+        <div class="toolbar">
+          <label>scope
+            <select id="workspace-scope">
+              <option value="all" selected>全部（不含 skills）</option>
+              <option value="workspace">workspace</option>
+              <option value="skills">skills</option>
+              <option value="artifacts">artifacts</option>
+              <option value="uploads">uploads</option>
+            </select>
+          </label>
+          <label>会话
+            <select id="workspace-session-select">
+              <option value="">全部会话 workspace</option>
+            </select>
+          </label>
+          <button type="button" id="btn-workspace-refresh" class="btn primary">刷新</button>
+          <button type="button" id="btn-workspace-reconcile" class="btn">对账 reconcile</button>
+        </div>
+        <div id="workspace-quota-bar" class="workspace-quota-bar">—</div>
+        <p id="workspace-quota-detail" class="workspace-quota-detail">—</p>
+        <table class="data-table">
+          <thead>
+            <tr><th>路径</th><th>类型</th><th>大小</th><th>更新时间</th><th>操作</th></tr>
+          </thead>
+          <tbody id="workspace-files-body"></tbody>
+        </table>
+      </section>
+
+      <!-- MCP -->
+      <section id="panel-mcp" class="panel">
+        <div class="toolbar">
+          <button type="button" id="btn-load-mcp" class="btn primary">拉取 MCP 工具</button>
+          <button type="button" id="btn-select-all-mcp" class="btn sm">全选</button>
+          <button type="button" id="btn-clear-mcp" class="btn sm">清空选择</button>
+        </div>
+        <p>勾选的工具会注入 ask 请求的 <code>capabilities.mcp</code></p>
+        <table class="data-table">
+          <thead>
+            <tr><th></th><th>状态</th><th>名称</th><th>描述</th><th>URL</th><th>ID</th></tr>
+          </thead>
+          <tbody id="mcp-table-body"></tbody>
+        </table>
+      </section>
+
+      <!-- Skills -->
+      <section id="panel-skills" class="panel">
+        <div class="toolbar">
+          <button type="button" id="btn-load-skills" class="btn primary">刷新已安装 Skills</button>
+          <button type="button" id="btn-select-all-skills" class="btn sm">全选</button>
+          <button type="button" id="btn-clear-skills" class="btn sm">清空选择</button>
+        </div>
+        <p>勾选后注入 ask 的 <code>capabilities.skills</code>（仅暴露选中 Skill；未勾选的不加载且不可 read_file）</p>
+        <p id="skill-lock-hint" class="hint warn hidden"></p>
+        <table class="data-table">
+          <thead>
+            <tr><th></th><th>ID</th><th>名称</th><th>版本</th><th>来源</th></tr>
+          </thead>
+          <tbody id="skill-table-body"></tbody>
+        </table>
+      </section>
+
+      <!-- Skill 市场 -->
+      <section id="panel-skill-market" class="panel">
+        <h2>Skill 市场</h2>
+        <p class="hint">浏览平台 Skill 仓库并订阅到当前用户工作区；订阅后在「Skills」页勾选用于对话。</p>
+        <div class="toolbar skill-market-toolbar">
+          <button type="button" class="btn sm skill-market-tab active" data-market-tab="catalog">市场</button>
+          <button type="button" class="btn sm skill-market-tab" data-market-tab="subscribed">已订阅</button>
+          <input id="skill-market-search" type="search" placeholder="名称/描述搜索…" class="sub-search" />
+          <button type="button" id="btn-skill-market-refresh" class="btn primary">刷新</button>
+        </div>
+        <div id="skill-market-tag-filters" class="skill-market-tag-filters">
+          <span class="skill-market-tag-label">标签：</span>
+        </div>
+        <div id="skill-market-catalog-view">
+          <div class="skill-market-pagination">
+            <button type="button" id="btn-skill-market-prev" class="btn sm">上一页</button>
+            <span id="skill-market-page-info">第 1 页</span>
+            <button type="button" id="btn-skill-market-next" class="btn sm">下一页</button>
+          </div>
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>名称</th><th>ID</th><th>版本</th><th>标签</th><th>作者</th>
+                <th>订阅数</th><th>更新</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="skill-market-catalog-body"></tbody>
+          </table>
+        </div>
+        <div id="skill-market-subscribed-view" class="hidden">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>名称</th><th>ID</th><th>已装版本</th><th>最新版本</th><th>订阅时间</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="skill-market-subscribed-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 订阅智能体 -->
+      <section id="panel-subscription-agents" class="panel">
+        <div class="subscription-layout">
+          <aside class="subscription-used-sidebar">
+            <div class="subscription-sidebar-header">
+              <h3>使用过的智能体</h3>
+              <button type="button" id="btn-sub-new-context" class="btn sm" title="清空当前订阅会话上下文">开始新会话</button>
+            </div>
+            <p class="hint">每项对应一个订阅智能体的固定会话；「开始新会话」仅作用于当前选中的订阅对话</p>
+            <ul id="used-agents-list" class="session-list session-list-compact"></ul>
+          </aside>
+          <div class="subscription-main">
+            <div class="toolbar">
+              <button type="button" class="btn sm sub-tab active" data-sub-tab="all">全部</button>
+              <button type="button" class="btn sm sub-tab" data-sub-tab="subscribed">已订阅</button>
+              <button type="button" class="btn sm sub-tab" data-sub-tab="mine">我创建的</button>
+              <input id="sub-agent-search" type="search" placeholder="名称搜索…" class="sub-search" />
+              <button type="button" id="btn-sub-agent-create" class="btn primary">创建订阅智能体</button>
+              <button type="button" id="btn-sub-agent-refresh" class="btn sm">刷新</button>
+            </div>
+            <p class="hint">订阅智能体：能力由创建者固定，您使用自己的模型 Key 对话。默认与订阅智能体均需在顶栏「模型配置」中填写 LLM。</p>
+            <div id="sub-agents-grid" class="sub-agents-grid"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- REST -->
+      <section id="panel-rest" class="panel">
+        <div class="toolbar">
+          <label>session_id <input id="rest-session-id" type="text" placeholder="当前会话或手动输入" /></label>
+          <label>question <input id="rest-question" type="text" value="你好" /></label>
+          <button type="button" id="btn-rest-chat" class="btn primary">POST /agent/chat</button>
+          <button type="button" id="btn-rest-get-config" class="btn">GET config</button>
+          <button type="button" id="btn-rest-list-config" class="btn">LIST configs</button>
+        </div>
+        <pre id="rest-output" class="code-block">REST 响应</pre>
+      </section>
+
+      <!-- 统计 -->
+      <section id="panel-stats" class="panel">
+        <div class="toolbar">
+          <label>开始 <input id="stats-start" type="date" /></label>
+          <label>结束 <input id="stats-end" type="date" /></label>
+          <button type="button" id="btn-load-stats" class="btn primary">概览+任务+工具</button>
+          <button type="button" id="btn-load-all-stats" class="btn">全部 6 接口</button>
+        </div>
+        <pre id="stats-output" class="code-block">统计数据</pre>
+      </section>
+
+      <!-- 多用户 -->
+      <section id="panel-multi" class="panel">
+        <p>双 WebSocket 连接：UserA = 主用户，UserB = 对比用户。可对同一 session_id 并发 ask 验证互斥 stop。</p>
+        <div class="toolbar">
+          <button type="button" id="btn-dual-connect" class="btn primary">建立双连接</button>
+          <button type="button" id="btn-dual-disconnect" class="btn">断开</button>
+          <input id="dual-question" type="text" value="你好" placeholder="测试问题" />
+          <button type="button" id="btn-dual-ask-a" class="btn">UserA ask</button>
+          <button type="button" id="btn-dual-ask-b" class="btn warn">UserB ask (同 session)</button>
+          <button type="button" id="btn-clear-multi-log" class="btn sm">清空日志</button>
+        </div>
+        <div id="multi-user-log" class="multi-log"></div>
+      </section>
+    </main>
+  </div>
+
+  <footer id="event-log-panel" class="event-log-panel">
+    <div class="event-log-header">
+      <strong>原始事件日志</strong>
+      <button type="button" id="btn-toggle-log" class="btn sm">折叠</button>
+      <button type="button" id="btn-clear-log" class="btn sm">清空</button>
+    </div>
+    <div id="event-log-body" class="event-log-body"></div>
+  </footer>
+
+  <div id="toast" class="toast"></div>
+
+  <dialog id="dialog-llm-config" class="modal-dialog">
+    <form method="dialog" id="form-llm-config">
+      <h3>用户模型配置</h3>
+      <p class="hint">主模型用于 Agent 对话；快速模型（可选）用于工具结果判断、历史摘要、会话标题，未配置时自动使用主模型。</p>
+      <fieldset class="llm-config-group">
+        <legend>主模型（必填）</legend>
+      <label>模型名称 <input id="llm-model" type="text" required /></label>
+      <label>Base URL <input id="llm-base-url" type="url" required /></label>
+      <label>API Key
+        <div id="llm-api-key-saved" class="llm-key-masked hidden"></div>
+        <input id="llm-api-key" type="password" placeholder="留空则不修改已保存的 Key" autocomplete="new-password" />
+      </label>
+      </fieldset>
+      <fieldset class="llm-config-group">
+        <legend>快速模型（可选）</legend>
+      <label>模型名称 <input id="llm-fast-model" type="text" placeholder="留空则使用主模型" /></label>
+      <label>Base URL <input id="llm-fast-base-url" type="url" placeholder="留空则使用主模型" /></label>
+      <label>API Key
+        <div id="llm-fast-api-key-saved" class="llm-key-masked hidden"></div>
+        <input id="llm-fast-api-key" type="password" placeholder="留空则不修改；未配置快速模型时使用主模型 Key" autocomplete="new-password" />
+      </label>
+      </fieldset>
+      <p class="hint">测试连接不会在网络上传输 Key，服务端使用已保存的密钥。</p>
+      <div class="modal-actions">
+        <button type="button" id="btn-llm-test" class="btn">测试主模型</button>
+        <button type="button" id="btn-llm-test-fast" class="btn">测试快速模型</button>
+        <button type="submit" class="btn primary">保存</button>
+        <button type="button" id="btn-llm-cancel" class="btn">关闭</button>
+      </div>
+      <pre id="llm-test-result" class="code-block"></pre>
+    </form>
+  </dialog>
+
+  <dialog id="dialog-sub-api-example" class="modal-dialog modal-wide modal-api">
+    <h3 id="sub-api-example-title">订阅智能体 SSE 调用示例</h3>
+    <p id="sub-api-example-hint" class="hint"></p>
+    <dl class="api-meta-list">
+      <div><dt>agent_id</dt><dd id="sub-api-meta-agent-id"></dd></div>
+      <div><dt>session_id</dt><dd id="sub-api-meta-session-id"></dd></div>
+      <div><dt>user_id</dt><dd id="sub-api-meta-user-id"></dd></div>
+    </dl>
+    <section class="api-snippet-section">
+      <div class="api-snippet-header">
+        <strong>步骤 1：获取或创建订阅会话</strong>
+        <button type="button" class="btn sm btn-copy-snippet" data-target="sub-api-ensure">复制</button>
+      </div>
+      <pre id="sub-api-ensure" class="code-block api-snippet"></pre>
+    </section>
+    <section class="api-snippet-section">
+      <div class="api-snippet-header">
+        <strong>步骤 2：SSE 流式对话（curl）</strong>
+        <button type="button" class="btn sm btn-copy-snippet" data-target="sub-api-curl">复制</button>
+      </div>
+      <pre id="sub-api-curl" class="code-block api-snippet"></pre>
+    </section>
+    <section class="api-snippet-section">
+      <div class="api-snippet-header">
+        <strong>步骤 2：SSE 流式对话（JavaScript fetch）</strong>
+        <button type="button" class="btn sm btn-copy-snippet" data-target="sub-api-fetch">复制</button>
+      </div>
+      <pre id="sub-api-fetch" class="code-block api-snippet"></pre>
+    </section>
+    <div class="modal-actions">
+      <button type="button" id="btn-sub-api-close" class="btn">关闭</button>
+    </div>
+  </dialog>
+
+  <dialog id="dialog-sub-agent" class="modal-dialog modal-wide">
+    <form method="dialog" id="form-sub-agent">
+      <h3 id="sub-agent-form-title">创建订阅智能体</h3>
+      <input type="hidden" id="sub-agent-edit-id" value="" />
+      <label>名称 <input id="sub-agent-name" type="text" required /></label>
+      <label>描述 <textarea id="sub-agent-desc" rows="2"></textarea></label>
+      <label>系统提示词 <textarea id="sub-agent-prompt" rows="6" required></textarea></label>
+      <label>可见性
+        <select id="sub-agent-visibility">
+          <option value="public" selected>公开</option>
+          <option value="private">私有</option>
+        </select>
+      </label>
+      <fieldset>
+        <legend>MCP（创建者已订阅）</legend>
+        <div id="sub-agent-mcp-list" class="checkbox-list"></div>
+      </fieldset>
+      <fieldset>
+        <legend>Skills（创建者已安装）</legend>
+        <div id="sub-agent-skill-list" class="checkbox-list"></div>
+      </fieldset>
+      <div class="modal-actions">
+        <button type="submit" class="btn primary">保存</button>
+        <button type="button" id="btn-sub-agent-cancel" class="btn">取消</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="/js/app.js"></script>
 </body>
-
 </html>

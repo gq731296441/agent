@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Any, Callable
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
@@ -12,10 +13,13 @@ from json_repair import repair_json
 from agent_server.llm import create_tool_judge_llm
 from agent_server.prompts import INTENT_INFER_PROMPT, TOOL_REFINE_PROMPT
 from config import get_logger
+from config.config import app_config
 from db import storage
 from utils.token_counter import token_counter
 
 logger = get_logger(__name__)
+
+SENSITIVE_ARG_KEYS = ("password", "token", "secret", "api_key", "authorization", "credential")
 
 DEFAULT_MAX_OBSERVE_TOKENS = 10000 # 工具结果观察的默认最大 token 数，超过时会触发压缩机制
 MAX_TOOL_REFINE_INPUT_TOKENS = 12000 # 工具结果压缩输入的最大 token 数，过长时先截断再压缩
@@ -25,10 +29,22 @@ JUDGE_HISTORY_LIMIT = 10
 
 # 自定义中间件, 用于追踪工具日志中间件
 class ToolMonitoringMiddleWare(AgentMiddleware):
-    def __init__(self):
+    def __init__(self, judge_llm=None):
         super().__init__()
-        self.judge_llm = create_tool_judge_llm()
+        self.judge_llm = judge_llm or create_tool_judge_llm()
         self._token_counter = token_counter
+
+    @staticmethod
+    def _sanitize_tool_args(tool_args: dict) -> dict:
+        if not isinstance(tool_args, dict):
+            return tool_args
+        sanitized = {}
+        for key, value in tool_args.items():
+            if any(s in str(key).lower() for s in SENSITIVE_ARG_KEYS):
+                sanitized[key] = "***"
+            else:
+                sanitized[key] = value
+        return sanitized
 
     def after_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """模型输出后检查并修复畸形的工具调用参数。
@@ -110,7 +126,10 @@ class ToolMonitoringMiddleWare(AgentMiddleware):
         tool_args = request.tool_call["args"]
         tool_call_id = request.tool_call.get("id", "")
 
-        logger.info(f"【ToolMiddleWare】准备调用工具 {tool_name}，参数 {tool_args}")
+        logger.info(
+            f"【ToolMiddleWare】准备调用工具 {tool_name}，参数 {self._sanitize_tool_args(tool_args)}"
+        )
+        duration_ms = 0
         try:
             # 在真正调用工具前，立即推送 tool_call 事件给前端
             writer = self._get_stream_writer_safe()
@@ -125,7 +144,9 @@ class ToolMonitoringMiddleWare(AgentMiddleware):
                 })
 
             # 使用 awrap_tool_call 必须使用 await 等待工具执行完毕才能获取工具结果
+            start_ts = time.perf_counter()
             result = await handler(request)
+            duration_ms = int((time.perf_counter() - start_ts) * 1000)
 
             output_content = self._stringify_content(result)
             if isinstance(result, ToolMessage):
@@ -135,12 +156,15 @@ class ToolMonitoringMiddleWare(AgentMiddleware):
             # 注意：request.state 通常包含了当前的 messages 列表
             history = request.state.get("messages", [])
 
-            status = await self._judge_tool_result(
-                history=history,
-                tool_name=tool_name,
-                tool_args=tool_args,
-                output=output_content,
-            )
+            if len(output_content) < app_config.TOOL_JUDGE_SKIP_MAX_CHARS:
+                status = "success"
+            else:
+                status = await self._judge_tool_result(
+                    history=history,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    output=output_content,
+                )
 
             # 3. 异步记录工具调用信息到 measure.tool_call_logs
             await self._record_tool_call_log(
@@ -149,6 +173,7 @@ class ToolMonitoringMiddleWare(AgentMiddleware):
                 tool_args=tool_args,
                 output_content=output_content,
                 status=status,
+                duration_ms=duration_ms,
             )
 
             # 4. 将状态注入结果
@@ -357,10 +382,11 @@ class ToolMonitoringMiddleWare(AgentMiddleware):
         tool_args: dict,
         output_content: str,
         status: str,
+        duration_ms: int = None,
     ) -> None:
         """将工具调用信息异步写入 measure.tool_call_logs 表。"""
         try:
-            session_id, user_id = self._extract_metadata(request)
+            session_id, user_id, run_id, conversation_id = self._extract_metadata(request)
             tool_call_id = request.tool_call.get("id", "")
 
             await storage.insert_tool_call_log(
@@ -368,26 +394,33 @@ class ToolMonitoringMiddleWare(AgentMiddleware):
                 user_id=user_id,
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
-                tool_args=tool_args,
+                tool_args=self._sanitize_tool_args(tool_args),
                 tool_result=output_content,
                 status=status,
+                run_id=run_id,
+                conversation_id=conversation_id,
+                duration_ms=duration_ms,
             )
         except Exception as e:
             # 记录失败不影响主流程
             logger.warning(f"【ToolMiddleWare】记录工具调用日志失败: {e}")
 
     @staticmethod
-    def _extract_metadata(request: ToolCallRequest) -> tuple[str, str]:
-        """从 request.runtime.config.metadata 中提取 session_id 和 user_id。"""
+    def _extract_metadata(request: ToolCallRequest) -> tuple[str, str, str, str]:
+        """从 request.runtime.config.metadata 中提取 session_id / user_id / run_id / conversation_id。"""
         session_id = ""
         user_id = ""
+        run_id = ""
+        conversation_id = ""
         runtime = getattr(request, "runtime", None)
         if runtime is not None:
             config = getattr(runtime, "config", None) or {}
             metadata = config.get("metadata", {})
             session_id = metadata.get("session_id", "")
             user_id = metadata.get("user_id", "")
-        return session_id, user_id
+            run_id = metadata.get("run_id", "")
+            conversation_id = metadata.get("conversation_id", "")
+        return session_id, user_id, run_id, conversation_id
 
     def _get_stream_writer_safe(self):
         try:

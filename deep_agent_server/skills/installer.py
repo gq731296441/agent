@@ -1,0 +1,139 @@
+"""Skill 订阅安装：从 skill-repo 拷贝到用户工作区。"""
+
+from __future__ import annotations
+
+import shutil
+from pathlib import Path
+
+from config import get_logger
+from config.config import app_config
+from db import deep_storage
+from deep_agent_server.skills.version_utils import versions_equal
+from deep_agent_server.workspace import ensure_user_dirs, get_skills_dir, remove_skill_installation, sync_skill_to_sandbox_bind_path
+
+logger = get_logger(__name__)
+
+
+class SkillInstallError(Exception):
+    def __init__(self, message: str, code: int = 400):
+        super().__init__(message)
+        self.code = code
+
+
+def get_repo_skill_dir(skill_id: str) -> Path:
+    sid = (skill_id or "").strip().strip("/\\")
+    if not sid or ".." in sid or "/" in sid or "\\" in sid:
+        raise SkillInstallError(f"非法 skill_id: {skill_id}", 400)
+    path = Path(app_config.get_skill_repo_root()) / sid
+    if not path.is_dir() or not (path / "SKILL.md").is_file():
+        raise SkillInstallError(f"Skill 源目录不存在: {sid}", 404)
+    return path
+
+
+def _copy_skill_tree(src: Path, dest: Path) -> None:
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest)
+
+
+async def install_skill_for_user(
+    user_id: str,
+    skill_id: str,
+    *,
+    overwrite: bool = False,
+) -> dict:
+    """从 catalog + repo 安装到用户 skills/ 目录。"""
+    sid = (skill_id or "").strip()
+    catalog = await deep_storage.get_skill_catalog(sid)
+    if not catalog or catalog.get("status") != "published":
+        raise SkillInstallError("Skill 不存在或未发布", 404)
+
+    existing = await deep_storage.get_installed_skill(user_id, sid)
+    if existing and not overwrite:
+        raise SkillInstallError("已订阅该 Skill，请先取消或使用更新", 409)
+
+    repo_dir = get_repo_skill_dir(sid)
+    ensure_user_dirs(user_id)
+    target = get_skills_dir(user_id) / sid
+    _copy_skill_tree(repo_dir, target)
+    sync_skill_to_sandbox_bind_path(user_id, sid)
+
+    version = catalog.get("version") or "1.0.0"
+    record_id = await deep_storage.install_skill_record(
+        user_id,
+        sid,
+        catalog.get("name") or sid,
+        str(target),
+        version,
+    )
+    await deep_storage.increment_skill_install_count(sid)
+    await deep_storage.insert_audit_log(
+        user_id,
+        "skill_subscribe" if not overwrite else "skill_upgrade",
+        target=sid,
+        detail={"install_dir": str(target), "version": version},
+    )
+    from deep_agent_server.quota_service import refresh_workspace_usage
+    from deep_agent_server.workspace_service import index_skill_tree
+
+    await index_skill_tree(user_id, sid)
+    await refresh_workspace_usage(user_id)
+    logger.info(
+        f"[SkillInstall] user={user_id} skill={sid} version={version} overwrite={overwrite}"
+    )
+    return {
+        "installed_skill_id": record_id,
+        "skill_id": sid,
+        "version": version,
+        "install_dir": str(target),
+    }
+
+
+async def upgrade_skill_for_user(user_id: str, skill_id: str) -> dict:
+    """若 catalog 版本更新则覆盖安装。"""
+    sid = (skill_id or "").strip()
+    existing = await deep_storage.get_installed_skill(user_id, sid)
+    if not existing:
+        raise SkillInstallError("未订阅该 Skill", 404)
+
+    catalog = await deep_storage.get_skill_catalog(sid)
+    if not catalog or catalog.get("status") != "published":
+        raise SkillInstallError("Skill 已从市场下架", 404)
+
+    latest = catalog.get("version") or "1.0.0"
+    installed = existing.get("version") or "1.0.0"
+    if versions_equal(latest, installed):
+        return {
+            "skill_id": sid,
+            "upgraded": False,
+            "version": installed,
+            "message": "已是最新版本",
+        }
+
+    result = await install_skill_for_user(user_id, sid, overwrite=True)
+    result["upgraded"] = True
+    result["previous_version"] = installed
+    return result
+
+
+async def uninstall_skill_for_user(user_id: str, skill_id: str) -> None:
+    sid = (skill_id or "").strip()
+    if await deep_storage.is_skill_bound_to_agents(user_id, sid):
+        raise SkillInstallError("该 Skill 已被订阅智能体绑定，请先解绑", 400)
+
+    had = await deep_storage.get_installed_skill(user_id, sid)
+    user_skill_path = get_skills_dir(user_id) / sid
+    had_dir = user_skill_path.exists()
+    try:
+        remove_skill_installation(user_id, sid)
+    except ValueError as e:
+        raise SkillInstallError(str(e), 400) from e
+
+    ok = await deep_storage.delete_installed_skill(user_id, sid)
+    if not ok and not had and not had_dir:
+        raise SkillInstallError("未订阅该 Skill", 404)
+
+    from deep_agent_server.quota_service import refresh_workspace_usage
+
+    await refresh_workspace_usage(user_id)
+    await deep_storage.insert_audit_log(user_id, "skill_unsubscribe", target=sid)

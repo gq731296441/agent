@@ -1,10 +1,13 @@
 from fastapi import APIRouter, HTTPException, Request, Query
 from typing import List, Dict, Any
 from pydantic import BaseModel, Field
-from db import storage
+from db import storage, deep_storage
 from uuid import UUID
 from common.schemas import ApiResponse, ListApiResponse
 from config import get_logger
+from utils.session_utils import validate_session_access, SESSION_ACCESS_DENIED_MSG
+from utils.subscription_guard import validate_ask_session
+from deep_agent_server.workspace import remove_session_workspace
 import json
 
 logger = get_logger(__name__)
@@ -21,6 +24,17 @@ class SessionItem(BaseModel):
     last_active_at: str = Field(default="", description="最后对话时间")
     created_at: str = Field(default="", description="创建时间")
     updated_at: str = Field(default="", description="更新时间")
+    agent_kind: str = Field(default="default", description="default | subscription")
+    agent_id: str | None = Field(default=None, description="订阅智能体 ID")
+    agent_name: str | None = Field(default=None, description="订阅智能体名称")
+    subscription_frozen: bool = Field(default=False)
+    archived: bool = Field(default=False, description="关联智能体已下架")
+    subscription_status: str | None = Field(default=None, description="active | cancelled")
+    agent_visibility: str | None = Field(default=None, description="public | private")
+    agent_creator_user_id: str | None = Field(default=None, description="智能体创建者")
+    agent_name: str | None = Field(default=None, description="订阅智能体名称")
+    avatar_color: str | None = Field(default=None, description="智能体头像背景色")
+    context_epoch: int = Field(default=1)
 
 
 class HistoryItem(BaseModel):
@@ -31,16 +45,23 @@ class HistoryItem(BaseModel):
     content: Any = Field(..., description="消息内容")
     tool_call_id: str|None = Field(default=None, description="工具调用ID")
     conversation_id: str|None = Field(default=None, description="会话轮次ID")
+    run_id: str|None = Field(default=None, description="Agent 运行 ID")
     group_id: int = Field(default=0, description="分组ID")
     step_index: int = Field(default=0, description="步骤序号")
     create_time: str = Field(..., description="创建时间")
+    context_epoch: int = Field(default=1, description="上下文 epoch")
 
 
-class CheckpointerHistoryItem(BaseModel):
-    """Checkpointer 历史消息项"""
-    type: str = Field(..., description="消息类型")
-    sender: str = Field(..., description="发送者")
-    content: Any = Field(..., description="消息内容")
+class SessionRunMetricsItem(BaseModel):
+    """会话内单次 run 的指标（来自 agent_runs 表）"""
+    run_id: str = Field(..., description="运行 ID")
+    conversation_id: str | None = Field(default=None, description="对话轮次 ID")
+    status: str = Field(default="", description="运行状态")
+    prompt_tokens: int = Field(default=0)
+    completion_tokens: int = Field(default=0)
+    total_tokens: int = Field(default=0)
+    duration_ms: int = Field(default=0)
+    llm_model: str = Field(default="")
 
 
 # ==================== 接口实现 ====================
@@ -48,18 +69,28 @@ class CheckpointerHistoryItem(BaseModel):
 @router.get("/list", response_model=ListApiResponse[SessionItem])
 async def get_user_sessions(
     userId: str = Query(..., description="用户ID"),
+    agent_kind: str | None = Query(None, description="default | subscription"),
 ):
     """获取用户的有效会话列表（不包括软删除的会话）"""
     try:
-        sessions = await storage.get_user_sessions(userId)
-        # 转换为 SessionItem 列表
+        sessions = await storage.get_user_sessions(userId, agent_kind=agent_kind)
         session_items = [
             SessionItem(
-                id=str(s.get("session_id", "")), 
+                id=str(s.get("session_id", "")),
                 title=s.get("session_name", ""),
                 last_active_at=s.get("last_active_at", "").strftime("%Y-%m-%d %H:%M:%S") if s.get("last_active_at") else "",
                 created_at=s.get("created_at", "").strftime("%Y-%m-%d %H:%M:%S") if s.get("created_at") else "",
-                updated_at=s.get("updated_at", "").strftime("%Y-%m-%d %H:%M:%S") if s.get("updated_at") else ""
+                updated_at=s.get("updated_at", "").strftime("%Y-%m-%d %H:%M:%S") if s.get("updated_at") else "",
+                agent_kind=s.get("agent_kind") or "default",
+                agent_id=str(s["agent_id"]) if s.get("agent_id") else None,
+                agent_name=s.get("agent_name"),
+                subscription_frozen=bool(s.get("subscription_frozen")),
+                archived=bool(s.get("archived") or s.get("agent_deleted")),
+                subscription_status=s.get("subscription_status"),
+                agent_visibility=s.get("agent_visibility"),
+                agent_creator_user_id=s.get("agent_creator_user_id"),
+                avatar_color=s.get("agent_avatar_color") or s.get("avatar_color"),
+                context_epoch=int(s.get("context_epoch") or 1),
             )
             for s in sessions
         ]
@@ -69,47 +100,9 @@ async def get_user_sessions(
         return ListApiResponse.error(msg=f"获取会话列表失败: {str(e)}")
 
 
-@router.get("/checkpointer/history", response_model=ListApiResponse[CheckpointerHistoryItem])
-async def get_session_checkpointer_history(
-    request: Request,
-    user_id: str = Query(..., description="用户ID"),
-    session_id: str = Query(..., description="会话ID")
-):
-    """使用checkpointer获取会话的历史消息"""
-    try:
-        # 从 app.state 获取 checkpointer
-        checkpointer = request.app.state.checkpointer
-        if not checkpointer:
-            logger.warning("[Session API] Checkpointer 未初始化")
-            return ListApiResponse.error(msg="Checkpointer not initialized")
-        
-        thread_id = f"{user_id}#{session_id}"
-        config = {"configurable": {"thread_id": thread_id}}
-        checkpoint_tuple = await checkpointer.aget_tuple(config)
-        if checkpoint_tuple is None:
-            logger.warning(f"[Session API] 会话不存在: {session_id}")
-            return ListApiResponse.error(msg="Session not found")
-        
-        # checkpoint_tuple.checkpoint["channel_values"]["messages"] 就是历史消息
-        messages = checkpoint_tuple.checkpoint["channel_values"].get("messages", [])
-
-        history_items = [
-            CheckpointerHistoryItem(
-                type="chat",
-                sender="assistant" if m.type == "ai" else ("user" if m.type == "human" else m.type),
-                content=m.content
-            )
-            for m in messages
-        ]
-        
-        return ListApiResponse.success(data=history_items, msg="成功")
-
-    except Exception as e:
-        logger.error(f"[Session API] 获取 checkpointer 历史失败: {e}")
-        return ListApiResponse.error(msg=f"获取历史失败: {str(e)}")
-
 @router.get("/history", response_model=ListApiResponse[HistoryItem])
 async def get_session_history(
+    userId: str = Query(..., description="用户ID"),
     session_id: str = Query(..., description="会话ID"),
     limit: int = 50,
     page: int = 1
@@ -120,7 +113,10 @@ async def get_session_history(
     except (ValueError, AttributeError) as e:
         logger.error(f"[Session API] 无效的会话ID格式: {session_id}")
         return ListApiResponse.error(msg=f"无效的会话ID格式: {session_id}")
-    
+
+    if not await validate_session_access(userId, session_id):
+        return ListApiResponse.error(msg=SESSION_ACCESS_DENIED_MSG, code=403)
+
     try:
         offset = (page - 1) * limit
         history = await storage.fetch_history_by_session(target_uuid, limit, offset)
@@ -133,19 +129,56 @@ async def get_session_history(
                 content=json.loads(r["content"]) if isinstance(r["content"], str) else r["content"],
                 tool_call_id=r["tool_call_id"],
                 conversation_id=str(r["conversation_id"]) if r.get("conversation_id") else None,
+                run_id=str(r["run_id"]) if r.get("run_id") else None,
                 group_id=r.get("group_id", 0) or 0,
                 step_index=r.get("step_index", 0) or 0,
-                create_time=r["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+                create_time=r["created_at"].strftime("%Y-%m-%d %H:%M:%S"),
+                context_epoch=int(r.get("context_epoch") or 1),
             )
             for r in history
         ]
-        
+
         return ListApiResponse.success(data=history_items, msg="成功")
     except Exception as e:
         logger.error(f"[Session API] 获取会话历史失败: {e}")
         return ListApiResponse.error(msg=f"获取会话历史失败: {str(e)}")
 
-    
+
+@router.get("/run-metrics", response_model=ListApiResponse[SessionRunMetricsItem])
+async def get_session_run_metrics(
+    userId: str = Query(..., description="用户ID"),
+    session_id: str = Query(..., description="会话ID"),
+):
+    """获取会话内所有 agent run 的 token / 耗时指标（历史消息展示用）。"""
+    try:
+        target_uuid = UUID(session_id)
+    except (ValueError, AttributeError):
+        return ListApiResponse.error(msg=f"无效的会话ID格式: {session_id}")
+
+    if not await validate_session_access(userId, session_id):
+        return ListApiResponse.error(msg=SESSION_ACCESS_DENIED_MSG, code=403)
+
+    try:
+        runs = await deep_storage.list_agent_runs_for_session(session_id, userId)
+        items = [
+            SessionRunMetricsItem(
+                run_id=r["run_id"],
+                conversation_id=r.get("conversation_id"),
+                status=r.get("status") or "",
+                prompt_tokens=int(r.get("prompt_tokens") or 0),
+                completion_tokens=int(r.get("completion_tokens") or 0),
+                total_tokens=int(r.get("total_tokens") or 0),
+                duration_ms=int(r.get("duration_ms") or 0),
+                llm_model=r.get("llm_model") or "",
+            )
+            for r in runs
+        ]
+        return ListApiResponse.success(data=items, msg="成功")
+    except Exception as e:
+        logger.error(f"[Session API] 获取 run 指标失败: {e}")
+        return ListApiResponse.error(msg=f"获取 run 指标失败: {str(e)}")
+
+
 @router.delete("/delete", response_model=ApiResponse)
 async def soft_delete_session(
     user_id: str = Query(..., description="用户ID"),
@@ -174,8 +207,8 @@ async def permanent_delete_session(
     同时清理：
     1. user_sessions / agent_configs 表（级联删除）
     2. chat_history 表
-    3. LangGraph checkpointer 数据（checkpoints / checkpoint_blobs / checkpoint_writes）
-    4. LangGraph store 数据（中间件持久化状态）
+    3. LangGraph checkpointer / store 数据
+    4. Deep 工作区、artifacts、deep_* 表记录
     """
     try:
         success = await storage.delete_user_session(user_id, session_id)
@@ -183,12 +216,13 @@ async def permanent_delete_session(
             logger.warning(f"[Session API] 会话不存在: user_id={user_id}, session_id={session_id}")
             return ApiResponse.error(msg="Session not found", code=404)
 
-        # 清理 chat_history
         await storage.delete_history_by_session(session_id)
 
-        # 清理 LangGraph checkpointer 和 store 中的数据
         thread_id = f"{user_id}#{session_id}"
-        await _cleanup_langgraph_data(request, thread_id)
+        await _cleanup_langgraph_data(request, thread_id, user_id=user_id, session_id=session_id)
+
+        remove_session_workspace(user_id, session_id)
+        await deep_storage.cleanup_deep_session_data(user_id, session_id)
 
         return ApiResponse.success(msg="Session permanently deleted")
     except Exception as e:
@@ -196,9 +230,106 @@ async def permanent_delete_session(
         return ApiResponse.error(msg=f"永久删除会话失败: {str(e)}")
 
 
-async def _cleanup_langgraph_data(request: Request, thread_id: str) -> None:
+@router.post("/subscription/{agent_id}/ensure", response_model=ApiResponse)
+async def ensure_subscription_session(
+    agent_id: str,
+    user_id: str = Query(..., description="用户ID"),
+):
+    """获取或创建订阅智能体的唯一会话。"""
+    try:
+        data = await deep_storage.ensure_subscription_session(user_id, agent_id)
+        return ApiResponse.success(data=data)
+    except ValueError as e:
+        return ApiResponse.error(msg=str(e), code=400)
+    except Exception as e:
+        logger.error(f"[Session API] ensure subscription session failed: {e}")
+        return ApiResponse.error(msg=f"创建会话失败: {e}", code=500)
+
+
+@router.get("/{session_id}/validate-send", response_model=ApiResponse)
+async def validate_can_send(
+    session_id: str,
+    user_id: str = Query(..., description="用户ID"),
+):
+    """发消息前校验会话是否仍可发送（智能体未删除、订阅未取消等）。"""
+    ok, error_msg = await validate_ask_session(user_id, session_id, None)
+    return ApiResponse.success(data={"can_send": ok, "error": error_msg})
+
+
+def _clear_agent_cache_for_session(manager, session_id: str) -> None:
+    if not manager or not getattr(manager, "_agent_cache", None):
+        return
+    prefix = f"deep:{session_id}:"
+    keys = [k for k in manager._agent_cache if k.startswith(prefix)]
+    for k in keys:
+        manager._agent_cache.pop(k, None)
+
+
+@router.post("/{session_id}/new-context", response_model=ApiResponse)
+async def new_context(
+    request: Request,
+    session_id: str,
+    user_id: str = Query(..., description="用户ID"),
+    expected_epoch: int = Query(..., description="当前 context_epoch，乐观锁"),
+):
+    """订阅智能体：清空 LangGraph 上下文，保留历史并插入分割线。"""
+    if not await validate_session_access(user_id, session_id):
+        return ApiResponse.error(msg=SESSION_ACCESS_DENIED_MSG, code=403)
+
+    meta = await storage.get_session_meta(session_id)
+    if not meta:
+        return ApiResponse.error(msg="Session not found", code=404)
+    if meta.get("agent_kind") != "subscription":
+        return ApiResponse.error(msg="仅订阅智能体会话支持开始新会话", code=400)
+    if meta.get("subscription_frozen"):
+        return ApiResponse.error(msg="会话已冻结，无法开始新会话", code=403)
+
+    new_epoch = await storage.increment_context_epoch(session_id, expected_epoch)
+    if new_epoch is None:
+        return ApiResponse.error(msg="context_epoch 冲突，请刷新后重试", code=409)
+
+    thread_id = f"{user_id}#{session_id}"
+    await _cleanup_langgraph_data(request, thread_id, user_id=user_id, session_id=session_id)
+
+    manager = getattr(request.app.state, "manager_agents", None)
+    _clear_agent_cache_for_session(manager, session_id)
+
+    await storage.insert_context_divider(session_id, user_id, new_epoch)
+
+    return ApiResponse.success(data={
+        "session_id": session_id,
+        "context_epoch": new_epoch,
+    })
+
+
+@router.get("/readiness", response_model=ApiResponse)
+async def get_session_readiness(
+    session_id: str = Query(..., description="会话ID"),
+    userId: str = Query(..., description="用户ID"),
+):
+    """查询会话预热/就绪状态。"""
+    if not await validate_session_access(userId, session_id):
+        return ApiResponse.error(msg=SESSION_ACCESS_DENIED_MSG, code=403)
+    from deep_agent_server.session.readiness import SessionReadinessService
+    status = await SessionReadinessService.get_status(session_id)
+    pending = await deep_storage.count_pending_messages(session_id)
+    row = await deep_storage.get_session_start_task(session_id)
+    return ApiResponse.success(data={
+        "session_id": session_id,
+        "status": status,
+        "pending_count": pending,
+        "error": (row or {}).get("error"),
+    })
+
+
+async def _cleanup_langgraph_data(
+    request: Request,
+    thread_id: str,
+    *,
+    user_id: str = None,
+    session_id: str = None,
+) -> None:
     """清理 LangGraph checkpointer 和 store 中与 thread_id 关联的数据。"""
-    # 清理 checkpointer（checkpoints / checkpoint_blobs / checkpoint_writes）
     checkpointer = getattr(request.app.state, "checkpointer", None)
     if checkpointer:
         try:
@@ -207,13 +338,20 @@ async def _cleanup_langgraph_data(request: Request, thread_id: str) -> None:
         except Exception as e:
             logger.error(f"[Session API] 清理 checkpointer 失败: {e}")
 
-    # 清理 store（中间件持久化状态：compaction_state / microcompact_state）
     kv_store = getattr(request.app.state, "kv_store", None)
     if kv_store:
-        store_namespaces = [("compaction_state",), ("microcompact_state",)]
-        for ns in store_namespaces:
+        from deep_agent_server.store import cleanup_session_store
+        from db import deep_storage
+
+        await cleanup_session_store(
+            kv_store,
+            thread_id=thread_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
+        if user_id and session_id:
             try:
-                await kv_store.adelete(ns, thread_id)
-            except Exception:
-                pass  # store 中可能不存在该 key，静默跳过
+                await deep_storage.delete_artifacts_by_session(user_id, session_id)
+            except Exception as e:
+                logger.warning(f"[Session API] 清理 legacy artifacts 失败: {e}")
         logger.info(f"[Session API] ✅ 已清理 store: {thread_id}")

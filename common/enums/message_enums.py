@@ -17,8 +17,25 @@ class MessageType(str, Enum):
     ERROR = "error"                  # 错误消息
     LLM_TEXT_FINAL = "llm_text_final"  # LLM 完整文本（仅存储，不推送）
     SESSION_ALLOCATED = "session_allocated"  # 会话分配通知
+    SESSION_WARMING = "session_warming"    # 会话预热中
+    SESSION_READY = "session_ready"        # 会话就绪
+    MESSAGE_QUEUED = "message_queued"      # 消息已排队
     REASONING = "reasoning"          # 推理状态通知（告知前端正在推理中）
     REASONING_FINAL = "reasoning_final"  # 推理完整文本（存储 + 推送）
+    # Deep Agent 语义化类型
+    TODO_UPDATE = "todo_update"
+    FS_OPERATION = "fs_operation"
+    EXECUTE = "execute"
+    EXECUTE_RESULT = "execute_result"
+    SKILL_CATALOG = "skill_catalog"
+    SKILL_LOADED = "skill_loaded"
+    SUBAGENT_START = "subagent_start"
+    SUBAGENT_EVENT = "subagent_event"
+    SUBAGENT_END = "subagent_end"
+    WORKSPACE_ARTIFACT = "workspace_artifact"
+    WORKSPACE_FILE = "workspace_file"  # 本轮 conversation Agent 写入的工作区文件列表
+    SANDBOX_STATUS = "sandbox_status"  # 沙箱容量与 session 列表（WebSocket 推送）
+    RUN_METRICS = "run_metrics"  # Deep run 结束指标（token + 耗时，仅推送前端）
 
 
 class SenderType(str, Enum):

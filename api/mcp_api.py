@@ -1,12 +1,15 @@
 """MCP 工具管理接口"""
-import asyncio
+import hashlib
+import json
+import time
 import httpx
 import os
-from typing import Optional, List, Any
+from typing import Dict, List, Optional, Tuple
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-from db import storage
 from mcp_server.mcp_manager import McpToolService
+from mcp_server.mcp_mock import get_default_mock_mcp_list, merge_mock_mcp_list
 from common.schemas import ListApiResponse
 from config import get_logger, app_config
 
@@ -38,12 +41,45 @@ McpToolsResponse = ListApiResponse[McpToolItem]
 
 # ==================== 接口实现 ====================
 
-# 外部 MCP 工具列表接口地址
 MCP_TOOLS_API_URL = app_config.MCP_TOOLS_API_URL
+_user_tools_response_cache: Dict[str, Tuple[float, str, ListApiResponse]] = {}
+
+
+def _mcp_list_fingerprint(mcp_list: List[dict]) -> str:
+    normalized = [
+        {
+            "id": item.get("id"),
+            "componentId": item.get("componentId"),
+            "name": item.get("name"),
+            "url": item.get("url"),
+            "type": item.get("type"),
+        }
+        for item in (mcp_list or [])
+    ]
+    payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _get_user_tools_cache(user_id: str, fingerprint: str) -> Optional[ListApiResponse]:
+    cached = _user_tools_response_cache.get(user_id)
+    if not cached:
+        return None
+    ts, fp, response = cached
+    ttl = int(getattr(app_config, "MCP_USER_TOOLS_CACHE_TTL", 120) or 120)
+    if time.monotonic() - ts > ttl:
+        _user_tools_response_cache.pop(user_id, None)
+        return None
+    if fp != fingerprint:
+        return None
+    return response
+
+
+def _set_user_tools_cache(user_id: str, fingerprint: str, response: ListApiResponse) -> None:
+    _user_tools_response_cache[user_id] = (time.monotonic(), fingerprint, response)
 
 
 def _normalize_mcp_item(raw_item: dict) -> dict:
-    """标准化外部 MCP 工具字段，避免 null/空值导致后续校验与连接失败。"""
+    """标准化 MCP 工具字段，避免 null/空值导致后续校验与连接失败。"""
     return {
         "id": raw_item.get("id") or 0,
         "componentId": raw_item.get("componentId") or 0,
@@ -54,90 +90,164 @@ def _normalize_mcp_item(raw_item: dict) -> dict:
     }
 
 
-@router.get("/tools", response_model=McpToolsResponse, summary="获取用户的MCP工具列表")
-async def get_mcp_tools(
-    user_id: str = Query(..., description="用户ID")
-):
-    """
-    获取用户的 MCP 工具列表，并验证每个工具的可用状态。
-    
-    Args:
-        user_id: 用户ID（路径参数）
-        
-    Returns:
-        带有 status 字段的 MCP 工具列表
-    """
-    if not user_id:
-        raise HTTPException(status_code=400, detail="userId 不能为空")
-    
-    try:
-        # 1. 调用外部接口获取用户的 MCP 工具列表
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                MCP_TOOLS_API_URL,
-                headers={"userNumber": user_id}
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"[MCP API] 调用外部接口失败, status: {response.status_code}, body: {response.text}")
-                raise HTTPException(
-                    status_code=502, 
-                    detail=f"获取 MCP 工具列表失败: 外部接口返回 {response.status_code}"
-                )
-            
-            external_data = response.json()
-            
-        # 2. 检查外部接口返回状态
-        if external_data.get("code") != 0 or not external_data.get("status"):
-            logger.error(f"[MCP API] 外部接口返回错误: {external_data.get('msg')}")
-            raise HTTPException(
-                status_code=502, 
-                detail=f"获取 MCP 工具列表失败: {external_data.get('msg', '未知错误')}"
-            )
-        
-        # 3. 提取 data 数据
-        mcp_list = external_data.get("data", [])
-        
-        if not mcp_list:
-            # 没有工具，直接返回空列表
-            return ListApiResponse.success(data=[], msg="成功")
+async def _fetch_external_mcp_list(user_id: str) -> List[dict]:
+    """调用外部 cmtool 接口获取 MCP 列表，失败时抛出异常。"""
+    async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+        response = await client.get(
+            MCP_TOOLS_API_URL,
+            headers={"userNumber": user_id},
+        )
 
-        # 标准化字段，处理 description/type/url 等为 null 的情况
-        normalized_mcp_list = [_normalize_mcp_item(item) for item in mcp_list]
-        
-        # 4. 调用 McpToolService 验证工具状态
-        mcp_service = McpToolService()
-        validated_tools = await mcp_service.validate_mcp_servers(normalized_mcp_list)
-        
-        # 5. 组装返回数据
-        result_data = []
-        for tool in validated_tools:
-            result_data.append(McpToolItem(
+        if response.status_code != 200:
+            logger.error(
+                f"[MCP API] 调用外部接口失败, status: {response.status_code}, body: {response.text}"
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"获取 MCP 工具列表失败: 外部接口返回 {response.status_code}",
+            )
+
+        external_data = response.json()
+
+    if external_data.get("code") != 0 or not external_data.get("status"):
+        logger.error(f"[MCP API] 外部接口返回错误: {external_data.get('msg')}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"获取 MCP 工具列表失败: {external_data.get('msg', '未知错误')}",
+        )
+
+    return external_data.get("data", []) or []
+
+
+async def _resolve_mcp_source_list(user_id: str) -> tuple[List[dict], str]:
+    """解析 MCP 来源：Mock / 外部 / 外部+Mock 合并 / 失败回退 Mock。"""
+    if app_config.MCP_USE_MOCK:
+        mock_list = get_default_mock_mcp_list()
+        logger.info(f"[MCP API] 使用 Mock MCP 列表（共 {len(mock_list)} 个）")
+        return mock_list, "mock"
+
+    try:
+        external_raw = await _fetch_external_mcp_list(user_id)
+        normalized = [_normalize_mcp_item(item) for item in external_raw]
+        if app_config.MCP_FALLBACK_TO_MOCK:
+            merged = merge_mock_mcp_list(normalized)
+            source = "external+mock" if len(merged) > len(normalized) else "external"
+        else:
+            merged = normalized
+            source = "external"
+        logger.info(f"[MCP API] 外部接口返回 {len(normalized)} 个 MCP 工具")
+        return merged, source
+    except HTTPException:
+        if not app_config.MCP_FALLBACK_TO_MOCK:
+            raise
+        mock_list = get_default_mock_mcp_list()
+        logger.warning(
+            f"[MCP API] 外部接口不可用，回退 Mock MCP（共 {len(mock_list)} 个）"
+        )
+        return mock_list, "mock-fallback"
+    except httpx.TimeoutException:
+        if not app_config.MCP_FALLBACK_TO_MOCK:
+            raise HTTPException(status_code=504, detail="获取 MCP 工具列表超时")
+        mock_list = get_default_mock_mcp_list()
+        logger.warning("[MCP API] 外部接口超时，回退 Mock MCP")
+        return mock_list, "mock-fallback"
+    except httpx.RequestError as e:
+        if not app_config.MCP_FALLBACK_TO_MOCK:
+            raise HTTPException(status_code=502, detail=f"网络错误: {str(e)}")
+        mock_list = get_default_mock_mcp_list()
+        logger.warning(f"[MCP API] 外部接口网络错误，回退 Mock MCP: {e}")
+        return mock_list, "mock-fallback"
+
+
+async def _validate_and_build_response(
+    mcp_list: List[dict],
+    user_id: str,
+    source: str,
+    *,
+    force_refresh: bool = False,
+):
+    if not mcp_list:
+        return ListApiResponse.success(data=[], msg="成功")
+
+    mcp_service = McpToolService()
+    validated_tools = await mcp_service.validate_mcp_servers(
+        mcp_list, force_refresh=force_refresh
+    )
+
+    result_data = []
+    for tool in validated_tools:
+        result_data.append(
+            McpToolItem(
                 id=tool.get("id") or 0,
                 componentId=tool.get("componentId") or 0,
                 name=(tool.get("name") or "").strip(),
                 description=tool.get("description") or "",
                 type=(tool.get("type") or "http").strip().lower(),
                 url=(tool.get("url") or "").strip(),
-                status=(tool.get("status") or "unknown")
-            ))
-        
-        logger.info(f"[MCP API] 用户 {user_id} 获取到 {len(result_data)} 个 MCP 工具")
-        
-        return ListApiResponse.success(data=result_data, msg="成功")
-        
+                status=(tool.get("status") or "unknown"),
+            )
+        )
+
+    logger.info(
+        f"[MCP API] 用户 {user_id} 获取 {len(result_data)} 个 MCP 工具 (source={source})"
+    )
+    return ListApiResponse.success(data=result_data, msg="成功")
+
+
+def _build_tools_without_validation(mcp_list: List[dict]) -> ListApiResponse:
+    result_data = []
+    for tool in mcp_list:
+        result_data.append(
+            McpToolItem(
+                id=tool.get("id") or 0,
+                componentId=tool.get("componentId") or 0,
+                name=(tool.get("name") or "").strip(),
+                description=tool.get("description") or "",
+                type=(tool.get("type") or "http").strip().lower(),
+                url=(tool.get("url") or "").strip(),
+                status="unknown",
+            )
+        )
+    return ListApiResponse.success(data=result_data, msg="成功")
+
+
+@router.get("/tools", response_model=McpToolsResponse, summary="获取用户的MCP工具列表")
+async def get_mcp_tools(
+    user_id: str = Query(..., description="用户ID"),
+    validate: bool = Query(True, description="是否探测 MCP 连通性；false 时仅返回列表"),
+    refresh: bool = Query(False, description="是否强制重新探测（忽略服务端缓存）"),
+):
+    """
+    获取用户的 MCP 工具列表，并验证每个工具的可用状态。
+
+    - validate=false：跳过连通性探测，快速返回（status=unknown）
+    - refresh=true：忽略缓存并重新探测
+    开发环境默认 MCP_USE_MOCK=true，返回本地 mrm_doc_mcp.py 测试服务。
+    """
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId 不能为空")
+
+    try:
+        mcp_list, source = await _resolve_mcp_source_list(user_id)
+        if not validate:
+            return _build_tools_without_validation(mcp_list)
+
+        fingerprint = _mcp_list_fingerprint(mcp_list)
+        if not refresh:
+            cached = _get_user_tools_cache(user_id, fingerprint)
+            if cached is not None:
+                logger.info(f"[MCP API] 用户 {user_id} 命中工具列表响应缓存")
+                return cached
+
+        response = await _validate_and_build_response(
+            mcp_list, user_id, source, force_refresh=refresh
+        )
+        _set_user_tools_cache(user_id, fingerprint, response)
+        return response
     except HTTPException:
-        # 直接向上抛出 HTTPException
         raise
-    except httpx.TimeoutException:
-        logger.error(f"[MCP API] 调用外部接口超时")
-        raise HTTPException(status_code=504, detail="获取 MCP 工具列表超时")
-    except httpx.RequestError as e:
-        logger.error(f"[MCP API] 调用外部接口网络错误: {e}")
-        raise HTTPException(status_code=502, detail=f"网络错误: {str(e)}")
     except Exception as e:
         logger.error(f"[MCP API] 获取 MCP 工具列表异常: {e}")
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
-

@@ -32,6 +32,8 @@ class LangGraphAgent:
         tools: list = None,
         checkpointer=None,
         store=None,
+        summary_llm=None,
+        tool_judge_llm=None,
     ):
         """
         Agent 初始化（同步部分）。
@@ -70,6 +72,8 @@ class LangGraphAgent:
         # ==================== Checkpointer & Store 初始化 ====================
         self.checkpointer = checkpointer
         self.store = store
+        self.summary_llm = summary_llm
+        self.tool_judge_llm = tool_judge_llm
         
         try:
             # 工具选择模型：设置 TAG_NOSTREAM 避免其输出泄漏到 messages 流
@@ -84,7 +88,7 @@ class LangGraphAgent:
                 middleware=[
                     # create_hitl_middleware(),
                     NodeHooksMiddleWare(system_prompt=self.system_prompt),
-                    ToolMonitoringMiddleWare(),
+                    ToolMonitoringMiddleWare(judge_llm=self.tool_judge_llm),
                     # LLMToolSelectorMiddleware(
                     #     model=_tool_selector_llm,
                     #     system_prompt=TOOL_SELECTOR_MIDDLEWARE_PROMPT,
@@ -95,7 +99,7 @@ class LangGraphAgent:
                         keep_recent=5,              # 始终保留最近 5 个工具结果
                     ),
                     LoggingSummarizationMiddleware(
-                        model=create_summary_llm(),
+                        model=self.summary_llm or create_summary_llm(),
                         max_input_tokens=256000,  # 主模型最大输入 token 数，用于动态计算压缩阈值
                         keep=("tokens", 10000),
                         summary_prompt=HISTORY_SUMMARY_PROMPT
@@ -119,6 +123,8 @@ def create_base_agent(
     tools: list = None,
     checkpointer=None,
     store=None,
+    summary_llm=None,
+    tool_judge_llm=None,
 ) -> LangGraphAgent:
     """
     创建 LangGraphAgent 实例的工厂函数。
@@ -140,4 +146,6 @@ def create_base_agent(
         tools=tools,
         checkpointer=checkpointer,
         store=store,
+        summary_llm=summary_llm,
+        tool_judge_llm=tool_judge_llm,
     )

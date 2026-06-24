@@ -19,6 +19,8 @@ from collections import deque
 
 from config import get_logger
 
+from config.config import app_config
+
 logger = get_logger(__name__)
 
 
@@ -140,4 +142,7 @@ class LLMRateLimiter:
 # 默认配置：每分钟最多 15 次请求，两次请求间至少间隔 2 秒
 # 可通过环境变量或 config 覆盖
 # ============================================================
-llm_rate_limiter = LLMRateLimiter(max_rpm=15, min_interval_seconds=2.0)
+llm_rate_limiter = LLMRateLimiter(
+    max_rpm=app_config.LLM_MAX_RPM,
+    min_interval_seconds=app_config.LLM_MIN_INTERVAL,
+)
