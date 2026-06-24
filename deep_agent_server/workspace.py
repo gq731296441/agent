@@ -194,6 +194,14 @@ def resolve_skill_bind_host_path(user_id: str, skill_id: str) -> Optional[Path]:
 
     sync_skill_to_sandbox_bind_path(user_id, sid)
 
+    sandbox_skill = get_sandbox_skills_dir(user_id) / sid
+
+    # 远程 dockerd 时 Agent 进程 stat 不到虚机上的 SANDBOX 路径，
+    # 直接信任 NFS 对齐，优先使用 SANDBOX 路径作为 Docker bind mount 源
+    if (app_config.SANDBOX_DOCKER_HOST or "").strip() and _workspace_roots_differ():
+        logger.info(f"[Workspace] remote docker skill bind sandbox path: {sandbox_skill}")
+        return sandbox_skill
+
     candidates = _skill_bind_path_candidates(user_id, sid)
     for path in candidates:
         if _skill_tree_has_files(path):
@@ -201,7 +209,6 @@ def resolve_skill_bind_host_path(user_id: str, skill_id: str) -> Optional[Path]:
             return path.resolve()
 
     ws_skill = get_skills_dir(user_id) / sid
-    sandbox_skill = get_sandbox_skills_dir(user_id) / sid
 
     if _skill_tree_has_files(ws_skill):
         if _workspace_roots_differ():
