@@ -74,8 +74,8 @@ async def sync_catalog_from_repo(repo_root: str | Path | None = None) -> dict:
             entry.repo_rel_path,
             status="published",
         )
-    archived = await deep_storage.archive_missing_skills(present_ids)
+    deleted = await deep_storage.delete_missing_skills(present_ids)
     logger.info(
-        f"[SkillSync] synced={len(entries)} archived={archived} repo={repo_root or app_config.get_skill_repo_root()}"
+        f"[SkillSync] synced={len(entries)} deleted={deleted} repo={repo_root or app_config.get_skill_repo_root()}"
     )
-    return {"synced": len(entries), "archived": archived, "skill_ids": present_ids}
+    return {"synced": len(entries), "deleted": deleted, "skill_ids": present_ids}

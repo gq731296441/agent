@@ -1,0 +1,71 @@
+{
+  "description": "MR交付周期查询结果示例",
+  "query": {
+    "indicator_name": "MR交付周期（天）",
+    "query_type": "项目组",
+    "query_name": "ZXUFP",
+    "date_range": {
+      "start_date": "2026-01-01",
+      "end_date": "2026-03-31"
+    }
+  },
+  "result": {
+    "status": true,
+    "indicator": {
+      "name": "MR交付周期（天）",
+      "description": "项目组视图，项目组 按月统计 MR需求交付周期 的趋势",
+      "chart_type": "柱状图",
+      "x_axis": "周期",
+      "y_axis": "平均数，中位数",
+      "api_url": "https://aip.zte.com.cn/middle/api/remote/call/81185dacaae0ad00",
+      "dimension": "周期"
+    },
+    "query_condition": {
+      "type": "项目组",
+      "name": "ZXUFP",
+      "id": "48"
+    },
+    "data": {
+      "pageIndex": 1,
+      "pageSize": 200,
+      "totalPages": 1,
+      "total": 3,
+      "content": [
+        {
+          "周期": "2026-01",
+          "MR实现周期": 45,
+          "平均数": 45,
+          "中位数": 44
+        },
+        {
+          "周期": "2026-02",
+          "MR实现周期": 52,
+          "平均数": 52,
+          "中位数": 50
+        },
+        {
+          "周期": "2026-03",
+          "MR实现周期": 38,
+          "平均数": 38,
+          "中位数": 36
+        }
+      ]
+    },
+    "visualization": {
+      "chart_type": "bar",
+      "suggested_config": {
+        "title": "MR交付周期 - ZXUFP项目组",
+        "subtitle": "(2026-01 至 2026-03)",
+        "x_label": "月份",
+        "y_label": "交付周期（天）"
+      }
+    },
+    "user_info": {
+      "employee_id": "00114732",
+      "name": "吴俊琴",
+      "department": "软件平台开发六部",
+      "projectGroup": "有线效能工具",
+      "subCenter": "软件平台研发中心"
+    }
+  }
+}

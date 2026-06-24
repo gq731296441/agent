@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IMAP指标查询系统</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        header {
+            background: linear-gradient(90deg, #4f46e5, #7c3aed);
+            color: white;
+            padding: 24px 32px;
+        }
+
+        header h1 {
+            font-size: 26px;
+            margin-bottom: 8px;
+        }
+
+        header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+
+        .content {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            gap: 0;
+        }
+
+        .sidebar {
+            background: #f8fafc;
+            padding: 24px;
+            border-right: 1px solid #e2e8f0;
+        }
+
+        .main-panel {
+            padding: 32px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: 500;
+            color: #475569;
+            font-size: 14px;
+        }
+
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: border-color 0.2s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #4f46e5;
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(90deg, #4f46e5, #7c3aed);
+            color: white;
+            width: 100%;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(79, 70, 229, 0.3);
+        }
+
+        .btn-primary:active {
+            transform: translateY(0);
+        }
+
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        .status-card {
+            background: #f1f5f9;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+
+        .status-title {
+            font-size: 12px;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .status-value {
+            font-size: 14px;
+            color: #1e293b;
+            font-weight: 500;
+        }
+
+        .message {
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin-bottom: 16px;
+            font-size: 14px;
+        }
+
+        .message.error {
+            background: #fee2e2;
+            color: #dc2626;
+            border: 1px solid #fecaca;
+        }
+
+        .message.success {
+            background: #dcfce7;
+            color: #16a34a;
+            border: 1px solid #bbf7d0;
+        }
+
+        .message.loading {
+            background: #dbeafe;
+            color: #2563eb;
+            border: 1px solid #bfdbfe;
+        }
+
+        .chart-container {
+            background: white;
+            border-radius: 8px;
+            padding: 24px;
+            margin-bottom: 24px;
+            border: 1px solid #e2e8f0;
+        }
+
+        .chart-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: #1e293b;
+        }
+
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 16px;
+            font-size: 14px;
+        }
+
+        .data-table th,
+        .data-table td {
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        .data-table th {
+            background: #f8fafc;
+            font-weight: 600;
+            color: #475569;
+        }
+
+        .data-table tr:hover {
+            background: #f8fafc;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .help-text {
+            font-size: 12px;
+            color: #64748b;
+            margin-top: 4px;
+        }
+
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: #334155;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            background: #e0e7ff;
+            color: #3730a3;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+
+        @media (max-width: 768px) {
+            .content {
+                grid-template-columns: 1fr;
+            }
+            .sidebar {
+                border-right: none;
+                border-bottom: 1px solid #e2e8f0;
+            }
+        }
+
+        .loading-spinner {
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f4f6;
+            border-top: 3px solid #4f46e5;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 IMAP指标查询系统</h1>
+            <p>研发效能指标 · 权限验证 · 数据可视化</p>
+        </header>
+
+        <div class="content">
+            <aside class="sidebar">
+                <h3 class="section-title">
+                    查询参数
+                    <span class="badge">v2.0</span>
+                </h3>
+
+                <div id="message-box" class="message hidden"></div>
+
+                <div class="form-group">
+                    <label for="indicator-name">指标名称 *</label>
+                    <input type="text" id="indicator-name" placeholder="如：MR交付周期（天）">
+                    <div class="help-text">支持模糊匹配，可输入关键词</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="query-type">查询类型 *</label>
+                    <select id="query-type">
+                        <option value="">请选择类型</option>
+                        <option value="项目组">项目组</option>
+                        <option value="部门">部门</option>
+                        <option value="中心">中心</option>
+                        <option value="分中心级">分中心级</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="query-name">查询条件 *</label>
+                    <input type="text" id="query-name" placeholder="如：ZXUFP">
+                    <div class="help-text">根据查询类型填写项目组/部门/中心名称</div>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="start-date">开始日期</label>
+                        <input type="date" id="start-date">
+                    </div>
+                    <div class="form-group">
+                        <label for="end-date">结束日期</label>
+                        <input type="date" id="end-date">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <button id="query-btn" class="btn btn-primary" onclick="performQuery()">
+                        <span id="btn-text">开始查询</span>
+                    </button>
+                </div>
+
+                <div class="status-card">
+                    <div class="status-title">当前用户</div>
+                    <div id="user-name" class="status-value">未登录</div>
+                </div>
+
+                <div class="status-card">
+                    <div class="status-title">查询状态</div>
+                    <div id="query-status" class="status-value">就绪</div>
+                </div>
+
+                <div class="status-card">
+                    <div class="status-title">结果统计</div>
+                    <div id="result-count" class="status-value">0 条记录</div>
+                </div>
+
+                <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e2e8f0;">
+                    <button class="btn" style="width: 100%; margin-bottom: 8px; background: #f1f5f9; color: #475569;"
+                            onclick="listIndicators()">
+                        查看所有指标
+                    </button>
+                    <button class="btn" style="width: 100%; background: #f1f5f9; color: #475569;"
+                            onclick="checkAuth()">
+                        查看我的权限
+                    </button>
+                </div>
+            </aside>
+
+            <main class="main-panel">
+                <!-- 图表区域 -->
+                <div id="chart-section" class="chart-container hidden">
+                    <h3 class="chart-title" id="chart-title">指标趋势图</h3>
+                    <canvas id="indicator-chart" width="800" height="400"></canvas>
+                </div>
+
+                <!-- 数据表格 -->
+                <div id="table-section" class="hidden">
+                    <h3 class="chart-title">详细数据</h3>
+                    <div style="overflow-x: auto;">
+                        <table class="data-table" id="data-table">
+                            <thead>
+                                <tr id="table-head"></tr>
+                            </thead>
+                            <tbody id="table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- 指标列表 -->
+                <div id="list-section" class="hidden">
+                    <h3 class="chart-title">可用指标列表</h3>
+                    <div id="indicator-list" style="max-height: 600px; overflow-y: auto;"></div>
+                </div>
+
+                <!-- 权限信息 -->
+                <div id="auth-section" class="hidden">
+                    <h3 class="chart-title">我的权限列表</h3>
+                    <div id="auth-list"></div>
+                </div>
+
+                <!-- 空状态 -->
+                <div id="empty-state" style="text-align: center; padding: 80px 20px; color: #64748b;">
+                    <div style="font-size: 48px; margin-bottom: 16px;">📈</div>
+                    <h3 style="color: #475569; margin-bottom: 8px;">开始查询指标数据</h3>
+                    <p>在左侧输入查询参数，点击"开始查询"按钮获取数据</p>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        let currentChart = null;
+
+        // 初始化日期为最近3个月
+        document.addEventListener('DOMContentLoaded', function() {
+            const today = new Date();
+            const threeMonthsAgo = new Date(today.getFullYear(), today.getMonth() - 3, 1);
+
+            document.getElementById('start-date').value = formatDate(threeMonthsAgo);
+            document.getElementById('end-date').value = formatDate(today);
+
+            // 尝试获取用户信息
+            loadUserInfo();
+        });
+
+        function formatDate(date) {
+            return date.toISOString().split('T')[0];
+        }
+
+        async function performQuery() {
+            const indicatorName = document.getElementById('indicator-name').value.trim();
+            const queryType = document.getElementById('query-type').value;
+            const queryName = document.getElementById('query-name').value.trim();
+            const startDate = document.getElementById('start-date').value;
+            const endDate = document.getElementById('end-date').value;
+
+            // 校验
+            if (!indicatorName || !queryType || !queryName) {
+                showMessage('请填写所有必填字段（指标名称、查询类型、查询条件）', 'error');
+                return;
+            }
+
+            // 准备请求
+            const requestData = {
+                indicator_name: indicatorName,
+                query_type: queryType,
+                query_name: queryName,
+                start_date: startDate || undefined,
+                end_date: endDate || undefined
+            };
+
+            setLoading(true);
+            showMessage('正在查询...', 'loading');
+            document.getElementById('query-status').textContent = '查询中...';
+
+            try {
+                const response = await fetch('/api/imap/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(requestData)
+                });
+
+                const result = await response.json();
+
+                if (result.status) {
+                    displayResult(result);
+                    showMessage('查询成功', 'success');
+                    document.getElementById('query-status').textContent = '完成';
+                } else {
+                    showMessage(`查询失败: ${result.error || '未知错误'}`, 'error');
+                    document.getElementById('query-status').textContent = '失败';
+                }
+            } catch (error) {
+                showMessage(`网络错误: ${error.message}`, 'error');
+                document.getElementById('query-status').textContent = '错误';
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        function displayResult(result) {
+            const chart = result.chart;
+            const indicator = result.indicator;
+            const visualization = result.visualization;
+
+            // 显示统计信息
+            document.getElementById('result-count').textContent = `${chart.rows.length} 条记录`;
+
+            // 显示图表（如果有足够数据）
+            if (chart.rows.length > 0 && chart.x_field && chart.series_fields.length > 0) {
+                drawChart(chart, visualization);
+                document.getElementById('chart-section').classList.remove('hidden');
+            } else {
+                document.getElementById('chart-section').classList.add('hidden');
+            }
+
+            // 显示数据表格
+            displayTable(chart);
+
+            // 隐藏其他部分
+            document.getElementById('list-section').classList.add('hidden');
+            document.getElementById('auth-section').classList.add('hidden');
+            document.getElementById('empty-state').classList.add('hidden');
+        }
+
+        function drawChart(chart, visualization) {
+            const ctx = document.getElementById('indicator-chart').getContext('2d');
+
+            // 准备数据
+            const labels = chart.rows.map(row => row[chart.x_field]);
+            const datasets = chart.series_fields.map(field => ({
+                label: field,
+                data: chart.rows.map(row => row[field]),
+                borderColor: getColor(field),
+                backgroundColor: getColor(field, 0.2),
+                tension: 0.3
+            }));
+
+            // 销毁旧图表
+            if (currentChart) {
+                currentChart.destroy();
+            }
+
+            // 创建新图表
+            currentChart = new Chart(ctx, {
+                type: visualization.chart_type || 'bar',
+                data: {
+                    labels: labels,
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: visualization.suggested_config?.title || '指标图表',
+                            font: { size: 16 }
+                        },
+                        legend: {
+                            position: 'top'
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: visualization.suggested_config?.x_label || chart.x_field
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: visualization.suggested_config?.y_label || '数值'
+                            },
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+
+        function displayTable(chart) {
+            const thead = document.getElementById('table-head');
+            const tbody = document.getElementById('table-body');
+
+            // 清空现有内容
+            thead.innerHTML = '';
+            tbody.innerHTML = '';
+
+            if (chart.rows.length === 0) {
+                document.getElementById('table-section').classList.add('hidden');
+                return;
+            }
+
+            document.getElementById('table-section').classList.remove('hidden');
+
+            // 表头
+            const headers = Object.keys(chart.rows[0]);
+            headers.forEach(header => {
+                const th = document.createElement('th');
+                th.textContent = header;
+                thead.appendChild(th);
+            });
+
+            // 表格数据（最多显示100条）
+            const displayRows = chart.rows.slice(0, 100);
+            displayRows.forEach(row => {
+                const tr = document.createElement('tr');
+                headers.forEach(header => {
+                    const td = document.createElement('td');
+                    td.textContent = row[header];
+                    tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+            });
+
+            if (chart.rows.length > 100) {
+                const tr = document.createElement('tr');
+                const td = document.createElement('td');
+                td.colSpan = headers.length;
+                td.style.textAlign = 'center';
+                td.style.color = '#64748b';
+                td.textContent = `... 还有 ${chart.rows.length - 100} 条记录未显示`;
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+            }
+        }
+
+        function getColor(field, alpha = 1) {
+            const colors = [
+                `rgba(79, 70, 229, ${alpha})`,
+                `rgba(139, 92, 246, ${alpha})`,
+                `rgba(59, 130, 246, ${alpha})`,
+                `rgba(16, 185, 129, ${alpha})`,
+                `rgba(245, 158, 11, ${alpha})`,
+                `rgba(239, 68, 68, ${alpha})`,
+            ];
+            const index = field.charCodeAt(0) % colors.length;
+            return colors[index];
+        }
+
+        function showMessage(text, type) {
+            const box = document.getElementById('message-box');
+            box.textContent = text;
+            box.className = `message ${type}`;
+            if (type === 'hidden') {
+                box.classList.add('hidden');
+            } else {
+                box.classList.remove('hidden');
+            }
+        }
+
+        function setLoading(isLoading) {
+            const btn = document.getElementById('query-btn');
+            const btnText = document.getElementById('btn-text');
+
+            btn.disabled = isLoading;
+            if (isLoading) {
+                btnText.innerHTML = '<div class="loading-spinner"></div> 查询中...';
+            } else {
+                btnText.textContent = '开始查询';
+            }
+        }
+
+        async function listIndicators() {
+            setLoading(true);
+            showMessage('正在获取指标列表...', 'loading');
+
+            try {
+                const response = await fetch('/api/imap/list');
+                const result = await response.json();
+
+                if (result.status) {
+                    displayIndicatorList(result.indicators);
+                    showMessage(`共找到 ${result.total} 个指标`, 'success');
+
+                    // 切换到列表视图
+                    document.getElementById('chart-section').classList.add('hidden');
+                    document.getElementById('table-section').classList.add('hidden');
+                    document.getElementById('auth-section').classList.add('hidden');
+                    document.getElementById('list-section').classList.remove('hidden');
+                    document.getElementById('empty-state').classList.add('hidden');
+                } else {
+                    showMessage(`获取失败: ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showMessage(`网络错误: ${error.message}`, 'error');
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        function displayIndicatorList(indicators) {
+            const container = document.getElementById('indicator-list');
+            container.innerHTML = '';
+
+            const table = document.createElement('table');
+            table.className = 'data-table';
+
+            // 表头
+            const thead = document.createElement('thead');
+            thead.innerHTML = `
+                <tr>
+                    <th>指标名称</th>
+                    <th>描述</th>
+                    <th>图表类型</th>
+                    <th>部署位置</th>
+                </tr>
+            `;
+            table.appendChild(thead);
+
+            // 表格内容
+            const tbody = document.createElement('tbody');
+            indicators.forEach(ind => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td><strong>${ind.name}</strong></td>
+                    <td style="max-width: 300px;">${ind.description || '-'}</td>
+                    <td><span class="badge">${ind.chart_type}</span></td>
+                    <td>${ind.deployment}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+            table.appendChild(tbody);
+
+            container.appendChild(table);
+        }
+
+        async function checkAuth() {
+            setLoading(true);
+            showMessage('正在查询权限...', 'loading');
+
+            try {
+                const response = await fetch('/api/imap/auth');
+                const result = await response.json();
+
+                if (result.status) {
+                    displayAuthList(result);
+                    showMessage('查询成功', 'success');
+
+                    // 切换到权限视图
+                    document.getElementById('chart-section').classList.add('hidden');
+                    document.getElementById('table-section').classList.add('hidden');
+                    document.getElementById('list-section').classList.add('hidden');
+                    document.getElementById('auth-section').classList.remove('hidden');
+                    document.getElementById('empty-state').classList.add('hidden');
+                } else {
+                    showMessage(`查询失败: ${result.error}`, 'error');
+                }
+            } catch (error) {
+                showMessage(`网络错误: ${error.message}`, 'error');
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        function displayAuthList(result) {
+            const container = document.getElementById('auth-list');
+            container.innerHTML = '';
+
+            const authTypes = ['分中心级', '部门级', '项目组级', '中心级', '院级'];
+
+            authTypes.forEach(type => {
+                const items = result.user_permissions[type] || [];
+                if (items.length > 0) {
+                    const div = document.createElement('div');
+                    div.style.marginBottom = '16px';
+                    div.innerHTML = `
+                        <h4 style="color: #4f46e5; margin-bottom: 8px;">${type}</h4>
+                        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                            ${items.map(name => `<span class="badge" style="font-size: 12px; padding: 4px 12px;">${name}</span>`).join('')}
+                        </div>
+                    `;
+                    container.appendChild(div);
+                }
+            });
+        }
+
+        async function loadUserInfo() {
+            try {
+                const response = await fetch('/api/imap/user');
+                const result = await response.json();
+                if (result.status) {
+                    const user = result.data.content[0];
+                    const displayName = user.name || user.employee_id;
+                    document.getElementById('user-name').textContent = displayName;
+                }
+            } catch (error) {
+                document.getElementById('user-name').textContent = '未知用户';
+            }
+        }
+    </script>
+</body>
+</html>

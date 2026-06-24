@@ -1,0 +1,12 @@
+# zMail 邮件管理技能依赖（scripts 下 Python 脚本）
+# Python 版本：3.6 及以上。Windows / Linux / macOS 均支持。低于 3.6 请先升级。
+# 安装：pip install -r requirements.txt
+
+# HTML 解析（zmail_reply、html_markdown 等）
+beautifulsoup4>=4.9.0
+
+# Markdown → HTML（html_markdown.markdown_to_html，发邮件正文等）
+markdown>=3.0
+
+# HTTP 请求
+requests>=2.0.0

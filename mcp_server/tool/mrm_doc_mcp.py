@@ -81,9 +81,9 @@ def random_id(prefix: str = "DOC") -> str:
 # 🛠️ MCP 工具定义
 # ============================================================================
 
-@mcp.tool(name="单据筛选")
+@mcp.tool(name="doc_query")
 async def doc_query(id: str) -> str:
-    """从 mrm 数据库中获取该 id 对应的具体单据信息，查询单据必须通过'单据筛选'工具进行查询。
+    """【单据筛选】从 mrm 数据库中获取该 id 对应的具体单据信息。查询单据必须使用本工具。
 
     参数:
     - id: 单据 id
@@ -144,9 +144,9 @@ async def doc_query(id: str) -> str:
 """
 
 
-@mcp.tool(name="单据跟催")
+@mcp.tool(name="doc_mail")
 async def doc_mail(id: str) -> str:
-    """查询输入 id 的单据并发邮件跟催，返回是否成功跟催，跟催单据必须通过'单据跟催'工具进行跟催。
+    """【单据跟催】查询输入 id 的单据并发邮件跟催，返回是否成功跟催。
 
     参数:
     - id: 单据 id
@@ -206,9 +206,9 @@ async def doc_mail(id: str) -> str:
 """
 
 
-@mcp.tool(name="单据处理")
+@mcp.tool(name="doc_process")
 async def doc_process(id: str) -> str:
-    """查询输入 id 的单据并进行处理，返回是否处理成功，处理单据必须通过'单据处理'工具进行处理。
+    """【单据处理】查询输入 id 的单据并进行处理，返回是否处理成功。
 
     参数:
     - id: 单据 id

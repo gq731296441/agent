@@ -320,8 +320,6 @@ class TestConfig(BaseConfig):
     DEBUG: bool = True
     ENVIRONMENT: str = "test"
     MCP_TOOLS_API_URL: str = "https://aip.zte.com.cn/trial/cmtool/api/v1/component/mcp/mine"
-    MCP_USE_MOCK: bool = True
-    MCP_FALLBACK_TO_MOCK: bool = True
 
 
 class ProductionConfig(BaseConfig):

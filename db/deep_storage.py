@@ -1003,25 +1003,20 @@ async def list_skill_catalog_ids() -> List[str]:
         return [r["skill_id"] for r in rows]
 
 
-async def archive_missing_skills(present_ids: List[str]) -> int:
-    """将不在 present_ids 中的 catalog 条目标为 archived（若仍有人订阅则保留记录）。"""
+async def delete_missing_skills(present_ids: List[str]) -> int:
+    """删除不在 present_ids 中的 catalog 记录（以 skill-repo 为准完全覆盖）。"""
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         if present_ids:
             result = await conn.execute(
                 """
-                UPDATE skill_catalog SET status = 'archived', updated_at = CURRENT_TIMESTAMP
-                WHERE skill_id != ALL($1::text[]) AND status != 'archived'
+                DELETE FROM skill_catalog
+                WHERE skill_id != ALL($1::text[])
                 """,
                 present_ids,
             )
         else:
-            result = await conn.execute(
-                """
-                UPDATE skill_catalog SET status = 'archived', updated_at = CURRENT_TIMESTAMP
-                WHERE status != 'archived'
-                """
-            )
+            result = await conn.execute("DELETE FROM skill_catalog")
         try:
             return int(result.split()[-1])
         except (ValueError, IndexError):
