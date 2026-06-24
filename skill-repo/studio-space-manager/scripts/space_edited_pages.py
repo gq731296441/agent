@@ -1,0 +1,399 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+=================================================================
+studio-space-manager - 我编辑的页面查询模块 (v2.1.0)
+=================================================================
+iCenter 空间管理技能 - 查询当前用户编辑过的页面
+
+功能：
+- 查询当前用户编辑过的页面列表
+- 支持分页查询
+- 返回页面ID、标题、编辑时间、所在空间等信息
+- ✅ 优化为 POST 请求（v2.0.0）
+- ✅ 支持按日期/时段/区间筛选（v2.1.0）
+
+跨平台支持：
+- ✅ Linux (Ubuntu/CentOS/Debian)
+- ✅ Windows 10/11
+- ✅ macOS (通过 Python)
+
+使用方式：
+  # Linux / macOS
+  python3 space_edited_pages.py [选项]
+
+  # Windows
+  python space_edited_pages.py [选项]
+
+选项：
+  --page-size       每页数量（默认 100）
+  --page-num        页码（默认 1）
+  --space-id        空间ID筛选（可选，只返回指定空间的编辑记录）
+  --date            日期/时段筛选（默认 today）
+
+依赖：
+- Python 3.6+
+- requests
+
+作者：Co-Claw Team
+创建：2026-03-09
+更新：2026-03-10
+"""
+
+import requests
+import json
+import argparse
+import os
+import platform
+import tempfile
+from typing import Tuple
+
+# 统一的 user_id/token 环境变量读取逻辑
+from system_param import (
+    build_icenter_api_url,
+    build_system_param,
+    get_user_and_token as _get_user_and_token,
+)
+from _platform_utils import configure_stdio_utf8
+from date_filter_utils import resolve_date_range, filter_items_by_date
+
+
+def get_user_and_token() -> tuple:
+    """返回 (user_id, token)，优先从环境变量获取（非 strict）。"""
+    return _get_user_and_token(strict=False)
+
+
+def get_auth_headers():
+    """获取认证请求头"""
+    emp_no, token = _get_user_and_token(strict=False)
+    emp_no = (emp_no or "").strip()
+    token = (token or "").strip()
+
+    if not emp_no or not token:
+        raise ValueError(
+            "未找到认证信息，请确保环境变量 coclaw_empno 和 coclaw_token 已设置，如仍报错请重启 Co-Claw 服务后重试"
+        )
+
+    return {
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "Pragma": "no-cache",
+        "User-Agent": "co-claw-skill",
+        "X-Auth-Value": token,
+        "X-Emp-No": emp_no,
+        "X-Lang-Id": "zh_CN",
+        "X-Tenant-Id": "ZTE",
+    }
+
+
+def search_edited_pages(
+    emp_no, token, page_size=100, page_num=1, space_id=None, date_filter="today"
+):
+    """
+    查询当前用户编辑过的页面
+
+    Args:
+        emp_no: 用户工号
+        token: 认证令牌
+        page_size: 每页数量，默认 100
+        page_num: 页码，默认 1
+        space_id: 空间ID筛选（可选）
+
+    Returns:
+        dict: 查询结果
+    """
+    if not emp_no or not token:
+        return {"status": "error", "message": "缺少必需参数：emp_no 和 token"}
+
+    # POST 请求基础URL
+    url = build_icenter_api_url("/zte-rd-icenter-advanced/edited/page")
+
+    # 构建请求体参数
+    space_id_param = space_id if space_id else "undefined"
+    data = {
+        "spaceId": space_id_param,
+        "environmentType": "browser",
+        "system": build_system_param("space"),
+        "pageSize": page_size,
+        "pageNo": page_num,
+    }
+
+    headers = get_auth_headers()
+    # POST 请求需要设置 Content-Type
+    headers["Content-Type"] = "application/json"
+
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        response.raise_for_status()
+
+        result = response.json()
+
+        # 检查返回码是否为成功
+        code_info = result.get("code", {})
+        if (
+            code_info.get("code") == "0000"
+            and "bo" in result
+            and "items" in result["bo"]
+        ):
+            bo = result["bo"]
+            items = bo.get("items", [])
+            total = bo.get("totalRecord", len(items))
+
+            # 提取需要的信息
+            results = []
+            for item in items[:page_size]:  # 根据 page_size 限制返回数量
+                # 处理编辑时间
+                edit_time = item.get("editTime", "")
+                edit_time_str = ""
+                if edit_time:
+                    try:
+                        # 尝试解析 ISO 格式时间
+                        if "T" in edit_time:
+                            # 兼容 Python 3.6+ 的时间解析
+                            edit_time_str = edit_time.replace("Z", "").replace(
+                                "T", " "
+                            )[:19]
+                        else:
+                            edit_time_str = edit_time
+                    except (ValueError, OSError, AttributeError):
+                        edit_time_str = str(edit_time)
+
+                result_item = {
+                    "contentId": item.get("contentId", ""),
+                    "contentName": item.get("contentName", ""),
+                    "contentFrom": item.get("contentFrom", ""),
+                    "editTime": edit_time_str,
+                    "spaceId": item.get("spaceId", ""),
+                    "spaceName": item.get("spaceName", ""),
+                }
+                results.append(result_item)
+
+            start_iso, end_iso = resolve_date_range(date_filter)
+            filtered_results = filter_items_by_date(
+                results, "editTime", start_iso, end_iso
+            )
+
+            # 处理分页信息 - 分页时需要后端返回的总条数，但最终结果不返回
+            page_info = {
+                "pageNo": bo.get("pageNo", 0),
+                "pageSize": bo.get("pageSize", page_size),
+                "totalRecord": bo.get("totalRecord", total),
+                "totalRow": bo.get("totalRow", total),
+            }
+
+            return {
+                "status": "success",
+                "returned": len(filtered_results),
+                "pageInfo": page_info,
+                "results": filtered_results,
+                "dateRange": {"start": start_iso, "end": end_iso},
+            }
+        else:
+            error_msg = code_info.get("msg", "未知错误")
+            return {
+                "status": "error",
+                "message": f"API 返回异常: {error_msg}",
+                "code": code_info.get("code", ""),
+                "response": result,
+                "debug_url": url,
+                "debug_headers": {
+                    k: v if k != "X-Auth-Value" else "***" for k, v in headers.items()
+                },
+            }
+
+    except requests.exceptions.RequestException as e:
+        return {"status": "error", "message": f"请求失败: {str(e)}"}
+    except Exception as e:
+        return {"status": "error", "message": f"处理失败: {str(e)}"}
+
+
+def format_result_as_markdown(result):
+    """
+    将查询结果格式化为Markdown格式
+
+    Args:
+        result: 结果字典
+
+    Returns:
+        str: Markdown格式的文本
+    """
+    if result.get("status") == "success":
+        returned = result.get("returned", 0)
+        page_info = result.get("pageInfo", {})
+        date_range = result.get("dateRange", {})
+        results = result.get("results", [])
+
+        output = f"# 我编辑的页面\n\n"
+        if date_range:
+            output += (
+                f"- **时间范围**: {date_range.get('start', '')} ~ {date_range.get('end', '')}\n"
+            )
+        output += f"- **每页显示**: {page_info.get('pageSize', 100)} 条\n"
+        output += f"- **返回**: {returned} 条结果\n\n"
+
+        if results:
+            output += "---\n\n"
+            for idx, item in enumerate(results, 1):
+                content_name = item.get("contentName", "无标题")
+                content_id = item.get("contentId", "")
+                content_from = item.get("contentFrom", "")
+                edit_time = item.get("editTime", "")
+                space_name = item.get("spaceName", "")
+                space_id = item.get("spaceId", "")
+
+                output += f"## {idx}. {content_name}\n\n"
+
+                # 构建页面链接
+                if content_id and space_id:
+                    page_url = f"https://i.zte.com.cn/#/shared/{space_id}/wiki/page/{content_id}/view"
+                    output += f"🔗 [查看页面]({page_url})\n\n"
+
+                # 元信息
+                meta_info = []
+                if space_name:
+                    meta_info.append(f"**所在空间**: {space_name}")
+                if edit_time:
+                    meta_info.append(f"**编辑时间**: {edit_time}")
+                if content_from:
+                    meta_info.append(f"**内容类型**: {content_from}")
+
+                if meta_info:
+                    output += " | ".join(meta_info) + "\n\n"
+
+                output += "---\n\n"
+        else:
+            output += "\n未找到编辑记录。\n"
+
+        return output
+    else:
+        error_msg = result.get("message", "未知错误")
+        output = f"# 查询失败\n\n"
+        output += f"❌ {error_msg}\n"
+        if result.get("code"):
+            output += f"\n**错误代码**: `{result.get('code')}`\n"
+        return output
+
+
+def format_result_as_json(result):
+    """
+    将查询结果格式化为JSON格式（程序调用使用）
+
+    Args:
+        result: 结果字典
+
+    Returns:
+        str: JSON格式的文本
+    """
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+# =============================================================================
+# 跨平台支持 - 平台检测
+# =============================================================================
+
+
+def detect_platform() -> Tuple[str, str, bool]:
+    """
+    检测当前操作系统平台。
+
+    Returns:
+        Tuple[系统类型, 系统版本, 是否为Windows]
+    """
+    system = platform.system()
+    release = platform.release()
+    is_windows = system == "Windows"
+    return system, release, is_windows
+
+
+def get_log_dir() -> str:
+    """
+    获取日志目录，支持跨平台运行。
+    """
+    system, _, is_windows = detect_platform()
+
+    if is_windows or os.name != "posix":
+        temp_base = tempfile.gettempdir()
+        log_dir = os.path.join(temp_base, "studio-space-manager", "log")
+    else:
+        log_dir = os.path.join(
+            os.path.expanduser("~"),
+            ".openclaw",
+            "workspace",
+            "skills",
+            "studio-space-manager",
+            "log",
+        )
+
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        if not is_windows and os.name == "posix":
+            os.chmod(log_dir, 0o700)
+    except Exception:
+        temp_base = tempfile.gettempdir()
+        log_dir = os.path.join(temp_base, "studio-space-manager", "log")
+        os.makedirs(log_dir, exist_ok=True)
+
+    return log_dir
+
+
+# 初始化平台信息
+SYSTEM, SYSTEM_RELEASE, IS_WINDOWS = detect_platform()
+
+
+if __name__ == "__main__":
+    configure_stdio_utf8()
+    parser = argparse.ArgumentParser(
+        description="查询当前用户编辑过的页面（支持按日期/时段/区间筛选）",
+        epilog="提示: 工号和 Token 从环境变量 coclaw_empno 和 coclaw_token 获取",
+    )
+    parser.add_argument(
+        "--page-size", dest="page_size", type=int, default=100, help="每页数量（默认 100）"
+    )
+    parser.add_argument(
+        "--page-num", dest="page_num", type=int, default=1, help="页码（默认 1）"
+    )
+    parser.add_argument("--space-id", dest="space_id", help="空间ID筛选，只返回指定空间的编辑记录（可选）")
+    parser.add_argument(
+        "--date",
+        dest="date_filter",
+        default="today",
+        help=(
+            "日期筛选：today/今天、yesterday/昨天、前天、YYYY-MM-DD、M-D、M月D日；"
+            "时段支持本周/上周/本月/今年；区间支持 2026-03-01~2026-03-10 或 3-1 到 3-10"
+        ),
+    )
+    parser.add_argument(
+        "--json", dest="json_output", action="store_true", help="输出 JSON 格式（用于程序调用）"
+    )
+
+    args = parser.parse_args()
+
+    # 从环境变量获取工号和token
+    emp_no, token = get_user_and_token()
+
+    if not emp_no or not token:
+        error_result = {
+            "status": "error",
+            "message": "缺少必需参数：emp_no 和 token。请设置环境变量 coclaw_empno 和 coclaw_token",
+        }
+        if args.json_output:
+            print(format_result_as_json(error_result))
+        else:
+            print(format_result_as_markdown(error_result))
+        exit(1)
+
+    result = search_edited_pages(
+        emp_no,
+        token,
+        page_size=args.page_size,
+        page_num=args.page_num,
+        space_id=args.space_id,
+        date_filter=args.date_filter,
+    )
+
+    if args.json_output:
+        print(format_result_as_json(result))
+    else:
+        print(format_result_as_markdown(result))

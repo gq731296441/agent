@@ -130,11 +130,12 @@ ehthumbs.db
 Thumbs.db
 .github/copilot-instructions.md
 CLAUDE.md
-tests
+/tests
 deploy
-scripts
+/scripts
 docs
 # Runtime data
 data/
 tiktoken_cache/
 .claude/
+!skill-repo/
