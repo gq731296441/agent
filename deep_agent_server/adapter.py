@@ -310,16 +310,17 @@ class DeepEventAdapter:
         args: Optional[dict] = None,
     ) -> str:
         from deep_agent_server.conversation_files import infer_fs_tool_name
+        from mcp_server.tool_name_utils import mcp_original_names
 
         name = (tool_name or "").strip()
         if name and name != "unknown":
-            return name
+            return mcp_original_names.get(name, name)
         if tool_call_id:
             stored = self._emitted_tool_names.get(tool_call_id)
             if stored and stored != "unknown":
-                return stored
+                return mcp_original_names.get(stored, stored)
         inferred = infer_fs_tool_name(args or {})
-        return inferred or name or "unknown"
+        return mcp_original_names.get(inferred or "", inferred) or name or "unknown"
 
     @staticmethod
     def _stringify_content(content: Any) -> str:

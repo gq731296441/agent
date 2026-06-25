@@ -1,3 +1,4 @@
+from datetime import timezone, timedelta
 from fastapi import APIRouter, HTTPException, Request, Query
 from typing import List, Dict, Any
 from pydantic import BaseModel, Field
@@ -11,6 +12,19 @@ from deep_agent_server.workspace import remove_session_workspace
 import json
 
 logger = get_logger(__name__)
+
+# 中国标准时间 (UTC+8)
+_CST = timezone(timedelta(hours=8))
+
+
+def _format_local_time(dt) -> str:
+    """将数据库时间（UTC）转换为中国标准时间 (UTC+8) 并格式化为字符串。"""
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    local_dt = dt.astimezone(_CST)
+    return local_dt.strftime("%Y-%m-%d %H:%M:%S")
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -78,9 +92,9 @@ async def get_user_sessions(
             SessionItem(
                 id=str(s.get("session_id", "")),
                 title=s.get("session_name", ""),
-                last_active_at=s.get("last_active_at", "").strftime("%Y-%m-%d %H:%M:%S") if s.get("last_active_at") else "",
-                created_at=s.get("created_at", "").strftime("%Y-%m-%d %H:%M:%S") if s.get("created_at") else "",
-                updated_at=s.get("updated_at", "").strftime("%Y-%m-%d %H:%M:%S") if s.get("updated_at") else "",
+                last_active_at=_format_local_time(s.get("last_active_at")),
+                created_at=_format_local_time(s.get("created_at")),
+                updated_at=_format_local_time(s.get("updated_at")),
                 agent_kind=s.get("agent_kind") or "default",
                 agent_id=str(s["agent_id"]) if s.get("agent_id") else None,
                 agent_name=s.get("agent_name"),
@@ -132,7 +146,7 @@ async def get_session_history(
                 run_id=str(r["run_id"]) if r.get("run_id") else None,
                 group_id=r.get("group_id", 0) or 0,
                 step_index=r.get("step_index", 0) or 0,
-                create_time=r["created_at"].strftime("%Y-%m-%d %H:%M:%S"),
+                create_time=_format_local_time(r["created_at"]),
                 context_epoch=int(r.get("context_epoch") or 1),
             )
             for r in history

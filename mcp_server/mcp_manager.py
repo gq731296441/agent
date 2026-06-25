@@ -6,6 +6,7 @@ import traceback
 import time
 import httpx
 from typing import List, Optional, Any, Dict, Tuple
+from langchain_core.tools.base import ToolException
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from config.config import app_config
@@ -32,6 +33,25 @@ def _create_no_proxy_async_client(
     if auth is not None:
         kwargs["auth"] = auth
     return httpx.AsyncClient(**kwargs)
+
+
+def _wrap_mcp_tools_error(tools: List[Any]) -> List[Any]:
+    """MCP 工具 isError 时抛 ToolException，给错误信息加用户可读的说明前缀。"""
+    _ERR_PREFIX = (
+        "⚠️ MCP 工具调用失败，可能原因：工具输出格式与服务端 outputSchema 定义不匹配。"
+        "请联系 MCP 服务端管理员检查。\n\n原始错误: "
+    )
+    for tool in tools:
+        if hasattr(tool, "_arun"):
+            _orig = tool._arun
+            async def _wrapped(*args, _orig=_orig, config=None, run_manager=None, **kwargs):
+                try:
+                    return await _orig(*args, config=config, run_manager=run_manager, **kwargs)
+                except ToolException as e:
+                    raise ToolException(_ERR_PREFIX + str(e)) from e
+            tool._arun = _wrapped
+    return tools
+
 
 class McpToolService:
     _validation_cache: Dict[str, Tuple[float, List[Tuple]]] = {}
@@ -182,13 +202,14 @@ class McpToolService:
         获取所有可用的 MCP 工具对象（过滤不可用的）
         """
         raw_results = await self._run_batch_validation(server_list)
-        
+
         all_mcp_tools = []
         for name, is_success, tools, status in raw_results:
             if is_success:
                 all_mcp_tools.extend(tools)
 
         all_mcp_tools = normalize_tools_for_llm(all_mcp_tools)
+        all_mcp_tools = _wrap_mcp_tools_error(all_mcp_tools)
         logger.info(f"MCP 工具加载完成，共计 {len(all_mcp_tools)} 个可用工具")
         return all_mcp_tools
 

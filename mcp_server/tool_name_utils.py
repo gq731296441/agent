@@ -1,10 +1,13 @@
 """MCP 工具名规范化（兼容 OpenAI/DeepSeek 等 API 的 function.name 约束）。"""
 
 import re
-from typing import Any, List, Set
+from typing import Any, Dict, List, Set
 
 # LLM API 要求: ^[a-zA-Z0-9_-]+$
 _TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+# 规范化名 → 原始名映射，供 adapter 展示用
+mcp_original_names: Dict[str, str] = {}
 
 # 常见中文工具名 -> ASCII 映射（MCP 服务端同步改名时保持一致）
 _KNOWN_ALIASES = {
@@ -43,6 +46,7 @@ def normalize_tools_for_llm(tools: List[Any]) -> List[Any]:
     """重命名 LangChain 工具对外 name，内部 MCP 调用仍使用原始 tool.name（闭包）。"""
     used: Set[str] = set()
     normalized: List[Any] = []
+    mcp_original_names.clear()
 
     for tool in tools:
         original = tool.name
@@ -52,20 +56,26 @@ def normalize_tools_for_llm(tools: List[Any]) -> List[Any]:
         else:
             base = sanitize_tool_name(original, used)
         safe = base
+        mcp_original_names[safe] = original
         if safe == original:
             normalized.append(tool)
             continue
 
+        # 保存原始工具名，供前端/ADAP展示
+        meta = dict(getattr(tool, "metadata", {}) or {})
+        meta["original_name"] = original
         desc = tool.description or ""
         if original not in desc:
             desc = f"{desc}\n[原工具名: {original}]".strip()
 
         try:
-            normalized.append(tool.model_copy(update={"name": safe, "description": desc}))
+            normalized.append(tool.model_copy(update={"name": safe, "description": desc, "metadata": meta}))
         except Exception:
             tool.name = safe
             if hasattr(tool, "description"):
                 tool.description = desc
+            if hasattr(tool, "metadata"):
+                tool.metadata = meta
             normalized.append(tool)
 
     return normalized

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
+from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 
@@ -35,9 +36,26 @@ def _extract_tool_call_id(config: Optional[RunnableConfig]) -> str:
 def _result_text(result: Any) -> str:
     if isinstance(result, str):
         return result
+    if isinstance(result, ToolMessage):
+        content = result.content
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "".join(parts)
+        return str(content)
     if isinstance(result, tuple) and result:
         head = result[0]
-        return head if isinstance(head, str) else str(head)
+        if isinstance(head, str):
+            return head
+        if isinstance(head, ToolMessage):
+            return _result_text(head)
+        return str(head)
     return str(result)
 
 
@@ -62,6 +80,14 @@ async def _maybe_spill(
         if spill.spilled:
             if isinstance(result, tuple):
                 return (spill.content, *result[1:])
+            if isinstance(result, ToolMessage):
+                return ToolMessage(
+                    content=spill.content,
+                    artifact=getattr(result, "artifact", None),
+                    tool_call_id=getattr(result, "tool_call_id", tool_call_id),
+                    name=getattr(result, "name", tool.name),
+                    status=getattr(result, "status", "success"),
+                )
             return spill.content
     except Exception as e:
         logger.warning(f"[SpillWrapper] {tool.name} spill 失败，返回原文: {e}")
