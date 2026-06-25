@@ -193,8 +193,32 @@ class WebsocketConnectionManager:
         if ws and ws.application_state == WebSocketState.CONNECTED:
             try:
                 await ws.send_json(msg)
-            except Exception as e:
-                logger.error(f"【websocket】发送失败 (session={session_id}): {e}")
+            except Exception:
+                try:
+                    import json as _json
+                    raw = _json.dumps(msg, ensure_ascii=False, default=str)
+                    await ws.send_text(raw)
+                    # 定位不可序列化的 key
+                    bad_keys = []
+                    def _find_bad(obj, path=""):
+                        if isinstance(obj, dict):
+                            for k, v in obj.items():
+                                _find_bad(v, f"{path}.{k}")
+                        elif isinstance(obj, list):
+                            for i, v in enumerate(obj):
+                                _find_bad(v, f"{path}[{i}]")
+                        elif not isinstance(obj, (str, int, float, bool, type(None))):
+                            try:
+                                _json.dumps(obj)
+                            except Exception:
+                                bad_keys.append(path)
+                    _find_bad(msg, "msg")
+                    logger.warning(
+                        f"【websocket】消息含不可序列化对象 (session={session_id}), "
+                        f"type={msg.get('type')}, keys={bad_keys}, 已用 default=str 兜底"
+                    )
+                except Exception as e:
+                    logger.error(f"【websocket】发送失败 (session={session_id}): {e}")
                 # 此处不主动 disconnect，由循环中的 WebSocketDisconnect 统一处理
         else:
             logger.warning(f"【websocket】发送失败，找不到会话 {session_id} 对应的连接")

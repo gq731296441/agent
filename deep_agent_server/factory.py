@@ -19,6 +19,7 @@ from deep_agent_server.backend_factory import (
 from deep_agent_server.sandbox import get_sandbox_backend_factory_if_enabled
 from deep_agent_server.sandbox.exceptions import SandboxUserLimitExceeded
 from deep_agent_server.skills.selector import build_skills_system_prompt
+from agent_server.prompts import build_base_system_prompt, build_system_prompt
 
 logger = get_logger(__name__)
 
@@ -49,6 +50,7 @@ async def create_deep_agent_instance(
     loaded_skill_metas: Optional[list] = None,
     selected_skill_ids: Optional[List[str]] = None,
     *,
+    agent_kind: str = "default",
     skip_sandbox: bool = False,
     user_token: Optional[str] = None,
     matched_skill_dirs: Optional[List[str]] = None,  # deprecated, ignored
@@ -63,7 +65,14 @@ async def create_deep_agent_instance(
     """
     try:
         model = llm or create_agent_llm()
-        system_prompt = user_agent.get("system_prompt") or "你是智搭助手。"
+        # 订阅智能体：基础提示词（不含 Role 身份） + 自定义提示词
+        # 默认智能体：完整提示词（含 Role 智搭身份）
+        if agent_kind == "subscription":
+            base_prompt = build_base_system_prompt(user_id=user_id, user_token=user_token)
+            custom_prompt = user_agent.get("system_prompt", "").strip()
+            system_prompt = base_prompt + "\n\n# 智能体设定\n" + custom_prompt if custom_prompt else base_prompt
+        else:
+            system_prompt = build_system_prompt(user_id=user_id, user_token=user_token)
         config = user_agent.get("config") or {}
         # 渐进式披露：system prompt 只含 name/description，正文按需 read_file
         metas = exposed_skill_metas or []

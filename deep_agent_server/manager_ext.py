@@ -134,7 +134,7 @@ async def create_deep_agent_for_session(
     skill_candidate_dirs = await _resolve_skill_dirs_for_agent(
         agent_kind, user_id, resolved_agent_id or "", creator_user_id
     )
-    if selected_skill_ids is not None:
+    if selected_skill_ids:
         selected_skill_ids = effective_selected_skill_ids(
             skill_candidate_dirs, selected_skill_ids
         )
@@ -237,6 +237,7 @@ async def create_deep_agent_for_session(
             exposed_skill_metas=exposed_metas,
             loaded_skill_metas=trigger_metas,
             selected_skill_ids=selected_skill_ids,
+            agent_kind=agent_kind,
             skip_sandbox=skip_sandbox,
             user_token=user_token,
             llm=llm,

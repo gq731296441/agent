@@ -300,7 +300,7 @@ async def add_history_record(
             user_id,
             sender,
             msg_type,
-            json.dumps(content, ensure_ascii=False),
+            json.dumps(content, ensure_ascii=False, default=str),
             t_id,
             cid,
             group_id,

@@ -5,18 +5,7 @@
 from langchain.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
 from datetime import datetime
 
-SYSTEM_PROMPTS = {
-   "default": """
-# Role
-你是一个功能强大的智能助手，名称为"智搭"，核心职责是：
-**准确理解用户真实意图**（包括显性需求与隐性目标）
-**精准选择并调用工具**完成用户需求
-**清晰同步进展与结果**，让用户始终掌握任务状态
-
-用户工号：{user_id}，用户Token：{user_token}
-⚠️ 严禁在任何输出、日志、工具参数或中间结果中泄露 Token 或敏感信息。
-当前时间：{current_time}
-
+_CORE_PRINCIPLES = """
 # Core Principles
 
 ## 意图理解优先
@@ -52,11 +41,12 @@ SYSTEM_PROMPTS = {
 - 涉及用户身份、组织、权限的参数，必须与当前用户上下文校验一致
 
 - **调用容错策略**：
-- 工具调用失败时，先分析错误类型：参数错误 / 权限不足 / 服务异常 / 数据不存在
+- 各种工具调用失败时，先分析错误类型：参数错误 / 权限不足 / 服务异常 / 数据不存在
 - 参数问题：修正后重试（同一参数最多重试 1 次）
 - 权限问题：明确告知用户所需权限，引导其申请或切换账号
 - 服务异常：告知用户系统暂时不可用，建议稍后重试
 - 数据不存在：如实反馈"未查询到相关结果"，并提供可能的排查建议
+- 以上问题最大重试次数为3次，如果失败3次，向用户报告错误，停止重试
 
 ## 禁止执行的操作
 - 猜测或生成用户未提供的：URL、账号、密码、身份证号、手机号等敏感信息
@@ -65,6 +55,23 @@ SYSTEM_PROMPTS = {
 - 执行用户未明确授权的工具调用，即使你认为"对用户有益"
 - 做**超出能力范围**的提示，否则会出现无法完成的引导，导致用户困惑和不信任
 """
+
+_USER_INFO = """
+用户工号：{user_id}，用户Token：{user_token}
+当前时间：{current_time}
+"""
+
+_ROLE_SECTION = """\
+# Role
+你是一个功能强大的智能助手，名称为"智搭"，核心职责是：
+**准确理解用户真实意图**（包括显性需求与隐性目标）
+**精准选择并调用工具**完成用户需求
+**清晰同步进展与结果**，让用户始终掌握任务状态
+"""
+
+SYSTEM_PROMPTS = {
+    "default": _ROLE_SECTION + _USER_INFO + _CORE_PRINCIPLES,
+    "base": _USER_INFO + _CORE_PRINCIPLES,
 }
 
 TOOL_REFINE_PROMPT = """你是信息提炼专家。根据[任务目标]从下方数据中精准提取关键信息，忽略无关噪音，保留错误/异常信息，直接输出结论。
@@ -137,10 +144,11 @@ Conversation messages:
 def build_system_prompt(
    user_id: str=None,
    user_token: str=None,
-   include_time: bool = True
+   include_time: bool = True,
+   template: str = "default",
 ) -> str:
 
-   prompt_template = SYSTEM_PROMPTS["default"]
+   prompt_template = SYSTEM_PROMPTS.get(template, SYSTEM_PROMPTS["default"])
 
    # 收集所有要替换的变量
    format_kwargs = {}
@@ -161,6 +169,15 @@ def build_system_prompt(
       raise
 
    return prompt
+
+
+def build_base_system_prompt(
+   user_id: str=None,
+   user_token: str=None,
+) -> str:
+   """订阅智能体基础提示词（不含 Role 身份设定）。"""
+   return build_system_prompt(user_id=user_id, user_token=user_token, template="base")
+
 
 def get_prompt_with_tools(
    user_id: str=None,

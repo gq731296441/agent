@@ -84,6 +84,18 @@ def task_call_args_ready(args: dict) -> bool:
     return bool(args.get("description") or args.get("subagent_type") or args.get("task"))
 
 
+# LangGraph 运行时内部 key，工具 args 中不应带入前端/DB
+_RUNTIME_KEYS = frozenset({"runtime", "config", "configurable", "store", "stream_writer"})
+
+def _strip_runtime(obj: Any) -> Any:
+    """递归移除 LangGraph 运行时对象（不可序列化）。"""
+    if isinstance(obj, dict):
+        return {k: _strip_runtime(v) for k, v in obj.items() if k not in _RUNTIME_KEYS}
+    if isinstance(obj, list):
+        return [_strip_runtime(v) for v in obj]
+    return obj
+
+
 def base_content(
     *,
     run_id: str,
@@ -104,6 +116,9 @@ def base_content(
         "summary": extra.pop("summary", None),
         "truncated": extra.pop("truncated", False),
     }
+    # 清理 args 中的 LangGraph 运行时对象（MCP 工具适配器会泄露进来）
+    if "args" in extra:
+        extra["args"] = _strip_runtime(extra["args"])
     payload.update(extra)
     return payload
 
@@ -879,7 +894,7 @@ class DeepEventAdapter:
                 subagent_run_id = str(uuid.uuid4())
             stored_args = self._active_subagent_inputs.pop(subagent_run_id, fallback_args)
         else:
-            tool_input = self._pending_tool_inputs.pop(tool_call_id, {})
+            tool_input = _strip_runtime(self._pending_tool_inputs.pop(tool_call_id, {}))
             resolved_name = self._resolve_tool_name(tool_call_id, resolved_name, tool_input)
             async for start_msg in self._ensure_tool_start(
                 tool_call_id, resolved_name, tool_input
