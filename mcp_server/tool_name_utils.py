@@ -22,16 +22,21 @@ def is_valid_llm_tool_name(name: str) -> bool:
 
 
 def sanitize_tool_name(name: str, used: Set[str]) -> str:
-    """将工具名转为 LLM API 合法标识符，并保证在 used 集合内唯一。"""
+    """将工具名转为 LLM API 合法标识符，并保证在 used 集合内唯一。
+
+    优先级：
+    1. 已合法的 ASCII 名 → 原样
+    2. _KNOWN_ALIASES 映射 → 映射值
+    3. 其他 → 保留原名（允许 Unicode），只滤除控制字符
+    """
     if is_valid_llm_tool_name(name):
         candidate = name
     elif name in _KNOWN_ALIASES:
         candidate = _KNOWN_ALIASES[name]
     else:
-        candidate = re.sub(r"[^a-zA-Z0-9_-]", "_", name or "tool")
-        candidate = re.sub(r"_+", "_", candidate).strip("_") or "mcp_tool"
-        if not candidate[0].isalpha():
-            candidate = f"mcp_{candidate}"
+        # 保留原名（含中文），只移除控制字符
+        candidate = re.sub(r"[\x00-\x1f\x7f]", "", name or "tool")
+        candidate = candidate.strip() or "mcp_tool"
 
     base = candidate
     suffix = 2

@@ -129,11 +129,7 @@ def create_summary_llm():
 
 def create_title_llm():
     try:
-        llm = ChatOpenAI(**_aux_llm_config(
-            temperature=0.1,
-            streaming=False,
-            max_tokens=20,
-        ))
+        llm = ChatOpenAIWithReasoning(**_agent_llm_config())
         logger.debug(f"✅ 标题生成模型创建成功")
         return llm
     except Exception as e:
@@ -194,8 +190,7 @@ async def create_user_aux_llms(user_id: str) -> Dict[str, Any]:
         api_key=api_key,
         streaming=False,
         temperature=0.1,
-        max_tokens=256,
-        use_reasoning=False,
+        use_reasoning=True,
     )
     return {"tool_judge": tool_judge, "summary": summary, "title": title}
 
