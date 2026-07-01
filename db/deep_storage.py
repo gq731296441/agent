@@ -308,6 +308,32 @@ async def list_workspace_files_by_session(
     return result
 
 
+async def list_workspace_rel_paths_except_conversation(
+    user_id: str,
+    session_id: str,
+    conversation_id: str,
+) -> set:
+    """查询本 session 中不属于当前 conversation_id 的文件路径集合。
+
+    用于磁盘扫描 fallback 时排除已属于其他轮次的文件，避免跨轮次重复推送。
+    """
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT rel_path FROM deep_workspace_files
+            WHERE user_id = $1
+              AND session_id = $2
+              AND conversation_id IS DISTINCT FROM $3::uuid
+              AND COALESCE(file_kind, 'workspace') = 'workspace'
+            """,
+            user_id,
+            _uuid(session_id),
+            _uuid(conversation_id),
+        )
+    return {row["rel_path"] for row in rows}
+
+
 async def delete_workspace_file_index(
     user_id: str,
     rel_path: str,
@@ -356,19 +382,23 @@ async def create_agent_run(
     *,
     agent_id: str = None,
     conversation_id: str = None,
+    mcp_tools: list = None,
+    skills: list = None,
 ) -> None:
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO agent_runs (run_id, user_id, session_id, agent_id, conversation_id, status)
-            VALUES ($1, $2, $3, $4, $5, 'running')
+            INSERT INTO agent_runs (run_id, user_id, session_id, agent_id, conversation_id, status, mcp_tools, skills)
+            VALUES ($1, $2, $3, $4, $5, 'running', $6::jsonb, $7::jsonb)
             """,
             _uuid(run_id),
             user_id,
             _uuid(session_id),
             _uuid(agent_id) if agent_id else None,
             _uuid(conversation_id) if conversation_id else None,
+            json.dumps(mcp_tools or [], ensure_ascii=False),
+            json.dumps(skills or [], ensure_ascii=False),
         )
 
 
@@ -1251,6 +1281,23 @@ async def get_agent_skill_binding_ids(agent_id: str) -> List[str]:
         return [str(r["installed_skill_id"]) for r in rows]
 
 
+async def get_agent_skill_names(agent_id: str) -> List[Dict[str, str]]:
+    """获取智能体绑定的 Skill 名称列表（含 installed_skill_id 和 snapshot_skill_name）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT installed_skill_id, snapshot_skill_name FROM user_agent_skill_bindings WHERE agent_id = $1",
+            _uuid(agent_id),
+        )
+        return [
+            {
+                "installed_skill_id": str(r["installed_skill_id"]),
+                "skill_name": r["snapshot_skill_name"],
+            }
+            for r in rows
+        ]
+
+
 # ==================== Sandbox LRU ====================
 
 async def get_sandbox_session(user_id: str, session_id: str) -> Optional[Dict[str, Any]]:
@@ -1339,7 +1386,7 @@ async def list_running_sandboxes_by_lru(limit: int = 1) -> List[Dict[str, Any]]:
 
 
 async def list_expired_sandbox_sessions(limit: int = 50) -> List[Dict[str, Any]]:
-    """返回 ttl_at 已过期且仍为 running/paused/stopped 的沙箱记录。"""
+    """返回 ttl_at 已过期的沙箱记录（覆盖所有非终态）。"""
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -1348,7 +1395,7 @@ async def list_expired_sandbox_sessions(limit: int = 50) -> List[Dict[str, Any]]
             FROM deep_sandbox_sessions
             WHERE ttl_at IS NOT NULL
               AND ttl_at < CURRENT_TIMESTAMP
-              AND status IN ('running', 'paused', 'stopped')
+              AND status IN ('running', 'paused', 'stopped', 'created', 'exited')
             ORDER BY ttl_at ASC
             LIMIT $1
             """,

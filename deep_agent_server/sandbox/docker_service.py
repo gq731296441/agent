@@ -418,6 +418,54 @@ class DockerSandboxService(SandboxService):
                 uid, "sandbox_expired", target=(cid or "")[:12], session_id=sid
             )
             removed += 1
+
+        # 清理孤儿容器（Docker 中存在但 DB 无记录，且超过 1 小时）
+        orphan_removed = await asyncio.to_thread(self._cleanup_orphan_containers)
+        removed += orphan_removed
+        return removed
+
+    def _cleanup_orphan_containers(self) -> int:
+        """清理 Docker 中存在但 DB 无记录的孤儿容器（已创建超过 1 小时）。"""
+        import time
+
+        try:
+            containers = self._get_docker().containers.list(
+                all=True,
+                filters={"name": "deep-agent-"},
+            )
+        except Exception as e:
+            logger.warning(f"[Sandbox] 查询孤儿容器失败: {e}")
+            return 0
+
+        removed = 0
+        now = time.time()
+        orphan_max_age_seconds = 3600  # 1 小时
+
+        for c in containers:
+            # 跳过正在运行的容器
+            if c.status == "running":
+                continue
+            # 跳过刚创建的容器（可能正在初始化中）
+            try:
+                created_ts = c.attrs.get("Created", "")
+                if created_ts:
+                    created_dt = datetime.fromisoformat(created_ts.replace("Z", "+00:00"))
+                    age = (datetime.now(timezone.utc) - created_dt).total_seconds()
+                    if age < orphan_max_age_seconds:
+                        continue
+            except Exception:
+                pass
+            try:
+                c.remove(force=True)
+                logger.info(
+                    f"[Sandbox] 清理孤儿容器 {c.name} (status={c.status})"
+                )
+                removed += 1
+            except Exception as e:
+                logger.warning(f"[Sandbox] 清理孤儿容器失败 {c.name}: {e}")
+
+        if removed:
+            logger.info(f"[Sandbox] 本轮共清理 {removed} 个孤儿容器")
         return removed
 
     async def health_check(self, user_id: str, session_id: str) -> bool:
@@ -613,6 +661,10 @@ class DockerSandboxService(SandboxService):
                 environment[key] = val
 
         environment.update(build_container_user_env(user_id))
+
+        # 确保容器内使用 UTF-8 locale，避免中文文件名在 shell 输出中乱码
+        environment.setdefault("LANG", "C.UTF-8")
+        environment.setdefault("LC_ALL", "C.UTF-8")
 
         kwargs: dict = {
             "image": app_config.SANDBOX_IMAGE,

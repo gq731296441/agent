@@ -32,11 +32,16 @@ BUILTIN_TOOLS = {
 class DeepAgentWrapper:
     """封装编译后的 Deep Agent 图及关联 store / 已触发 skills 元数据。"""
 
-    def __init__(self, agent, store=None, loaded_skills=None):
+    def __init__(self, agent, store=None, loaded_skills=None,
+                 mcp_tools=None, exposed_skill_metas=None):
         self.agent = agent
         self.store = store
         # trigger 匹配的 skills（用于 run 开始时推送 SKILL_LOADED 事件）
         self.loaded_skills = loaded_skills or []
+        # 本次 run 使用的 MCP 工具列表（用于记录到 agent_runs）
+        self.mcp_tools = mcp_tools or []
+        # 本次 run 暴露的全部 Skill 元数据（用于记录到 agent_runs）
+        self.exposed_skill_metas = exposed_skill_metas or []
 
 
 async def create_deep_agent_instance(
@@ -85,8 +90,7 @@ async def create_deep_agent_instance(
             if sandbox_backend_factory is not None:
                 backend = sandbox_backend_factory(None)
                 sandbox_mode = True
-        if metas:
-            system_prompt += build_skills_system_prompt(metas, sandbox_mode=sandbox_mode)
+        system_prompt += build_skills_system_prompt(metas, sandbox_mode=sandbox_mode)
         allowed_skill_ids = None
         if selected_skill_ids is not None:
             allowed_skill_ids = [
@@ -115,7 +119,8 @@ async def create_deep_agent_instance(
             f"[DeepFactory] Agent 创建成功 session={session_id} "
             f"exposed_skills={len(metas)} trigger_matched={len(trigger_metas)}"
         )
-        return DeepAgentWrapper(agent, store=store, loaded_skills=trigger_metas), None
+        return DeepAgentWrapper(agent, store=store, loaded_skills=trigger_metas,
+                                mcp_tools=mcp_tools, exposed_skill_metas=metas), None
     except SandboxUserLimitExceeded:
         raise
     except Exception as e:

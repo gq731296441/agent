@@ -3,6 +3,21 @@
 import { getApiBase, state, setSession, patchSessionRun, getSessionRun } from './config.js';
 import { buildInlineHitlHtml, bindInlineHitl } from './hitl.js';
 
+function fileIconForMime(mime) {
+  if (!mime) return '📄';
+  if (mime.startsWith('image/')) return '🖼️';
+  if (mime.startsWith('video/')) return '🎬';
+  if (mime.startsWith('audio/')) return '🎵';
+  if (mime.includes('pdf')) return '📕';
+  if (mime.includes('html') || mime.includes('xml')) return '🌐';
+  if (mime.includes('json') || mime.includes('javascript')) return '📋';
+  if (mime.includes('python') || mime.includes('x-python')) return '🐍';
+  if (mime.startsWith('text/')) return '📝';
+  if (mime.includes('zip') || mime.includes('tar') || mime.includes('gzip')) return '📦';
+  if (mime.includes('spreadsheet') || mime.includes('excel') || mime.includes('csv')) return '📊';
+  return '📄';
+}
+
 let currentChatEl = null;
 let currentReasoningEl = null;
 let reasoningText = '';
@@ -151,6 +166,7 @@ const DEEP_TYPES = new Set([
   'subagent_event',
   'subagent_end',
   'workspace_artifact',
+  'workspace_file',
   'deep_status',
 ]);
 
@@ -165,6 +181,7 @@ const DEEP_TYPE_LABELS = {
   subagent_event: '子 Agent 事件',
   subagent_end: '子 Agent 结束',
   workspace_artifact: '工作区产物',
+  workspace_file: '工作区文件',
   deep_status: 'Deep 状态',
 };
 
@@ -443,6 +460,25 @@ function renderDeepMessage(type, content, meta, isHistory = false) {
         `${meta}${deepBadge(c)}<strong>${escapeHtml(label)}</strong>
          ${c.ref_id ? `<code>${escapeHtml(c.ref_id)}</code>` : ''}
          ${c.summary ? `<div class="deep-summary">${escapeHtml(c.summary)}</div>` : ''}`,
+      );
+    }
+    case 'workspace_file': {
+      const c = content || {};
+      const files = c.files || [];
+      if (!files.length) return null;
+      const items = files.map(f => {
+        const icon = fileIconForMime(f.mime_type || '');
+        const existsTag = f.exists ? '' : ' <em style="color:#f66;">(已删除)</em>';
+        return `<div class="ws-file-card">
+          <span class="ws-file-icon">${icon}</span>
+          <code class="ws-file-name">${escapeHtml(f.name || f.virtual_path || '')}</code>
+          ${existsTag}
+        </div>`;
+      }).join('');
+      return appendMessage(
+        cls,
+        `${meta}${deepBadge(c)}<strong>${escapeHtml(label)}</strong>
+         <div class="ws-file-list">${items}</div>`,
       );
     }
     case 'deep_status': {

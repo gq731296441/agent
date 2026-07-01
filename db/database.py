@@ -320,6 +320,8 @@ class DatabaseManager:
             "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS completion_tokens INT DEFAULT 0",
             "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS total_tokens INT DEFAULT 0",
             "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS llm_model TEXT DEFAULT ''",
+            "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS mcp_tools JSONB DEFAULT '[]'::jsonb",
+            "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS skills JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE user_agents ADD COLUMN IF NOT EXISTS avatar_color TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS install_count BIGINT NOT NULL DEFAULT 0",
         ]

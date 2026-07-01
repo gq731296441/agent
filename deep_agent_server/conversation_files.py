@@ -16,22 +16,20 @@ _IMAGE_EXTS = frozenset(
     {"jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "ico", "tif", "tiff"}
 )
 
-# 与沙箱 requirements + 前端预览能力对齐（非图片）
+# 仅文档/办公类文件展示卡片（用户明确要求排除代码/配置/日志等）
 _CARD_EXTS = frozenset(
     {
         # 文档
-        "html", "htm", "md", "markdown", "pdf", "docx", "txt",
+        "html", "htm", "md", "markdown", "pdf", "docx", "txt", "rst",
         # 表格
         "xls", "xlsx", "csv",
         # 演示
         "pptx",
-        # 代码 / 配置 / 数据
-        "json", "js", "ts", "jsx", "tsx", "vue", "css", "scss", "less",
-        "xml", "yaml", "yml", "py", "sh", "bash", "sql", "log",
-        "java", "go", "rs", "c", "cpp", "h", "hpp", "php", "rb", "swift", "kt",
-        "toml", "ini", "env.example",
     }
 )
+
+# 单次推送文件卡片数量上限
+_MAX_CARD_FILES = 30
 
 _WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 
@@ -123,6 +121,71 @@ def resolve_write_tool_name(tool_name: str, args: Optional[dict]) -> Optional[st
     return None
 
 
+def resolve_execute_output_tool(args: Optional[dict], _result_text: str = "") -> Optional[str]:
+    """从 execute 命令中解析显式输出的文档类文件，返回 'execute' 或 None。
+
+    只收集命令明确指定的输出文件（重定向 / -o 参数），
+    排除批量操作（解压/下载/cp/git 等）。
+    """
+    command = (args or {}).get("command") or ""
+    if not command:
+        return None
+
+    # 批量操作黑名单 — 这些命令产生的文件不应作为卡片推送
+    _BULK_PATTERNS = (
+        "unzip", "tar ", "gzip", "gunzip", "zip ", "bzip2", "xz ",
+        "cp -r", "cp -a", "rsync",
+        "wget ", "curl -O", "curl -o ",
+        "pip install", "npm install", "apt ", "yum ",
+        "git clone", "git pull", "git checkout",
+    )
+    for pattern in _BULK_PATTERNS:
+        if pattern in command.lower():
+            return None
+
+    # 提取重定向输出: > file.html 或 >> file.html
+    redirect = re.search(r'>>?\s*([^\s;|&"\']+\.\w+)', command)
+    if redirect:
+        candidate = redirect.group(1).strip().strip('"\'')
+    else:
+        # 提取 -o/--output: -o output.xlsx
+        output = re.search(r'(?:-o|--output)\s+([^\s;|&"\']+\.\w+)', command)
+        if output:
+            candidate = output.group(1).strip().strip('"\'')
+        else:
+            return None
+
+    ext = candidate.rsplit(".", 1)[-1].lower() if "." in candidate else ""
+    if ext in _CARD_EXTS:
+        return "execute"
+    return None
+
+
+def _extract_execute_output_path(args: dict) -> Optional[str]:
+    """从 execute 命令中提取重定向或 -o 参数指定的文件路径（纯路径提取，不做过滤）。"""
+    command = (args or {}).get("command") or ""
+    if not command:
+        return None
+
+    # 重定向输出: > file.html 或 >> file.html
+    redirect = re.search(r'>>?\s*([^\s;|&"\']+\.\w+)', command)
+    if redirect:
+        path = redirect.group(1).strip().strip('"\'')
+        if not path.startswith("/"):
+            path = f"/workspace/{path}"
+        return path
+
+    # -o/--output: -o output.xlsx
+    output = re.search(r'(?:-o|--output)\s+([^\s;|&"\']+\.\w+)', command)
+    if output:
+        path = output.group(1).strip().strip('"\'')
+        if not path.startswith("/"):
+            path = f"/workspace/{path}"
+        return path
+
+    return None
+
+
 _WORKSPACE_CN = "工作区"
 
 
@@ -156,11 +219,16 @@ def resolve_agent_file_path(
     session_id: str,
     result_text: str = "",
 ) -> Optional[str]:
-    if resolve_write_tool_name(tool_name, args) is None:
+    is_write = resolve_write_tool_name(tool_name, args) is not None
+    is_execute = tool_name == "execute"
+    if not is_write and not is_execute:
         return None
     agent_path = ""
-    if args:
+    if is_write and args:
         agent_path = (args.get("file_path") or args.get("path") or "").strip()
+    elif is_execute and args:
+        # execute：从命令中提取显式输出路径
+        agent_path = _extract_execute_output_path(args) or ""
     # 规范化：Agent LLM 可能将 "workspace" 写成中文 "工作区"
     if agent_path:
         agent_path = _normalize_workspace_path(agent_path)
@@ -172,7 +240,7 @@ def resolve_agent_file_path(
                 agent_path = f"/workspace/{wp[len(prefix):]}"
         elif wp.startswith("/workspace/"):
             agent_path = wp
-    if not agent_path:
+    if not agent_path and is_write:
         agent_path = extract_path_from_result(result_text) or ""
     if not agent_path or not is_card_eligible_agent_path(agent_path):
         return None
@@ -249,6 +317,8 @@ def build_conversation_files_payload(
 ) -> Dict[str, Any]:
     files: List[Dict[str, Any]] = []
     for item in recorded.values():
+        if len(files) >= _MAX_CARD_FILES:
+            break
         agent_path = item.get("agent_path") or ""
         entry = build_file_entry(
             user_id=user_id,

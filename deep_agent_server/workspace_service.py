@@ -42,7 +42,7 @@ def _is_skill_mirror_path(path: str, rel_path: str = "") -> bool:
 
 def _is_user_hidden_filename(name: str) -> bool:
     """用户不可见、不可通过工作区 API 访问的内部文件。"""
-    return name == MANIFEST_FILENAME
+    return name == MANIFEST_FILENAME or name.startswith("._") or name == ".DS_Store"
 
 
 def _assert_user_visible_path(virtual_path: str) -> None:
@@ -272,6 +272,7 @@ async def list_conversation_workspace_cards(
 ) -> List[Dict[str, Any]]:
     """按 conversation 返回文件卡片（含磁盘 exists 状态，供历史恢复）。"""
     from deep_agent_server.conversation_files import (
+        _MAX_CARD_FILES,
         build_file_entry,
         is_card_eligible_agent_path,
     )
@@ -283,6 +284,8 @@ async def list_conversation_workspace_cards(
     cards: List[Dict[str, Any]] = []
     seen = set()
     for row in rows:
+        if len(cards) >= _MAX_CARD_FILES:
+            break
         rel = (row.get("rel_path") or "").replace("\\", "/").lstrip("/")
         if not rel or rel in seen:
             continue
@@ -339,17 +342,22 @@ async def list_session_workspace_cards(
     return grouped
 
 
-def list_recent_session_workspace_cards(
+async def list_recent_session_workspace_cards(
     user_id: str,
     session_id: str,
     conversation_id: str,
     *,
-    within_seconds: int = 900,
+    within_seconds: int = 120,
 ) -> List[Dict[str, Any]]:
-    """扫描会话工作区近期写入的文件（end 时 DB/内存均未登记时的兜底）。"""
+    """扫描会话工作区近期写入的文件（end 时 DB/内存均未登记时的兜底）。
+
+    增加 conversation_id 排他过滤：跳过已在 DB 中登记为其他轮次的文件，
+    避免上一轮的文件被重复推送。时间窗口从 900s 缩至 120s。
+    """
     import time
 
     from deep_agent_server.conversation_files import (
+        _MAX_CARD_FILES,
         build_file_entry,
         is_card_eligible_agent_path,
     )
@@ -358,10 +366,23 @@ def list_recent_session_workspace_cards(
     root = get_workspace_dir(uid, session_id)
     if not root.is_dir():
         return []
+
+    # 查询已属于其他轮次的文件，排除跨轮次污染
+    stale_paths: set = set()
+    if conversation_id:
+        try:
+            stale_paths = await deep_storage.list_workspace_rel_paths_except_conversation(
+                uid, session_id, conversation_id
+            )
+        except Exception:
+            pass
+
     cutoff = time.time() - max(60, within_seconds)
     cards: List[Dict[str, Any]] = []
     seen = set()
     for path in root.rglob("*"):
+        if len(cards) >= _MAX_CARD_FILES:
+            break
         if not path.is_file():
             continue
         try:
@@ -370,7 +391,7 @@ def list_recent_session_workspace_cards(
         except OSError:
             continue
         rel = path.relative_to(root).as_posix()
-        if not rel or rel in seen:
+        if not rel or rel in seen or rel in stale_paths:
             continue
         agent_path = f"/workspace/{rel}"
         if not is_card_eligible_agent_path(agent_path):

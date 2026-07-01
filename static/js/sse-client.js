@@ -18,7 +18,6 @@ export async function sendAskSse(question) {
     action: 'ask',
     user_id: id.user_id,
     user_token: id.user_token,
-    session_id: id.session_id,
     question,
     stream: true,
     capabilities: {
@@ -28,6 +27,10 @@ export async function sendAskSse(question) {
   };
   if (state.agentKind === 'subscription' && state.subscriptionAgentId) {
     payload.agent_id = state.subscriptionAgentId;
+    // 订阅智能体：优先使用已有 session_id，无则传 null 由服务端自动查找/创建
+    payload.session_id = id.session_id || null;
+  } else {
+    payload.session_id = id.session_id;
   }
 
   logEvent('sse', payload, 'out');

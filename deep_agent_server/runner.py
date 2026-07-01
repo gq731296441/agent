@@ -224,10 +224,22 @@ async def run_deep_agent(
     if is_resume:
         await deep_storage.update_agent_run(run_id, "running")
     else:
+        mcp_summary = [
+            {"name": getattr(t, "name", ""), "description": getattr(t, "description", "")}
+            for t in (getattr(agent_wrapper, "mcp_tools", None) or [])
+        ]
+        skill_summary = [
+            {"skill_id": getattr(m, "skill_id", ""),
+             "name": getattr(m, "name", ""),
+             "version": getattr(m, "version", "")}
+            for m in (getattr(agent_wrapper, "exposed_skill_metas", None) or [])
+        ]
         await deep_storage.create_agent_run(
             run_id, user_id, session_id,
             agent_id=resolved_agent_id,
             conversation_id=conversation_id,
+            mcp_tools=mcp_summary,
+            skills=skill_summary,
         )
         publish_event(make_run_started(
             user_id=user_id,

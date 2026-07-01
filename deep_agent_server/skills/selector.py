@@ -146,51 +146,117 @@ def effective_selected_skill_ids(
 
 
 def build_skills_system_prompt(metas: List[SkillMeta], *, sandbox_mode: bool = False) -> str:
-    """渐进式披露：仅 name/description 进 system prompt，正文按需 read_file。"""
+    """渐进式披露：仅 name/description 进 system prompt，正文按需 read_file。
+
+    当 metas 为空时，告知 agent 当前无可用 skill 以及错误含义，
+    避免 agent 对未启用的 skill 反复尝试访问。
+    """
+    # ============================================================
+    # EN backup (English version preserved below as comments)
+    # ============================================================
     if not metas:
-        return ""
+        lines = [
+            "",
+            "## Skills 技能系统",
+            "",
+            "当前会话没有启用任何技能。",
+            "",
+            "**重要提示 — 已关闭技能的错误含义：**",
+            "- 用户可以开启和关闭技能，技能关闭后无法访问"
+            "- 访问 `/skills/<名称>/...` 出现 `Error: permission denied` → 该技能「<名称>」**未被启用**。",
+            "  立即停止尝试 — 任何替代路径都不会生效。",
+            "- 在 `execute` 中访问 `/mnt/skills/<名称>/...` 出现 `No such file or directory` →",
+            "  该技能「<名称>」**未被挂载**（未被启用）。",
+            "- `ls /skills/` 出现 `permission denied` → 当前会话没有启用任何技能。",
+            "",
+            "**你应该怎么做：**",
+            "- 如果用户问到某个技能，告知用户该技能当前未启用，需要在技能选择器中手动开启。",
+            "- **不要**尝试 `/workspace/.sandbox/skills/` 或用文件工具访问 `/mnt/skills/`。",
+            "- **不要**试图用 `execute` 绕过文件系统权限限制。",
+            "- 直接告诉用户：该技能已被关闭，请在**能力市场**中启用后重试。",
+        ]
+        # EN: "No skills are currently enabled for this session."
+        # EN: "Error: permission denied on /skills/<name>/... → the skill <name> is not enabled."
+        # EN: "No such file or directory for /mnt/skills/<name>/... inside execute → not mounted."
+        # EN: "permission denied on ls /skills/ → no skills are enabled."
+        # EN: "Do NOT try workarounds — tell the user to enable the skill and retry."
+        return "\n".join(lines) + "\n"
+
     lines = [
         "",
-        "## Skills System",
+        "## Skills 技能系统",
         "",
-        "You have access to the following skills. Read full instructions only when needed.",
+        "你拥有以下可用技能，仅在需要时读取完整说明。",
         "",
-        "**Available Skills:**",
+        "**可用技能：**",
         "",
     ]
+    # EN: "You have access to the following skills. Read full instructions only when needed."
+    # EN: "**Available Skills:**"
     for m in metas:
         sid = Path(m.skill_dir).name
-        desc = m.description or "(no description)"
+        desc = m.description or "（无描述）"
         lines.append(f"- **{m.name or sid}**: {desc}")
-        lines.append(f"  -> Read `/skills/{sid}/SKILL.md` for full instructions (use limit=1000)")
+        lines.append(f"  -> 使用 `read_file` 读取 `/skills/{sid}/SKILL.md` 获取完整说明（建议 limit=1000）")
+        # EN: "-> Read `/skills/{sid}/SKILL.md` for full instructions (use limit=1000)"
         if sandbox_mode:
             lines.append(
-                f"  -> Run scripts via execute at `{container_skill_execute_path(sid)}` (container only)"
+                f"  -> 通过 `execute` 在容器中运行脚本：`{container_skill_execute_path(sid)}`"
             )
+            # EN: "-> Run scripts via execute at `{container_skill_execute_path(sid)}` (container only)"
     lines.extend(
         [
             "",
-            "**How to Use Skills (Progressive Disclosure):**",
-            "1. Match the user task to a skill description above",
-            "2. `read_file` / `ls` / `glob` on `/skills/{{id}}/...` to read skill files",
-            "3. Follow SKILL.md workflow; keep using `/skills/` for all file-tool reads",
+            "**如何使用技能（渐进式披露）：**",
+            "1. 将用户任务与上方技能描述进行匹配",
+            "2. 使用 `read_file` / `ls` / `glob` 读取 `/skills/{{id}}/...` 下的技能文件",
+            "3. 按照 SKILL.md 中的工作流程执行；所有文件工具读取均使用 `/skills/` 路径",
         ]
     )
+    # EN: "**How to Use Skills (Progressive Disclosure):**"
+    # EN: "1. Match the user task to a skill description above"
+    # EN: "2. read_file / ls / glob on /skills/{{id}}/... to read skill files"
+    # EN: "3. Follow SKILL.md workflow; keep using /skills/ for all file-tool reads"
     if sandbox_mode:
         lines.extend(
             [
                 "",
-                "**Sandbox skill paths (important):**",
-                "- **File tools** (`read_file`, `ls`, `glob`, `write_file`): use `/skills/{{id}}/...` only.",
-                "  These read from the agent host; they do NOT run inside the sandbox container.",
-                f"- **execute** (shell/python in container): use `{CONTAINER_SKILL_MOUNT_PREFIX}/{{id}}/...` only.",
-                "  Example: `python /mnt/skills/my_skill/helper.py` or `bash /mnt/skills/my_skill/run.sh`.",
-                "- **Never** use `/skills/...` inside an `execute` command — the container cannot see that path.",
-                f"- **Never** use `{CONTAINER_SKILL_MOUNT_PREFIX}/...` with file tools — use `/skills/` instead.",
-                "- `/workspace/` is the session working directory (outputs, user files); not for installed skills.",
-                "- Do NOT use `/workspace/.sandbox/skills/` — skill content is not stored there.",
+                "**沙箱技能路径（重要）：**",
+                f"- **文件工具**（`read_file`、`ls`、`glob`、`write_file`）：仅使用 `/skills/{{{{id}}}}/...`。",
+                "  这些操作在宿主机上执行，不在沙箱容器内运行。",
+                f"- **execute**（容器内 shell/python）：仅使用 `{CONTAINER_SKILL_MOUNT_PREFIX}/{{{{id}}}}/...`。",
+                f"  例如：`python /mnt/skills/my_skill/helper.py` 或 `bash /mnt/skills/my_skill/run.sh`。",
+                "- **绝对不要**在 `execute` 命令中使用 `/skills/...` — 容器内看不到该路径。",
+                f"- **绝对不要**用文件工具访问 `{CONTAINER_SKILL_MOUNT_PREFIX}/...` — 请使用 `/skills/`。",
+                "- `/workspace/` 是会话工作目录（存放输出和用户文件），不是技能安装目录。",
+                "- 不要使用 `/workspace/.sandbox/skills/` — 技能内容不存储在那里。",
             ]
         )
+        # EN: "**Sandbox skill paths (important):**"
+        # EN: "File tools: use /skills/{{id}}/... only. These read from the agent host."
+        # EN: "execute: use /mnt/skills/{{id}}/... only. Example: python /mnt/skills/.../helper.py"
+        # EN: "Never use /skills/... inside an execute command."
+        # EN: "Never use /mnt/skills/... with file tools."
+        # EN: "/workspace/ is the session working directory; not for installed skills."
+        # EN: "Do NOT use /workspace/.sandbox/skills/"
+
+    # 已关闭 skill 的识别指引
+    lines.extend(
+        [
+            "",
+            "**已关闭技能的识别：**",
+            "- 未在上方列出的技能均处于**已关闭**状态（用户未启用）。",
+            "- 访问 `/skills/<名称>/...` 出现 `Error: permission denied` → 该技能已关闭，立即停止尝试。",
+            "- 在 execute 中访问 `/mnt/skills/<名称>/` 出现 `No such file or directory` → 未挂载（已关闭）。",
+            "- **不要**尝试任何绕过方式 — 告知用户去**能力市场**启用该技能即可。",
+        ]
+    )
+    # EN: "**Disabled Skill Recognition:**"
+    # EN: "Skills NOT listed above are disabled (not enabled by the user)."
+    # EN: "Error: permission denied on /skills/<name>/... -> <name> is disabled. Stop trying."
+    # EN: "No such file or directory for /mnt/skills/<name>/ in execute -> not mounted (disabled)."
+    # EN: "Do NOT try workarounds — ask the user to enable the skill instead."
+
     lines.append("")
     return "\n".join(lines)
 

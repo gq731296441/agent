@@ -129,8 +129,31 @@ async def get_agent(agent_id: str, user_id: str = Query(...)):
     )
     if not agent:
         return ApiResponse.error(msg="无权访问或不存在", code=403)
-    agent["mcp_ids"] = await deep_storage.get_agent_mcp_ids(agent_id)
-    agent["skill_ids"] = await deep_storage.get_agent_skill_binding_ids(agent_id)
+
+    # 解析 MCP：id + name 合并返回
+    mcp_ids = await deep_storage.get_agent_mcp_ids(agent_id)
+    mcps = []
+    if mcp_ids:
+        creator_id = agent.get("user_id") or agent.get("creator_user_id") or ""
+        if creator_id:
+            try:
+                mcp_list, _ = await _resolve_mcp_source_list(creator_id)
+                name_map = {m["id"]: m["name"] for m in mcp_list}
+            except Exception:
+                name_map = {}
+            for mid in mcp_ids:
+                mcps.append({"id": mid, "name": name_map.get(mid, "")})
+    agent["mcps"] = mcps
+
+    # 解析 Skill：id + name 合并返回
+    skills = []
+    try:
+        for s in await deep_storage.get_agent_skill_names(agent_id):
+            skills.append({"id": s["installed_skill_id"], "name": s["skill_name"]})
+    except Exception:
+        pass
+    agent["skills"] = skills
+
     return ApiResponse.success(data=agent)
 
 

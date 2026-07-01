@@ -1176,7 +1176,7 @@ class DeepEventAdapter:
                     self.user_id, self.session_id, self.conversation_id
                 )
             if not cards:
-                cards = list_recent_session_workspace_cards(
+                cards = await list_recent_session_workspace_cards(
                     self.user_id,
                     self.session_id,
                     self.conversation_id or "",
@@ -1190,6 +1190,10 @@ class DeepEventAdapter:
             return None
         if not cards:
             return None
+        from deep_agent_server.conversation_files import _MAX_CARD_FILES
+
+        if len(cards) > _MAX_CARD_FILES:
+            cards = cards[:_MAX_CARD_FILES]
         payload = {
             "agent_mode": "deep",
             "run_id": self.run_id,
@@ -1219,6 +1223,7 @@ class DeepEventAdapter:
             agent_path_to_virtual,
             is_write_success,
             resolve_agent_file_path,
+            resolve_execute_output_tool,
             resolve_write_tool_name,
         )
 
@@ -1226,7 +1231,11 @@ class DeepEventAdapter:
             return
         effective_tool = resolve_write_tool_name(tool_name, args)
         if not effective_tool:
-            return
+            # execute 工具：仅收集命令中显式指定的文档输出文件
+            if tool_name == "execute":
+                effective_tool = resolve_execute_output_tool(args, result_text)
+            if not effective_tool:
+                return
         agent_path = resolve_agent_file_path(
             tool_name=effective_tool,
             args=args or {},

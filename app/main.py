@@ -402,13 +402,25 @@ async def ws_endpoint(websocket: WebSocket):
             user_token = msg.get('user_token', '')
             question = msg.get('question', '')
             client_session_id = msg.get('session_id')
+            agent_id = (msg.get("agent_id") or "").strip() or None
 
             manager.bind_user(websocket, user_id)
 
             logger.info(f"【WebSocket】📨 收到用户{user_id}聊天请求: {question[:50]}...")
 
             # 获取或创建 session_id
-            session_id, is_new_session = await get_or_create_session(client_session_id)
+            resolved_agent_kind = "default"
+            if client_session_id:
+                session_id, is_new_session = await get_or_create_session(client_session_id)
+            elif agent_id:
+                from db import deep_storage as _ds
+
+                result = await _ds.ensure_subscription_session(user_id, agent_id)
+                session_id = result["session_id"]
+                is_new_session = result.get("is_new", False)
+                resolved_agent_kind = "subscription"
+            else:
+                session_id, is_new_session = await get_or_create_session(None)
 
             # 绑定 session_id 到当前 ws（支持多对一）
             manager.bind_session(websocket, session_id)
@@ -425,7 +437,8 @@ async def ws_endpoint(websocket: WebSocket):
                         user_id=user_id,
                         session_id=session_id,
                         session_title=session_title,
-                        agent_id=msg.get("agent_id"),
+                        agent_id=agent_id,
+                        agent_kind=resolved_agent_kind,
                     )
                     # 发送 session_allocated 消息
                     await manager.send(
@@ -503,6 +516,30 @@ async def ws_endpoint(websocket: WebSocket):
 
             # ==================== 处理消息 ====================
             action = msg.get('action', ActionType.ASK.value)
+
+            # 新会话：等待预热完成。on_ready → flush_pending 已处理排队消息，
+            # 若其已启动 _run_agent_stream 则跳过，避免重复处理。
+            if is_new_session:
+                ready = await SessionReadinessService.wait_until_ready(session_id)
+                if not ready:
+                    logger.warning(
+                        f"【WebSocket】新会话 {session_id} 预热超时，跳过"
+                    )
+                    await manager.send(
+                        AgentMessage.error(
+                            session_id=session_id,
+                            content="会话预热超时，请稍后重试",
+                        ).to_frontend_dict(),
+                        session_id,
+                    )
+                    continue
+                # on_ready 可能已通过 flush_pending 启动了流任务
+                existing = _stream_tasks.get(session_id)
+                if existing and not existing.done():
+                    logger.info(
+                        f"【WebSocket】新会话 {session_id} 已由 on_ready 启动流任务，跳过"
+                    )
+                    continue
 
             # 如果该 session 已有正在运行的流任务，先停止旧任务
             old_task = _stream_tasks.get(session_id)

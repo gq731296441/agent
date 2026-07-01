@@ -101,7 +101,7 @@ class BaseConfig(BaseSettings):
             "dev/test/prod 由部署侧将虚机 agent-dev|agent-test|agent-production NFS 挂到本路径，代码不区分环境。"
         ),
     )
-    DEEP_TIMEOUT_SECONDS: int = Field(default=300, description="Deep Agent 单次运行超时（秒）")
+    DEEP_TIMEOUT_SECONDS: int = Field(default=600, description="Deep Agent 单次运行超时（秒）")
     HITL_ENABLED: bool = Field(default=False, description="全局 HITL 开关。False 时 Agent 自动执行工具调用，无需人工审批")
     HITL_PENDING_TTL_MINUTES: int = Field(default=30, description="HITL 待审批超时（分钟），超时后自动终止 run")
     HITL_SWEEPER_INTERVAL_SECONDS: int = Field(default=60, description="HITL 过期扫描间隔（秒）；0=禁用")
@@ -124,12 +124,12 @@ class BaseConfig(BaseSettings):
         default=False,
         description="为 true 时 subagent 结束写 trace artifact",
     )
-    CONTENT_SUMMARY_MAX_CHARS: int = Field(default=500, description="消息/工具结果摘要最大字符数")
+    CONTENT_SUMMARY_MAX_CHARS: int = Field(default=1000, description="消息/工具结果摘要最大字符数")
     WORKSPACE_QUOTA_BYTES: int = Field(default=104857600, description="每用户工作区配额（100MB，含 skills）")
     SANDBOX_ENABLED: bool = Field(default=True, description="是否启用 Docker 沙箱 execute")
     SANDBOX_MEMORY_LIMIT: str = Field(default="512m", description="Docker 沙箱内存限制")
     SANDBOX_CPU_LIMIT: float = Field(default=0.5, description="Docker 沙箱 CPU 限制")
-    SANDBOX_IDLE_TTL_MINUTES: int = Field(default=60, description="空闲沙箱 TTL（分钟）")
+    SANDBOX_IDLE_TTL_MINUTES: int = Field(default=20, description="空闲沙箱 TTL（分钟）")
     SANDBOX_IDLE_TTL_HOURS: Optional[int] = Field(
         default=None,
         description="已废弃：若设置则覆盖 SANDBOX_IDLE_TTL_MINUTES（兼容旧 env）",
@@ -138,7 +138,7 @@ class BaseConfig(BaseSettings):
         default="langchain-agent-sandbox:3.11",
         description="Docker 沙箱镜像（见 deploy/sandbox/，需先 build/pull）",
     )
-    SANDBOX_MAX_CONCURRENT: int = Field(default=20, description="全站同时 running 的沙箱数量上限")
+    SANDBOX_MAX_CONCURRENT: int = Field(default=25, description="全站同时 running 的沙箱数量上限")
     SANDBOX_MAX_PER_USER: int = Field(default=3, description="每用户 running 沙箱容器上限")
     SANDBOX_STARTUP_GRACE_SECONDS: int = Field(default=15, description="沙箱 health check 轮询超时（秒）")
     SANDBOX_HARDEN: bool = Field(default=True, description="容器安全加固：只读根文件系统、降权、no-new-privileges")
@@ -163,7 +163,7 @@ class BaseConfig(BaseSettings):
         description="用户 stop_task / CancelledError 后 stop 沙箱",
     )
     SANDBOX_STOPPED_TTL_MINUTES: int = Field(
-        default=60,
+        default=25,
         description="stopped 沙箱容器保留时长（分钟），过期后 docker rm",
     )
     SANDBOX_WARMUP_EAGER: bool = Field(

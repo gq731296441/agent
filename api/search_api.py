@@ -581,6 +581,7 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
     client_session_id = params.get("session_id")
     question = params.get("question", "")
     stream_mode = params.get("stream", False)
+    agent_id = (params.get("agent_id") or "").strip() or None
 
     # ==================== 参数校验 ====================
     if not str(user_id).strip():
@@ -593,7 +594,18 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
         return JSONResponse(status_code=400, content={"error": "缺少必填参数: question"})
 
     # ==================== 会话生命周期（与 WebSocket 一致） ====================
-    session_id, is_new_session = await get_or_create_session(client_session_id)
+    resolved_agent_kind = "default"
+    if client_session_id:
+        session_id, is_new_session = await get_or_create_session(client_session_id)
+    elif agent_id:
+        from db import deep_storage as _ds
+
+        result = await _ds.ensure_subscription_session(user_id, agent_id)
+        session_id = result["session_id"]
+        is_new_session = result.get("is_new", False)
+        resolved_agent_kind = "subscription"
+    else:
+        session_id, is_new_session = await get_or_create_session(None)
 
     session_title = ""
     resolved_agent_id = None
@@ -611,7 +623,8 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
                 user_id=user_id,
                 session_id=session_id,
                 session_title=session_title,
-                agent_id=params.get("agent_id"),
+                agent_id=agent_id,
+                agent_kind=resolved_agent_kind,
             )
             capabilities = params.get("capabilities", {})
             mcp_list = capabilities.get("mcp", [])
@@ -688,7 +701,7 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
 
         return StreamingResponse(
             event_generator(),
-            media_type="text/event-stream",
+            media_type="text/event-stream; charset=utf-8",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",

@@ -4,7 +4,7 @@ from typing import Dict, Optional
 
 # 与 CoClaw / skill 脚本约定一致
 SANDBOX_ENV_EMPNO = "coclaw_empno"
-SANDBOX_ENV_TOKEN = "colaw_token"
+SANDBOX_ENV_TOKEN = "coclaw_token"
 
 
 def build_container_user_env(user_id: str) -> Dict[str, str]:
