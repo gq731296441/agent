@@ -366,6 +366,7 @@ async def ws_endpoint(websocket: WebSocket):
                 session_id=session_id,
                 payload=payload,
                 allow_if_missing=allow_if_missing,
+                wait_on_queue=True,
             ):
                 await manager.send(message, session_id)
         except asyncio.CancelledError:

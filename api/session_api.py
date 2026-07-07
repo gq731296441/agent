@@ -369,3 +369,125 @@ async def _cleanup_langgraph_data(
             except Exception as e:
                 logger.warning(f"[Session API] 清理 legacy artifacts 失败: {e}")
         logger.info(f"[Session API] ✅ 已清理 store: {thread_id}")
+
+
+# ==================== 上下文大小查询 ====================
+
+def _find_compiled_for_session(manager_agents, session_id: str):
+    """从 AgentManager 缓存中查找 session 对应的编译图。
+
+    缓存 key 格式: deep:{session_id}:{agent_key}:cfg{version}:llm{fp}:...
+    """
+    cache = getattr(manager_agents, "_agent_cache", {})
+    prefix = f"deep:{session_id}:"
+    for key, value in cache.items():
+        if key.startswith(prefix):
+            wrapper = value[0] if isinstance(value, tuple) else value
+            if hasattr(wrapper, "agent"):
+                return wrapper.agent
+    return None
+
+
+class ContextUsageData(BaseModel):
+    """上下文使用情况数据"""
+    token_count: int = Field(..., description="当前已使用的 token 数")
+    max_input_tokens: int = Field(..., description="模型最大输入 token 数")
+    percentage: float = Field(..., description="使用百分比 (0.0-100.0)")
+    message_count: int = Field(..., description="消息总数")
+    warning_level: str = Field(..., description="预警级别: normal | warning | critical")
+    model_name: str = Field(default="", description="模型名称")
+    session_id: str = Field(default="", description="会话 ID")
+
+
+@router.get("/context-usage", response_model=ApiResponse[ContextUsageData])
+async def get_session_context_usage(
+    request: Request,
+    session_id: str = Query(..., description="会话ID"),
+    userId: str = Query(..., description="用户ID"),
+    model_name: str = Query(default="", description="模型名称（可选，用于推断 max_input_tokens）"),
+    max_input_tokens: int = Query(default=None, description="手动指定最大输入 token 数（可选）"),
+):
+    """查询当前会话的上下文使用情况（token 数 / 百分比 / 预警级别）。"""
+    if not await validate_session_access(userId, session_id):
+        return ApiResponse.error(msg=SESSION_ACCESS_DENIED_MSG, code=403)
+
+    manager_agents = getattr(request.app.state, "manager_agents", None)
+    if manager_agents is None:
+        return ApiResponse.error(msg="AgentManager 不可用", code=500)
+
+    # 从 AgentManager 缓存查找 session 对应的编译图
+    compiled = _find_compiled_for_session(manager_agents, session_id)
+    if compiled is None:
+        # 缓存未命中：尝试快速创建 agent（always_on_only + skip_sandbox）
+        try:
+            from db import storage as chat_storage
+            meta = await chat_storage.get_session_meta(session_id)
+            user_token = ""
+            agent_id = (meta or {}).get("agent_id")
+
+            wrapper, err = await manager_agents.create_agent(
+                userId, user_token, session_id, [],
+                agent_id=agent_id, always_on_only=True, skip_sandbox=True,
+            )
+            if err or wrapper is None:
+                return ApiResponse.error(
+                    msg=f"无法获取会话 Agent: {err or 'unknown'}", code=500,
+                )
+            compiled = wrapper.agent
+        except Exception as e:
+            logger.error(f"[Session API] 创建 Agent 失败: {e}")
+            return ApiResponse.error(msg=f"无法创建 Agent: {str(e)}", code=500)
+
+    # 尝试从用户 LLM 配置获取模型名
+    resolved_model_name = model_name
+    if not resolved_model_name:
+        try:
+            from db import deep_storage
+            resolved_model_name = (
+                await deep_storage.get_user_secret(userId, "llm_model") or ""
+            )
+        except Exception:
+            resolved_model_name = ""
+
+    # 构建系统提示词（与 factory.py 中创建 Agent 时的逻辑一致）
+    system_prompt_text = ""
+    try:
+        from db import storage as chat_storage
+        from agent_server.prompts import build_base_system_prompt, build_system_prompt
+
+        meta = await chat_storage.get_session_meta(session_id)
+        agent_kind = (meta or {}).get("agent_kind") or "default"
+
+        if agent_kind == "subscription":
+            system_prompt_text = build_base_system_prompt(user_id=userId, user_token="")
+        else:
+            system_prompt_text = build_system_prompt(user_id=userId, user_token="")
+    except Exception as e:
+        logger.warning(f"[Session API] 无法构建系统提示词，跳过计数: {e}")
+
+    try:
+        from utils.context_size import get_session_context_size
+
+        result = await get_session_context_size(
+            compiled=compiled,
+            user_id=userId,
+            session_id=session_id,
+            max_input_tokens=max_input_tokens,
+            model_name=resolved_model_name,
+            system_prompt_text=system_prompt_text,
+        )
+
+        return ApiResponse.success(data=ContextUsageData(
+            token_count=result.token_count,
+            max_input_tokens=result.max_input_tokens,
+            percentage=result.percentage,
+            message_count=result.message_count,
+            warning_level=result.warning_level,
+            model_name=result.model_name,
+            session_id=session_id,
+        ))
+    except ValueError as e:
+        return ApiResponse.error(msg=str(e), code=404)
+    except Exception as e:
+        logger.error(f"[Session API] 获取上下文使用情况失败: {e}")
+        return ApiResponse.error(msg=f"获取失败: {str(e)}", code=500)

@@ -16,12 +16,68 @@ from deep_agent_server.backend_factory import (
     build_interrupt_on,
     build_permissions,
 )
+from deep_agent_server.middleware.context_overflow_guard import ContextOverflowGuardMiddleware
 from deep_agent_server.sandbox import get_sandbox_backend_factory_if_enabled
+
+
+# ---- 替换 _get_approximate_token_counter 为准确版本 ----
+# deepagents 内置的 SummarizationMiddleware 使用 count_tokens_approximately
+# 估算 token 数（chars/4），对中文文本低估 6-8 倍，导致上下文压缩从不触发。
+#
+# SummarizationMiddleware.__init__ 的计数逻辑：
+#   if token_counter is count_tokens_approximately:  ← is 检查
+#       self.token_counter = _get_approximate_token_counter(model)
+#
+# 不能直接替换 count_tokens_approximately（会导致 is 检查失败而跳过此路径），
+# 改为替换 _get_approximate_token_counter，让它返回基于 TokenCounter 的准确版本。
+def _patch_token_counter_for_summarization():
+    """使 SummarizationMiddleware 获得准确的 token 计数能力。"""
+    try:
+        import langchain.agents.middleware.summarization as _lc_summ
+
+        _getter = getattr(_lc_summ, "_get_approximate_token_counter", None)
+        if _getter is None:
+            return
+        if getattr(_getter, "_patched_by_zte", False):
+            return
+
+        def _accurate_get_approximate_token_counter(model):
+            """返回使用项目 TokenCounter 的准确 token 计数器。
+
+            deepagents 内置的版本返回 partial(count_tokens_approximately,
+            use_usage_metadata_scaling=True)，其 chars/4 估算对中文低估 6-8 倍
+            且 scaling 校正上限仅 1.25x。
+
+            返回的 callable 必须接受 **kwargs（兼容 _partial_token_counter
+            传入的 use_usage_metadata_scaling 参数）。
+            """
+            from utils.token_counter import token_counter as _tk
+
+            def _counter(messages, **kwargs):
+                """准确的 token 计数 wrapper，忽略多余的 kwargs。"""
+                return _tk.count_messages_tokens(messages)
+
+            return _counter
+
+        _accurate_get_approximate_token_counter._patched_by_zte = True
+        _lc_summ._get_approximate_token_counter = _accurate_get_approximate_token_counter
+
+        logger.info(
+            "[DeepFactory] 已替换 _get_approximate_token_counter → TokenCounter "
+            "(基于 tokenizer.json 精确计数)"
+        )
+    except Exception as e:
+        logger.warning(f"[DeepFactory] 替换 token 计数器失败: {e}")
+
+
 from deep_agent_server.sandbox.exceptions import SandboxUserLimitExceeded
 from deep_agent_server.skills.selector import build_skills_system_prompt
 from agent_server.prompts import build_base_system_prompt, build_system_prompt
 
 logger = get_logger(__name__)
+
+# 模块加载时执行补丁（确保 create_deep_agent 内部调用时已生效）
+_patch_token_counter_for_summarization()
 
 BUILTIN_TOOLS = {
     "write_todos", "read_file", "write_file", "edit_file",
@@ -102,6 +158,16 @@ async def create_deep_agent_instance(
 
         permissions = build_permissions(allowed_skill_ids)
 
+        # 确保 model.profile 包含 max_input_tokens，使 SummarizationMiddleware
+        # 使用基于分数的触发阈值（85% 上下文窗口），而非回退到固定 token 数。
+        if not model.profile or "max_input_tokens" not in model.profile:
+            model.profile = {"max_input_tokens": 262144}
+
+        # ContextOverflowGuardMiddleware 插入在模型与 SummarizationMiddleware 之间，
+        # 将 API 级别的 BadRequestError（context length）转换为 ContextOverflowError，
+        # 使 SummarizationMiddleware 的兜底摘要重试机制能正常触发。
+        overflow_guard = ContextOverflowGuardMiddleware()
+
         agent = create_deep_agent(
             model=model,
             tools=mcp_tools or [],
@@ -113,6 +179,7 @@ async def create_deep_agent_instance(
             subagents=subagents,
             checkpointer=checkpointer,
             store=store,
+            middleware=[overflow_guard],
         )
         trigger_metas = loaded_skill_metas or []
         logger.info(

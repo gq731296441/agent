@@ -358,7 +358,32 @@ class ToolCallAccumulator:
     def clear(self):
         """清空累积的工具调用"""
         self._accumulated.clear()
-    
+
+    def peek(self, index: int) -> Optional[Dict[str, Any]]:
+        """查看指定索引的累积状态（不清空），供流式发送时读取。
+
+        Args:
+            index: 工具调用 chunk 的索引
+
+        Returns:
+            包含 name, args, id 的字典；若索引不存在则返回 None
+        """
+        item = self._accumulated.get(index)
+        if item is None:
+            return None
+        return {"name": item["name"], "args": item["args"], "id": item["id"]}
+
+    def peek_all(self) -> Dict[int, Dict[str, Any]]:
+        """查看所有累积状态（不清空），返回 index → 状态 的字典。
+
+        Returns:
+            {index: {"name": ..., "args": ..., "id": ...}, ...}
+        """
+        return {
+            idx: {"name": item["name"], "args": item["args"], "id": item["id"]}
+            for idx, item in self._accumulated.items()
+        }
+
     @staticmethod
     def check_invalid_tool_calls(message_chunk):
         """检测并记录 message_chunk 中的 invalid_tool_calls。
@@ -400,6 +425,102 @@ def extract_tool_result(message_chunk) -> Optional[Dict[str, Any]]:
     # artifact 是可选字段
     if hasattr(message_chunk, "artifact"):
         result["artifact"] = message_chunk.artifact
-    
+
     return result
 
+
+# ==================== 流式 JSON 字段提取 ====================
+
+def extract_streaming_json_field(args_str: str, field_name: str) -> str:
+    """从一个可能不完整的 JSON 字符串中，按 best-effort 方式提取指定字符串字段的值。
+
+    支持处理 JSON 转义序列（\\\\n, \\\\t, \\\\r, \\\\\", \\\\\\\\, \\\\uXXXX），
+    对不完整的 trailing escape（如末尾的反斜杠或不完整的 \\\\u 序列）会停止提取，
+    等待后续 chunk 补全后再继续。
+
+    典型使用场景：LLM 流式生成 write_file 工具调用的 args JSON 时，
+    逐 chunk 提取 ``content`` 字段的当前值，计算增量后推流到前端。
+
+    Args:
+        args_str: 当前累积的 args JSON 字符串（可能不完整）
+        field_name: 要提取的字段名，如 ``"content"`` 或 ``"new_string"``
+
+    Returns:
+        提取并转义还原后的内容字符串；若未找到字段则返回空字符串。
+
+    Examples:
+        >>> extract_streaming_json_field('{"file_path":"/a.md","content":"Hello"}', "content")
+        'Hello'
+        >>> extract_streaming_json_field('{"content":"Line1\\\\nLine2"}', "content")
+        'Line1\\nLine2'
+        >>> extract_streaming_json_field('{"file_path":"/a.md","conte', "content")
+        ''
+    """
+    import re
+
+    if not args_str or not field_name:
+        return ""
+
+    # 定位字段标记: "field_name": "
+    pattern = re.compile(rf'"{re.escape(field_name)}"\s*:\s*"')
+    match = pattern.search(args_str)
+    if not match:
+        return ""
+
+    pos = match.end()
+    result_chars: list[str] = []
+    i = pos
+
+    while i < len(args_str):
+        ch = args_str[i]
+
+        if ch == "\\":
+            # 转义序列
+            if i + 1 >= len(args_str):
+                # 末尾反斜杠，可能是跨 chunk 的转义序列开头，停止等待
+                break
+
+            next_ch = args_str[i + 1]
+            if next_ch == "n":
+                result_chars.append("\n")
+                i += 2
+            elif next_ch == "t":
+                result_chars.append("\t")
+                i += 2
+            elif next_ch == "r":
+                result_chars.append("\r")
+                i += 2
+            elif next_ch == '"':
+                result_chars.append('"')
+                i += 2
+            elif next_ch == "\\":
+                result_chars.append("\\")
+                i += 2
+            elif next_ch == "u":
+                # Unicode 转义 \\uXXXX，需要 4 个 hex 字符
+                if i + 5 < len(args_str):
+                    try:
+                        code_point = int(args_str[i + 2 : i + 6], 16)
+                        result_chars.append(chr(code_point))
+                        i += 6
+                    except (ValueError, IndexError):
+                        result_chars.append("\\u")
+                        i += 2
+                else:
+                    # 不完整的 \\u 序列，等待后续 chunk
+                    break
+            else:
+                # 无效转义，保留原样
+                result_chars.append("\\")
+                result_chars.append(next_ch)
+                i += 2
+
+        elif ch == '"':
+            # 字符串字段结束
+            break
+
+        else:
+            result_chars.append(ch)
+            i += 1
+
+    return "".join(result_chars)

@@ -542,6 +542,21 @@ async def _stream(
         else:
             continue
 
+        # 诊断日志：记录每次 astream yield 的 mode 和 chunk 大小
+        # from config import get_logger as _runner_get_logger
+        # _rdbg = _runner_get_logger(__name__)
+        # _chunk_repr = ""
+        # if mode == "messages":
+        #     _msg, _meta = chunk
+        #     _tcc_len = sum(len(tc.get("args") or "") for tc in (getattr(_msg, "tool_call_chunks", None) or []))
+        #     _content_len = len(str(getattr(_msg, "content", "") or ""))
+        #     _chunk_repr = f"content={_content_len}, tcc_total_args={_tcc_len}, node={_meta.get('langgraph_node')}"
+        # elif mode == "tools":
+        #     _chunk_repr = f"event={chunk[0] if isinstance(chunk, tuple) else '?'}"
+        # elif mode == "updates":
+        #     _chunk_repr = f"keys={list(chunk.keys()) if isinstance(chunk, dict) else '?'}"
+        # _rdbg.info(f"[STREAM] mode={mode}, {_chunk_repr}")
+
         if mode == "tools":
             async for msg in adapter.adapt_tools_stream_chunk(namespace, chunk):
                 async for out in _yield_adapter_messages(

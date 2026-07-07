@@ -22,13 +22,55 @@ from deep_agent_server.hitl.interrupt_handler import (
     parse_hitl_actions_from_interrupts,
 )
 from deep_agent_server.hitl.tool_call_link import match_hitl_action_index
-from utils.extractors import ThinkTagParser, ToolCallAccumulator, extract_reasoning_from_chunk
+from utils.extractors import ThinkTagParser, ToolCallAccumulator, extract_reasoning_from_chunk, extract_streaming_json_field
 
 # 内置工具 → 前端 MessageType 映射（按 deepagents 工具名分组）
 _FS_TOOLS = {"read_file", "write_file", "edit_file", "ls", "glob", "grep"}
 _EXECUTE_TOOLS = {"execute"}
 _TODO_TOOLS = {"write_todos"}
 _TASK_TOOLS = {"task"}
+
+# 需要流式输出 args 内容的工具（这些工具的 args 中可能包含大文本字段）
+_STREAMABLE_TOOLS = {"write_file", "edit_file", "execute"}
+
+# 流式工具 → 大文本字段名映射
+_STREAMABLE_TOOL_CONTENT_FIELDS = {
+    "write_file": "content",
+    "edit_file": "new_string",
+    "execute": "command",
+}
+
+# 流式工具 → 提前提取的关键参数（从部分 JSON 中提取，用于进度通知）
+# 在大文本字段到达前，让前端提前展示"正在生成 xxx..."
+_KEY_TOOL_PARAMS: dict[str, list[str]] = {
+    "write_file": ["file_path"],
+    "edit_file": ["file_path"],
+    "execute": [],  # execute 无小字段，仅通知工具名
+}
+
+
+def _extract_tool_key_params(tool_name: str, args_str: str) -> dict:
+    """从部分 JSON args 中提取关键参数（用于提前进度通知）。
+
+    在大文本字段（content/new_string/command）到达之前，
+    先提取 file_path 等轻量参数，让前端提前展示进度。
+
+    Args:
+        tool_name: 工具名称
+        args_str: 当前累积的 args JSON 字符串（可能不完整）
+
+    Returns:
+        提取到的 {param_name: value} 字典
+    """
+    key_params = {}
+    fields = _KEY_TOOL_PARAMS.get(tool_name, [])
+    if not fields or not args_str:
+        return key_params
+    for field in fields:
+        value = extract_streaming_json_field(args_str, field)
+        if value:
+            key_params[field] = value
+    return key_params
 
 
 def _mime_for_path_adapter(path: Path) -> str:
@@ -206,6 +248,10 @@ class DeepEventAdapter:
         self._pending_tool_calls: List[dict] = []
         self._pending_tool_inputs: Dict[str, dict] = {}
         self._tool_call_accumulator = ToolCallAccumulator()
+        # 工具参数流式输出：追踪每个 tool call index 已发送的内容
+        self._streamed_tool_args: dict[int, str] = {}
+        # 工具进度通知：追踪是否已发送过"正在生成"通知
+        self._tool_progress_emitted: set = set()
         self._emitted_tool_starts: set = set()
         self._emitted_tool_names: Dict[str, str] = {}
         self._persisted_tool_results: set = set()
@@ -590,7 +636,30 @@ class DeepEventAdapter:
                 yield msg
 
     async def _adapt_updates_chunk(self, chunk: Any) -> AsyncGenerator[dict, None]:
-        if not isinstance(chunk, dict) or "__interrupt__" not in chunk:
+        if not isinstance(chunk, dict):
+            return
+
+        # 检测上下文压缩事件（SummarizationMiddleware 完成压缩后写入）
+        if "_summarization_event" in chunk:
+            event = chunk["_summarization_event"]
+            if isinstance(event, dict) and event.get("cutoff_index", 0) > 0:
+                from config import get_logger as _get_logger
+                _get_logger(__name__).info(
+                    f"[Adapter] 检测到上下文压缩: cutoff={event.get('cutoff_index')}, "
+                    f"file={event.get('file_path', 'N/A')}"
+                )
+                yield self._enrich(
+                    AgentMessage(
+                        type=MessageType.STATUS,
+                        sender=SenderType.SYSTEM,
+                        session_id=self.session_id,
+                        content="上下文已压缩",
+                        save=False,
+                    ),
+                    track_step=False,
+                )
+
+        if "__interrupt__" not in chunk:
             return
         actions = parse_hitl_actions_from_interrupts(chunk["__interrupt__"])
         async for msg in self._yield_interrupt_messages(actions):
@@ -648,6 +717,25 @@ class DeepEventAdapter:
 
         node = metadata.get("langgraph_node", "unknown")
 
+        # 诊断日志：记录每次进入 _adapt_messages_chunk 的基本信息
+        from config import get_logger
+        _dbg = get_logger(__name__)
+        has_content = bool(getattr(message_chunk, "content", None))
+        has_tcc = bool(getattr(message_chunk, "tool_call_chunks", None))
+        has_tc = bool(getattr(message_chunk, "tool_calls", None))
+        if has_tcc or has_tc:  # 只记录与工具调用相关的chunk
+            tcc_info = ""
+            if has_tcc:
+                tcc_lens = [len(tc.get("args") or "") for tc in message_chunk.tool_call_chunks]
+                tcc_info = f"tcc={len(message_chunk.tool_call_chunks)}, args_lens={tcc_lens}"
+            tc_info = ""
+            if has_tc:
+                tc_info = f"tc={len(message_chunk.tool_calls)}"
+            _dbg.info(
+                f"[TOOL_ARGS_STREAM] node={node}, content={has_content}, "
+                f"last_node={self._last_node}, {tcc_info} {tc_info}"
+            )
+
         # 离开 model 节点时：先刷推理/回复，再 emit 缓存的 tool_call start
         if self._last_node == "model" and node != "model":
             async for msg in self.finalize_model_segment():
@@ -687,6 +775,9 @@ class DeepEventAdapter:
             # tool_calls / tool_call_chunks 在流式 chunk 中可能分多次到达
             if hasattr(message_chunk, "tool_call_chunks") and message_chunk.tool_call_chunks:
                 self._tool_call_accumulator.accumulate_chunks(message_chunk.tool_call_chunks)
+                # 流式输出工具参数增量（write_file/edit_file 的大文本字段）
+                async for msg in self._emit_tool_args_stream():
+                    yield msg
 
             tool_calls = getattr(message_chunk, "tool_calls", None) or []
             if tool_calls:
@@ -779,6 +870,15 @@ class DeepEventAdapter:
         )
         await self._link_resumed_tool_call(tool_name, tool_input, tool_call_id)
 
+        # 工具调用正式发出后，清理对应的流式 args 追踪状态
+        if tool_name in _STREAMABLE_TOOLS and tool_call_id:
+            for index in list(self._streamed_tool_args):
+                acc = self._tool_call_accumulator.peek(index)
+                if acc and acc.get("id") == tool_call_id:
+                    del self._streamed_tool_args[index]
+                    self._tool_progress_emitted.discard(index)
+                    break
+
     async def _ensure_subagent_start(
         self,
         tool_call_id: str,
@@ -806,6 +906,74 @@ class DeepEventAdapter:
         async for msg in self._emit_single_tool_start(tc, "task", tool_input or {}):
             yield msg
 
+    async def _emit_tool_args_stream(self) -> AsyncGenerator[dict, None]:
+        """对 _STREAMABLE_TOOLS 的工具调用，检查累积状态并流式推送。
+
+        两个阶段：
+        1. 内容尚未到达 → 如果工具名已知且有关键参数可提取，发送进度通知
+           (delta="" + key_params)，让前端展示"正在生成 xxx..."
+        2. 内容开始到达 → 逐 chunk 推送 delta 增量
+        """
+        for index, state in self._tool_call_accumulator.peek_all().items():
+            name = state.get("name")
+            if not name or name not in _STREAMABLE_TOOLS:
+                continue
+
+            field_name = _STREAMABLE_TOOL_CONTENT_FIELDS.get(name)
+            if not field_name:
+                continue
+
+            args_str = state.get("args") or ""
+            tool_call_id = state.get("id") or None
+            current_content = extract_streaming_json_field(args_str, field_name)
+            prev_content = self._streamed_tool_args.get(index, "")
+
+            # 阶段 1：内容未开始 → 尝试发送进度通知
+            if len(current_content) <= len(prev_content):
+                if index not in self._tool_progress_emitted:
+                    key_params = _extract_tool_key_params(name, args_str)
+                    self._tool_progress_emitted.add(index)
+                    yield self._enrich(
+                        AgentMessage(
+                            type=MessageType.TOOL_ARGS_STREAM,
+                            sender=SenderType.SYSTEM,
+                            session_id=self.session_id,
+                            content={
+                                "tool_name": name,
+                                "tool_call_id": tool_call_id,
+                                "tool_call_index": index,
+                                "field_name": field_name,
+                                "delta": "",
+                                "key_params": key_params,
+                            },
+                            save=False,
+                        ),
+                        track_step=False,
+                    )
+                continue
+
+            # 阶段 2：内容已到达 → 推送增量
+            delta = current_content[len(prev_content):]
+            self._streamed_tool_args[index] = current_content
+
+            if delta:
+                yield self._enrich(
+                    AgentMessage(
+                        type=MessageType.TOOL_ARGS_STREAM,
+                        sender=SenderType.SYSTEM,
+                        session_id=self.session_id,
+                        content={
+                            "tool_name": name,
+                            "tool_call_id": tool_call_id,
+                            "tool_call_index": index,
+                            "field_name": field_name,
+                            "delta": delta,
+                        },
+                        save=False,
+                    ),
+                    track_step=False,
+                )
+
     def _merge_accumulated_tool_calls(self) -> None:
         """将流式 tool_call_chunks 合并进 pending 列表（Deep 无 custom 流 tool_call 事件）。"""
         for tc in self._tool_call_accumulator.parse_and_clear():
@@ -822,6 +990,9 @@ class DeepEventAdapter:
             }
             if tc_id not in existing_ids:
                 self._pending_tool_calls.append(entry)
+        # parse_and_clear 已清空 accumulator，同步清理流式追踪状态
+        self._streamed_tool_args.clear()
+        self._tool_progress_emitted.clear()
 
     async def _ensure_tool_start(
         self,

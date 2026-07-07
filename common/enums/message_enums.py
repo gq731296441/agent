@@ -36,6 +36,7 @@ class MessageType(str, Enum):
     WORKSPACE_FILE = "workspace_file"  # 本轮 conversation Agent 写入的工作区文件列表
     SANDBOX_STATUS = "sandbox_status"  # 沙箱容量与 session 列表（WebSocket 推送）
     RUN_METRICS = "run_metrics"  # Deep run 结束指标（token + 耗时，仅推送前端）
+    TOOL_ARGS_STREAM = "tool_args_stream"  # 工具调用参数的流式增量（write_file/edit_file 的 content 逐 chunk 推送）
 
 
 class SenderType(str, Enum):

@@ -27,7 +27,7 @@ def classify_deep_error(exc: Exception) -> DeepErrorClassification:
     if "rate limit" in msg or "429" in msg:
         return DeepErrorClassification(True, "rate_limit", "限流，正在重试…")
     if "context" in msg and "overflow" in msg:
-        return DeepErrorClassification(False, "context_overflow", "上下文过长")
+        return DeepErrorClassification(True, "context_overflow", "上下文过长，正在压缩并重试…")
     if "connection" in msg or "network" in msg:
         return DeepErrorClassification(True, "network", "网络错误，正在重试…")
     # 认证/鉴权错误（错误的 API Key / Base URL / 模型名）

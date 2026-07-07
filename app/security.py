@@ -132,8 +132,9 @@ class _AutoBanList:
 
 # ==================== 全局实例 ====================
 
-# 普通请求速率限制：每个 IP 每 60 秒最多 120 次请求
-_rate_limiter = _RateLimiter(max_requests=120, window_seconds=60)
+# 普通请求速率限制：每个 IP 每 60 秒最多 300 次请求（平均 5 req/s）
+# 现代 SPA 切换会话时前端会并发多个 API 调用，120/min 容易误伤正常用户
+_rate_limiter = _RateLimiter(max_requests=300, window_seconds=60)
 
 # 恶意 IP 自动封禁：累计 5 次恶意请求后封禁 10 分钟
 _auto_ban = _AutoBanList(ban_seconds=600, threshold=5)
@@ -205,15 +206,23 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Forbidden"},
             )
 
-        # 4. 速率限制
-        allowed, remaining = _rate_limiter.is_allowed(client_ip)
-        if not allowed:
-            logger.warning(f"【安全】⚡ IP {client_ip} 请求过于频繁，已限流")
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Too Many Requests"},
-                headers={"Retry-After": "60"},
-            )
+        # 4. 速率限制（跳过静态资源、WebSocket 升级和内部健康检查）
+        _skip_rate_limit = (
+            path.startswith("/static/")
+            or path in ("/health", "/favicon.ico")
+            or request.headers.get("upgrade", "").lower() == "websocket"
+        )
+        if not _skip_rate_limit:
+            allowed, remaining = _rate_limiter.is_allowed(client_ip)
+            if not allowed:
+                logger.warning(f"【安全】⚡ IP {client_ip} 请求过于频繁，已限流")
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Too Many Requests"},
+                    headers={"Retry-After": "60"},
+                )
+        else:
+            remaining = 0  # 跳过限流的请求不需要返回剩余次数
 
         # 放行，附加安全响应头
         response = await call_next(request)

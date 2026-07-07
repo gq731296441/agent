@@ -11,28 +11,55 @@ logger = get_logger(__name__)
 
 async_client = httpx.AsyncClient(
     trust_env=False,  # 忽略系统代理
-    timeout=Timeout(300.0, read=300.0, write=300.0, connect=60.0),
+    timeout=Timeout(1200.0, read=1200.0, write=1200.0, connect=60.0),
     limits=Limits(max_connections=100, max_keepalive_connections=20),
     # 某些私有部署后端对 HTTP/2 支持不佳，若报错持续，可尝试强制 HTTP/1.1
     # http2=False 
 )
 
+# 流式 chunk 诊断计数器（模块级变量，避免 Pydantic ModelPrivateAttr 问题）
+_llm_chunk_counters = {"total": 0, "tool_args_chunks": 0}
+
 class ChatOpenAIWithReasoning(ChatOpenAI):
-   def _convert_chunk_to_generation_chunk(
+
+    def _convert_chunk_to_generation_chunk(
         self,
         chunk: dict, # 源码中明确是 dict
         default_chunk_class: type,
         base_generation_info: Optional[dict],
     ) -> Optional[ChatGenerationChunk]:
-        
+
         # 调用父类方法，获取初步转换的 generation_chunk
         # 此时 generation_chunk.message 里的 additional_kwargs 还没有推理内容
         gen_chunk = super()._convert_chunk_to_generation_chunk(
             chunk, default_chunk_class, base_generation_info
         )
-        
+
         if gen_chunk is None:
             return None
+
+        # 诊断：统计 tool_calls 参数的流式 chunk
+        try:
+            choices = chunk.get("choices", [])
+            if choices:
+                delta = choices[0].get("delta", {})
+                tool_calls = delta.get("tool_calls") or []
+                if tool_calls:
+                    _llm_chunk_counters["tool_args_chunks"] += 1
+                    for tc in tool_calls:
+                        fn = tc.get("function") or {}
+                        args = fn.get("arguments") or ""
+                        _llm_chunk_counters["total"] += 1
+                        args_preview = args[:300] + ("..." if len(args) > 300 else "")
+                        logger.info(
+                            f"[LLM_CHUNK] #{_llm_chunk_counters['total']} "
+                            f"(tc_batch #{_llm_chunk_counters['tool_args_chunks']}), "
+                            f"index={tc.get('index')}, name={fn.get('name')}, "
+                            f"args_len={len(args)}, id={repr(tc.get('id'))}"
+                            f"\n  args_preview={repr(args_preview)}"
+                        )
+        except Exception as e:
+            logger.debug(f"⚠️ [LLM_CHUNK诊断] 提取 tool_calls 参数出错: {e}")
 
         # 从原始 chunk 中提取推理内容（兼容 reasoning_content / reasoning）
         try:
