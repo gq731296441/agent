@@ -618,35 +618,28 @@ async def ws_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         # ==================== 连接断开 ====================
-        # 取消所有正在运行的 Agent 流任务
-        for sid, task in _stream_tasks.items():
-            if not task.done():
-                task.cancel()
-        _stream_tasks.clear()
-
-        # 从物理连接管理器中移除 ws，并拿回所有受影响的 session_id
+        # WS 断开后 agent 继续后台运行：不 cancel 任务，数据完整存入 DB
+        # manager.send() 自动静默失败，_finalize_tokens() 正常执行
         affected_sessions = manager.disconnect(websocket)
-        # 通知 AgentManager 清理这些会话的路由映射
+        # 清理 AgentManager 中的会话路由映射（不调用 stop_task，agent 继续运行）
         for sid in affected_sessions:
-            _manager_agents.stop_task(sid)
-            # 清理 AgentManager 中的会话信息
             _manager_agents.disconnect_connection(sid)
-            logger.info(f"【WebSocket】Cleanup，已注销会话路由: {sid}")
+            logger.info(f"【WebSocket】Cleanup，已注销会话路由（agent 继续后台运行）: {sid}")
 
-        logger.info(f"【WebSocket】Disconnect，物理连接已断开，共清理 {len(affected_sessions)} 个关联会话")
+        logger.info(f"【WebSocket】Disconnect，物理连接已断开，{len(affected_sessions)} 个会话继续后台运行")
 
     except Exception as e:
         logger.error(f"【WebSocket】Connect Error: {str(e)}")
         import traceback
         traceback.print_exc()
-        # 取消所有正在运行的 Agent 流任务
+        # 异常情况下清理：取消任务 + 断开连接
         for sid, task in _stream_tasks.items():
             if not task.done():
                 task.cancel()
         _stream_tasks.clear()
-        # 异常情况执行清理过程
         affected_sessions = manager.disconnect(websocket)
         for sid in affected_sessions:
+            _manager_agents.stop_task(sid)
             _manager_agents.disconnect_connection(sid)
         return
 

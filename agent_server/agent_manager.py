@@ -671,6 +671,10 @@ class AgentManager:
                 task.cancel()
 
     def disconnect_connection(self, session_id: str = None):
+        """WS 物理断开时清理路由映射，不终止 agent 任务。
+
+        agent 继续后台运行至完成，_cleanup_session_run 在 finally 中释放锁。
+        stop_task() 仅由用户主动 stop 操作或 Exception handler 调用。
+        """
         if session_id:
-            self.stop_task(session_id)
-            logger.info(f"[AgentManager] 会话 {session_id} 已断开连接，已触发停止")
+            logger.info(f"[AgentManager] 会话 {session_id} 连接已断开，agent 继续后台运行")

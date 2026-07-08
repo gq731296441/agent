@@ -35,12 +35,42 @@ def _create_no_proxy_async_client(
     return httpx.AsyncClient(**kwargs)
 
 
+# MCP 工具参数校验错误关键词（用于区分 LLM 参数错误 vs 服务端内部错误）
+_MCP_PARAM_ERROR_KEYWORDS = [
+    "validation error",
+    "missing required argument",
+    "field required",
+    "extra fields not permitted",
+    "type_error",
+    "value_error",
+    "none is not an allowed",
+    "not a valid",
+    "validationerror",
+    "pydantic",
+    "argument",
+    "parameter",
+    "input should be",
+    "unexpected value",
+    "invalid type",
+]
+
+
+def _is_param_validation_error(err_msg: str) -> bool:
+    """判断 MCP 工具错误是否为参数校验错误（LLM 可自行修正）。"""
+    err_lower = err_msg.lower()
+    return any(kw in err_lower for kw in _MCP_PARAM_ERROR_KEYWORDS)
+
+
 def _wrap_mcp_tools_error(tools: List[Any]) -> List[Any]:
-    """MCP 工具 isError 时抛 ToolException，给错误信息加用户可读的说明前缀。"""
-    _ERR_PREFIX = (
-        "⚠️ MCP 工具调用失败，可能原因：工具输出格式与服务端 outputSchema 定义不匹配。"
-        "请联系 MCP 服务端管理员检查。\n\n原始错误: "
-    )
+    """包装 MCP 工具 _arun：将 ToolException 转为错误字符串返回，使 LLM 可自修正。
+
+    MCP 服务端返回 isError=True 时，langchain_mcp_adapters 会抛出 ToolException。
+    原逻辑 re-raise 该异常，导致其逃逸 ToolNode（因 _default_handle_tool_errors
+    只处理 ToolInvocationError），agent 直接停止。
+
+    改为返回 (error_content, None) 元组（匹配 content_and_artifact 格式），
+    ToolNode 会将其包装为 ToolMessage 返回给 LLM，LLM 可阅读错误信息并自行修正参数重试。
+    """
     for tool in tools:
         if hasattr(tool, "_arun"):
             _orig = tool._arun
@@ -48,7 +78,19 @@ def _wrap_mcp_tools_error(tools: List[Any]) -> List[Any]:
                 try:
                     return await _orig(*args, config=config, run_manager=run_manager, **kwargs)
                 except ToolException as e:
-                    raise ToolException(_ERR_PREFIX + str(e)) from e
+                    err_msg = str(e)
+                    if _is_param_validation_error(err_msg):
+                        error_content = (
+                            f"工具调用参数错误：{err_msg}\n\n"
+                            f"请根据以上错误信息修正工具参数后重新调用该工具。"
+                        )
+                    else:
+                        error_content = (
+                            f"MCP 工具调用失败：{err_msg}\n\n"
+                            f"可能是 MCP 服务端内部错误，可尝试重新调用或告知用户检查服务端状态。"
+                        )
+                    # 返回 (content, artifact) 元组，匹配 response_format="content_and_artifact"
+                    return (error_content, None)
             tool._arun = _wrapped
     return tools
 

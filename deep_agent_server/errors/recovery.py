@@ -30,6 +30,24 @@ def classify_deep_error(exc: Exception) -> DeepErrorClassification:
         return DeepErrorClassification(True, "context_overflow", "上下文过长，正在压缩并重试…")
     if "connection" in msg or "network" in msg:
         return DeepErrorClassification(True, "network", "网络错误，正在重试…")
+    # MCP 工具错误 — 参数校验失败或服务端错误，应让 Agent 看到错误并自修正
+    # 这是兜底安全网：正常情况下 _wrap_mcp_tools_error 会将 ToolException 转为
+    # ToolMessage 返回给 LLM，但如果异常因其他路径逃逸到顶层，应标记为可重试
+    if "tool" in msg or "tool" in exc_name.lower() or "mcp" in msg:
+        if any(kw in msg for kw in [
+            "validation", "required", "missing", "argument", "parameter",
+            "field required", "pydantic", "type_error", "value_error",
+        ]):
+            return DeepErrorClassification(
+                True, "mcp_param_error",
+                "MCP 工具调用参数有误，正在让模型修正后重试…",
+            )
+        # 通用 MCP/Tool 错误（非认证类）
+        return DeepErrorClassification(
+            True, "mcp_tool_error",
+            "MCP 工具调用异常，正在重试…",
+        )
+
     # 认证/鉴权错误（错误的 API Key / Base URL / 模型名）
     if (
         "authentication" in exc_name.lower()
