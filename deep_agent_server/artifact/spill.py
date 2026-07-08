@@ -19,9 +19,9 @@ logger = get_logger(__name__)
 SPILL_MARKER = "[工具结果已外置]"
 
 
-def _virtual_path(tool_call_id: str) -> str:
+def _virtual_path(session_id: str, tool_call_id: str) -> str:
     subdir = (app_config.TOOL_SPILL_VIRTUAL_DIR or ".tool-cache").strip("/\\")
-    return f"/workspace/{subdir}/{tool_call_id}.txt"
+    return f"/workspace/{session_id}/{subdir}/{tool_call_id}.txt"
 
 
 def _storage_path(user_id: str, session_id: str, tool_call_id: str) -> Path:
@@ -81,7 +81,7 @@ async def spill_tool_result(
         return SpillResult(content=raw, summary=summary, truncated=truncated, spilled=False)
 
     call_id = (tool_call_id or "").strip() or str(uuid.uuid4())
-    virtual = _virtual_path(call_id)
+    virtual = _virtual_path(session_id, call_id)
     path = _storage_path(user_id, session_id, call_id)
 
     max_bytes = app_config.ARTIFACT_MAX_BYTES

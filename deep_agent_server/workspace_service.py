@@ -25,6 +25,10 @@ from deep_agent_server.workspace import (
     validate_user_id,
 )
 
+from config import get_logger
+
+logger = get_logger(__name__)
+
 
 def _mime_for_path(path: Path) -> str:
     guessed, _ = mimetypes.guess_type(path.name)
@@ -184,17 +188,17 @@ def resolve_virtual_path(user_id: str, virtual_path: str) -> Tuple[Path, str, Op
         base = get_workspace_dir(uid, sid)
         return safe_join(base, rel), rel, sid, "workspace"
     if kind == "skills":
-        rel = parts[1] if len(parts) > 1 else ""
+        rel = "/".join(parts[1:]) if len(parts) > 1 else ""
         if not rel:
             raise ValueError("skills 路径格式: skills/{skill_dir}/...")
         base = get_skills_dir(uid)
         return safe_join(base, rel), rel, None, "skill"
     if kind == "artifacts":
-        rel = parts[1] if len(parts) > 1 else ""
+        rel = "/".join(parts[1:]) if len(parts) > 1 else ""
         base = get_artifacts_dir(uid)
         return safe_join(base, rel), f"artifacts/{rel}", None, "artifact"
     if kind == "uploads":
-        rel = parts[1] if len(parts) > 1 else ""
+        rel = "/".join(parts[1:]) if len(parts) > 1 else ""
         base = get_uploads_dir(uid)
         return safe_join(base, rel), f"uploads/{rel}", None, "upload"
     raise ValueError(f"不支持的 path 前缀: {kind}")
@@ -202,9 +206,18 @@ def resolve_virtual_path(user_id: str, virtual_path: str) -> Tuple[Path, str, Op
 
 def read_file_bytes(user_id: str, virtual_path: str) -> Tuple[bytes, str]:
     _assert_user_visible_path(virtual_path)
-    abs_path, _, _, _ = resolve_virtual_path(user_id, virtual_path)
+    abs_path, rel_path, session_id, file_kind = resolve_virtual_path(user_id, virtual_path)
     if not abs_path.is_file():
+        logger.warning(
+            f"[Workspace] read_file_bytes 文件不存在 user={user_id} "
+            f"virtual={virtual_path} abs={abs_path} rel={rel_path} "
+            f"session={session_id} kind={file_kind}"
+        )
         raise FileNotFoundError(virtual_path)
+    logger.debug(
+        f"[Workspace] read_file_bytes 下载 user={user_id} "
+        f"virtual={virtual_path} abs={abs_path} size={abs_path.stat().st_size}"
+    )
     return abs_path.read_bytes(), _mime_for_path(abs_path)
 
 

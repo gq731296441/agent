@@ -197,6 +197,21 @@ class AgentMessage(BaseModel):
         )
 
     @classmethod
+    def session_title_updated(
+        cls,
+        session_id: str,
+        content: Dict[str, Any]
+    ) -> "AgentMessage":
+        """创建会话标题更新消息（延迟生成后推送，不存库）。"""
+        return cls(
+            type=MessageType.SESSION_TITLE_UPDATED,
+            sender=SenderType.SYSTEM,
+            session_id=session_id,
+            content=content,
+            save=False
+        )
+
+    @classmethod
     def deep_message(
         cls,
         msg_type: MessageType,

@@ -4,7 +4,9 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
+from urllib.parse import quote
 
+from config import get_logger
 from deep_agent_server.workspace_service import (
     delete_file,
     get_quota_detail,
@@ -93,6 +95,9 @@ async def workspace_files_by_session(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+logger = get_logger(__name__)
+
+
 @router.get("/files/download")
 async def workspace_download(
     user_id: str = Query(...),
@@ -104,10 +109,20 @@ async def workspace_download(
             if len(parts) >= 2 and not await validate_session_access(user_id, parts[1]):
                 raise HTTPException(status_code=403, detail=SESSION_ACCESS_DENIED_MSG)
         data, mime = read_file_bytes(user_id, path)
-        return Response(content=data, media_type=mime)
+        filename = path.rsplit("/", 1)[-1] if "/" in path else path
+        encoded_filename = quote(filename)
+        return Response(
+            content=data,
+            media_type=mime,
+            headers={
+                "Content-Disposition": f'attachment; filename="{encoded_filename}"; filename*=UTF-8\'\'{encoded_filename}',
+            },
+        )
     except FileNotFoundError as e:
+        logger.warning(f"[Download] 文件不存在 user={user_id} path={path}: {e}")
         raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
+        logger.warning(f"[Download] 参数错误 user={user_id} path={path}: {e}")
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 

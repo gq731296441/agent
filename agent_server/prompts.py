@@ -178,7 +178,7 @@ Be concise but preserve critical details.
 </messages>"""
 
 TITLE_GENERATION_PROMPT = """
-你是标题生成助手
+会话标题生成
 
 ## 目标
 请为以下对话生成一个简洁明了的标题，25字以内。

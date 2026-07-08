@@ -773,6 +773,17 @@ export function handleAgentMessage(msg) {
     return;
   }
 
+  // 延迟标题更新：首轮完成后后端推送最终标题
+  if (type === 'session_title_updated') {
+    const c = msg.content || {};
+    const newTitle = c.session_title || '';
+    if (newTitle) {
+      state.sessionTitle = newTitle;
+    }
+    document.dispatchEvent(new CustomEvent('sessions-refresh'));
+    return;
+  }
+
   if (sid && sid !== state.sessionId) {
     document.dispatchEvent(new CustomEvent('sessions-refresh'));
     return;

@@ -526,7 +526,7 @@ async def _stream(
     async for item in compiled.astream(
         stream_input,
         config=config,
-        stream_mode=["messages", "updates", "tools"],
+        stream_mode=["messages", "updates", "tools", "custom"],
         subgraphs=True,
     ):
         if stop_event and stop_event.is_set():
@@ -559,6 +559,14 @@ async def _stream(
 
         if mode == "tools":
             async for msg in adapter.adapt_tools_stream_chunk(namespace, chunk):
+                async for out in _yield_adapter_messages(
+                    msg, adapter, compiled, config, agent_wrapper, store
+                ):
+                    yield out
+            continue
+
+        if mode == "custom":
+            async for msg in adapter.adapt_custom_event(chunk):
                 async for out in _yield_adapter_messages(
                     msg, adapter, compiled, config, agent_wrapper, store
                 ):

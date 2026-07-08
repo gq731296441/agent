@@ -8,7 +8,6 @@ import asyncio
 from utils.hitl_store import pop_interrupt, get_interrupt, build_hitl_decisions, build_hitl_history_decisions
 from utils.session_utils import (
     get_or_create_session,
-    generate_session_title,
     validate_session_access,
     setup_new_session,
     SESSION_ACCESS_DENIED_MSG,
@@ -611,14 +610,9 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
     resolved_agent_id = None
     if is_new_session:
         try:
-            title_llm = None
-            try:
-                from agent_server.llm import create_title_llm_for_user
-
-                title_llm = await create_title_llm_for_user(user_id)
-            except ValueError:
-                title_llm = None
-            session_title = await generate_session_title(title_llm, question, session_id)
+            # 立即使用兜底标题，不阻塞等待 LLM
+            from utils.session_utils import _build_fallback_session_title
+            session_title = _build_fallback_session_title(session_id)
             resolved_agent_id = await setup_new_session(
                 user_id=user_id,
                 session_id=session_id,
@@ -686,6 +680,23 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
                     json_data = json.dumps(message, ensure_ascii=False)
                     yield f"data: {json_data}\n\n"
 
+                # 延迟标题生成：首轮正常完成后生成并推送
+                if is_new_session:
+                    from utils.session_utils import deferred_generate_and_update_title
+                    new_title = await deferred_generate_and_update_title(
+                        session_id=session_id,
+                        user_id=user_id,
+                        question=question,
+                    )
+                    title_msg = AgentMessage.session_title_updated(
+                        session_id=session_id,
+                        content={
+                            "session_id": session_id,
+                            "session_title": new_title,
+                        }
+                    ).to_frontend_dict()
+                    yield f"data: {json.dumps(title_msg, ensure_ascii=False)}\n\n"
+
             except Exception as e:
                 error_msg = AgentMessage.error(
                     session_id=session_id,
@@ -750,5 +761,16 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
         "agent_id": resolved_agent_id,
         "result": result,
     }
+
+    # 新会话后台延迟生成标题（非流式路径，不阻塞响应）
+    if is_new_session:
+        from utils.session_utils import deferred_generate_and_update_title
+        asyncio.create_task(
+            deferred_generate_and_update_title(
+                session_id=session_id,
+                user_id=user_id,
+                question=question,
+            )
+        )
 
     return JSONResponse(content=response_data)

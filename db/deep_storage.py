@@ -1954,14 +1954,33 @@ async def ensure_subscription_session(user_id: str, agent_id: str) -> Dict[str, 
     from db import storage
 
     agent = await resolve_agent_for_caller(agent_id, user_id, for_runtime=True, include_prompt=True)
+
+    # 非 owner 非订阅用户：检查是否为公开智能体（公开智能体自动订阅）
     if not agent:
-        raise ValueError("智能体不存在或无权访问")
+        # resolve_agent_for_caller 仅对 owner/订阅用户返回，此处检查公开智能体
+        agent = await resolve_agent_for_caller(agent_id, user_id, for_runtime=False, include_prompt=True)
+        if not agent:
+            raise ValueError("智能体不存在或无权访问")
+        # 私有智能体：非 owner 用户不可调用
+        is_public = agent.get("visibility") == "public" and not agent.get("is_deleted")
+        if not is_public:
+            raise ValueError("该智能体为私有，仅创建者可调用")
+        # 公开智能体：自动订阅
+        await subscribe_agent(user_id, agent_id)
+        # 重新获取（已订阅，for_runtime=True 将返回完整信息）
+        agent = await resolve_agent_for_caller(agent_id, user_id, for_runtime=True, include_prompt=True)
+        if not agent:
+            raise ValueError("智能体不存在或无权访问")
+
     if agent.get("archived"):
         raise ValueError("智能体已下架")
 
     is_owner = agent.get("user_id") == user_id
-    if not is_owner and not await is_subscription_active(user_id, agent_id):
-        raise ValueError("请先订阅该智能体")
+    is_public = agent.get("visibility") == "public" and not agent.get("is_deleted")
+
+    # 私有智能体仅创建者可调用
+    if not is_public and not is_owner:
+        raise ValueError("该智能体为私有，仅创建者可调用")
 
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:

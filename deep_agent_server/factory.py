@@ -4,6 +4,7 @@
 interrupt_on 等组件，并返回 DeepAgentWrapper 供 runner 消费。
 """
 
+import os
 from typing import Any, List, Optional, Tuple
 
 from deepagents import create_deep_agent
@@ -70,6 +71,183 @@ def _patch_token_counter_for_summarization():
         logger.warning(f"[DeepFactory] 替换 token 计数器失败: {e}")
 
 
+# ---- 修复摘要消息格式（防模型回显） ----
+# deepagents 的 _build_new_messages_with_path 将摘要包装为 HumanMessage，
+# 部分 CoT 模型会将摘要生成过程的推理内容和摘要本身输出到对话中，
+# 导致用户看到压缩过程的内部思考。此处将防回显指令前置并强化。
+def _patch_summary_message_format():
+    """将摘要消息重构为内部上下文，防止模型回显。"""
+    try:
+        from deepagents.middleware.summarization import (
+            _DeepAgentsSummarizationMiddleware,
+        )
+
+        _original_build = _DeepAgentsSummarizationMiddleware._build_new_messages_with_path
+
+        if getattr(_original_build, "_patched_by_zte", False):
+            return
+
+        def _patched_build_new_messages(self, summary, file_path=None):
+            messages = _original_build(self, summary, file_path)
+            if not messages or not hasattr(messages[0], "content"):
+                return messages
+            msg = messages[0]
+            # 将防回显指令放在消息最前面，比末尾追加更有效
+            anti_echo_prefix = (
+                "## ⚠️ INTERNAL CONTEXT — DO NOT ECHO TO USER\n\n"
+                "The text below in `<summary>` tags is internal conversation "
+                "history for your background awareness ONLY. You MUST:\n"
+                "- NEVER repeat, recite, paraphrase, or quote any part of it\n"
+                "- NEVER format your response using its section headers "
+                "(SESSION INTENT / SUMMARY / ARTIFACTS / NEXT STEPS)\n"
+                "- NEVER include its content in your reasoning output\n"
+                "- Respond to the user naturally as if you already know this context\n"
+                "- If the user's message is a simple greeting, just greet back "
+                "without discussing the summary\n\n"
+                "---\n\n"
+            )
+            messages[0] = msg.model_copy(
+                update={"content": anti_echo_prefix + msg.content}
+            )
+            return messages
+
+        _patched_build_new_messages._patched_by_zte = True
+        _DeepAgentsSummarizationMiddleware._build_new_messages_with_path = (
+            _patched_build_new_messages
+        )
+
+        logger.info("[DeepFactory] 已为摘要消息添加前置防回显指令")
+    except Exception as e:
+        logger.warning(f"[DeepFactory] 修补摘要消息格式失败: {e}")
+
+
+# ---- 防止摘要模型调用的输出泄露到 graph stream ----
+# SummarizationMiddleware._acreate_summary 内部调用 model.ainvoke() 时，
+# 由于 LangChain 的 callback 继承机制（contextvars），当前 graph 的 streaming
+# callbacks 会被继承，导致摘要生成的推理内容和摘要文本被捕获并路由到
+# messages channel，最终作为普通对话输出到前端。
+#
+# 修补方案：在 _acreate_summary 调用模型时显式传入 callbacks=[]，
+# 阻止 LangGraph streaming callbacks 的继承。
+def _patch_acreate_summary_no_callbacks():
+    """防止摘要模型输出通过 callback 继承泄露到 astream。"""
+    try:
+        from langchain.agents.middleware.summarization import (
+            SummarizationMiddleware as LCSummarizationMiddleware,
+        )
+
+        _original_acreate = LCSummarizationMiddleware._acreate_summary
+
+        if getattr(_original_acreate, "_patched_by_zte", False):
+            return
+
+        async def _patched_acreate_summary(self, messages_to_summarize):
+            """与原始 _acreate_summary 逻辑一致，但在 model.ainvoke() 时
+            显式传入 callbacks=[]，切断 LangGraph streaming callbacks 的继承链。
+            """
+            if not messages_to_summarize:
+                return "No previous conversation history."
+
+            trimmed_messages = self._trim_messages_for_summary(messages_to_summarize)
+            if not trimmed_messages:
+                return "Previous conversation was too long to summarize."
+
+            from langchain_core.messages.utils import get_buffer_string
+
+            formatted_messages = get_buffer_string(trimmed_messages)
+
+            try:
+                # 🔑 核心修复：config 中显式传入 callbacks=[]，
+                # 阻止继承 LangGraph 的 streaming callbacks（会将模型输出
+                # 捕获到 messages channel 并路由到前端）。
+                response = await self.model.ainvoke(
+                    self.summary_prompt.format(messages=formatted_messages).rstrip(),
+                    config={
+                        "callbacks": [],
+                        "metadata": {"lc_source": "summarization"},
+                    },
+                )
+                return response.text.strip()
+            except Exception as e:
+                return f"Error generating summary: {e!s}"
+
+        _patched_acreate_summary._patched_by_zte = True
+        LCSummarizationMiddleware._acreate_summary = _patched_acreate_summary
+
+        logger.info("[DeepFactory] 已修补 _acreate_summary — 摘要模型调用不再继承 graph callbacks")
+    except Exception as e:
+        logger.warning(f"[DeepFactory] 修补 _acreate_summary callback 泄露失败: {e}")
+
+
+# ---- 上下文压缩通知前端（仅在真正压缩时发送） ----
+# 策略：awrap_model_call 入口处将 stream_writer 暂存到 self 上，
+# _acreate_summary 被调用时才通过它发射 custom event（确保只在
+# 压缩实际执行时通知前端，而非每次 agent 对话都发送）。
+def _patch_awrap_store_stream_writer():
+    """在 awrap_model_call 入口暂存 stream_writer，供 _acreate_summary 使用。"""
+    try:
+        from deepagents.middleware.summarization import (
+            _DeepAgentsSummarizationMiddleware,
+        )
+
+        _original_awrap = _DeepAgentsSummarizationMiddleware.awrap_model_call
+
+        if getattr(_original_awrap, "_patched_store_writer", False):
+            return
+
+        async def _patched_awrap_model_call(self, request, handler):
+            """暂存 stream_writer，执行结束后清理。"""
+            try:
+                runtime = getattr(request, "runtime", None)
+                self._zte_stream_writer = getattr(runtime, "stream_writer", None) if runtime else None
+            except Exception:
+                self._zte_stream_writer = None
+            try:
+                return await _original_awrap(self, request, handler)
+            finally:
+                self._zte_stream_writer = None
+
+        _patched_awrap_model_call._patched_store_writer = True
+        _DeepAgentsSummarizationMiddleware.awrap_model_call = _patched_awrap_model_call
+
+        logger.info("[DeepFactory] 已修补 awrap_model_call — 暂存 stream_writer")
+    except Exception as e:
+        logger.warning(f"[DeepFactory] 修补 awrap_model_call stream_writer 暂存失败: {e}")
+
+
+def _patch_acreate_summary_emit_compressing():
+    """在 _acreate_summary 被调用时发射 context_compressing 事件。
+
+    只有压缩真正触发时才会调用 _acreate_summary，因此不会误报。
+    """
+    try:
+        from deepagents.middleware.summarization import (
+            _DeepAgentsSummarizationMiddleware,
+        )
+
+        _original_deep_acreate = _DeepAgentsSummarizationMiddleware._acreate_summary
+
+        if getattr(_original_deep_acreate, "_patched_emit_compressing", False):
+            return
+
+        async def _patched_deep_acreate_summary(self, messages_to_summarize):
+            """在生成摘要前通知前端。"""
+            writer = getattr(self, "_zte_stream_writer", None)
+            if writer:
+                try:
+                    writer({"type": "context_compressing"})
+                except Exception:
+                    pass
+            return await _original_deep_acreate(self, messages_to_summarize)
+
+        _patched_deep_acreate_summary._patched_emit_compressing = True
+        _DeepAgentsSummarizationMiddleware._acreate_summary = _patched_deep_acreate_summary
+
+        logger.info("[DeepFactory] 已修补 _acreate_summary — 压缩执行时发送 CONTEXT_COMPRESSING")
+    except Exception as e:
+        logger.warning(f"[DeepFactory] 修补 _acreate_summary 通知失败: {e}")
+
+
 from deep_agent_server.sandbox.exceptions import SandboxUserLimitExceeded
 from deep_agent_server.skills.selector import build_skills_system_prompt
 from agent_server.prompts import build_base_system_prompt, build_system_prompt
@@ -78,6 +256,10 @@ logger = get_logger(__name__)
 
 # 模块加载时执行补丁（确保 create_deep_agent 内部调用时已生效）
 _patch_token_counter_for_summarization()
+_patch_summary_message_format()
+_patch_acreate_summary_no_callbacks()
+_patch_awrap_store_stream_writer()
+_patch_acreate_summary_emit_compressing()
 
 BUILTIN_TOOLS = {
     "write_todos", "read_file", "write_file", "edit_file",
@@ -159,9 +341,14 @@ async def create_deep_agent_instance(
         permissions = build_permissions(allowed_skill_ids)
 
         # 确保 model.profile 包含 max_input_tokens，使 SummarizationMiddleware
-        # 使用基于分数的触发阈值（85% 上下文窗口），而非回退到固定 token 数。
+        # 使用基于分数的触发阈值（默认 85% 上下文窗口），而非回退到固定 token 数。
+        # 用于测试上下文压缩功能。
         if not model.profile or "max_input_tokens" not in model.profile:
-            model.profile = {"max_input_tokens": 262144}
+            trigger_fraction = float(os.environ.get("COMPACTION_TRIGGER_FRACTION", "0.85"))
+            # max_input_tokens = real_limit * trigger_fraction / 0.85
+            # → trigger = max_input_tokens * 0.85 = real_limit * trigger_fraction
+            effective_max = int(262144 * trigger_fraction / 0.85)
+            model.profile = {"max_input_tokens": effective_max}
 
         # ContextOverflowGuardMiddleware 插入在模型与 SummarizationMiddleware 之间，
         # 将 API 级别的 BadRequestError（context length）转换为 ContextOverflowError，

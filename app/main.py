@@ -32,7 +32,6 @@ from psycopg_pool import AsyncConnectionPool
 from app.websocketManager import WebsocketConnectionManager
 from app.security import SecurityMiddleware
 from agent_server.agent_manager import AgentManager
-from agent_server.llm import create_title_llm_for_user
 from db import storage
 from db.database import db_manager
 from api import session_api, agent_api, mcp_api, search_api, stats_api
@@ -43,7 +42,6 @@ from deep_agent_server.session.readiness import SessionReadinessService
 from config import setup_logging, get_logger, app_config
 from utils.session_utils import (
     get_or_create_session,
-    generate_session_title,
     validate_session_access,
     setup_new_session,
     SESSION_ACCESS_DENIED_MSG,
@@ -344,6 +342,40 @@ async def ws_endpoint(websocket: WebSocket):
     # 追踪当前 ws 上正在运行的 Agent 流任务（session_id -> Task）
     _stream_tasks: Dict[str, asyncio.Task] = {}
 
+    async def _deferred_title_update(
+        session_id: str,
+        user_id: str,
+        question: str,
+    ):
+        """后台任务：生成标题 → 更新 DB → 推送 SESSION_TITLE_UPDATED。异常安全。"""
+        try:
+            from utils.session_utils import deferred_generate_and_update_title
+
+            new_title = await deferred_generate_and_update_title(
+                session_id=session_id,
+                user_id=user_id,
+                question=question,
+            )
+            # 推送标题更新到前端
+            await manager.send(
+                AgentMessage.session_title_updated(
+                    session_id=session_id,
+                    content={
+                        "session_id": session_id,
+                        "session_title": new_title,
+                    }
+                ).to_frontend_dict(),
+                session_id,
+            )
+            logger.info(
+                f"【WebSocket】延迟标题推送完成 session={session_id} "
+                f"title={new_title}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"【WebSocket】延迟标题推送失败 session={session_id} error={e}"
+            )
+
     async def _run_agent_stream(
         session_id: str,
         action: str,
@@ -352,11 +384,14 @@ async def ws_endpoint(websocket: WebSocket):
         payload: dict,
         *,
         allow_if_missing: bool = False,
+        _is_new_session: bool = False,
+        _user_first_question: str = "",
     ):
         """
         后台任务：消费 Agent 流并通过 WebSocket 发送消息。
         与主接收循环解耦，避免阻塞 pong 处理。
         """
+        end_reason = None
         try:
             async for message in process_agent_stream(
                 manager_agents=_manager_agents,
@@ -368,6 +403,13 @@ async def ws_endpoint(websocket: WebSocket):
                 allow_if_missing=allow_if_missing,
                 wait_on_queue=True,
             ):
+                # 追踪 END 消息的 reason，用于延迟标题生成判断
+                if message.get("type") == "end":
+                    raw = message.get("content", "")
+                    if isinstance(raw, dict):
+                        end_reason = raw.get("text", "")
+                    else:
+                        end_reason = str(raw)
                 await manager.send(message, session_id)
         except asyncio.CancelledError:
             logger.info(f"【WebSocket】Agent 流任务被取消, session_id: {session_id}")
@@ -375,6 +417,15 @@ async def ws_endpoint(websocket: WebSocket):
             logger.error(f"【WebSocket】Agent 流任务异常, session_id: {session_id}, error: {e}")
         finally:
             _stream_tasks.pop(session_id, None)
+            # 首轮正常完成后，异步生成标题
+            if _is_new_session and end_reason == "completed":
+                asyncio.create_task(
+                    _deferred_title_update(
+                        session_id=session_id,
+                        user_id=user_id,
+                        question=_user_first_question,
+                    )
+                )
 
     try:
         while True:
@@ -428,12 +479,9 @@ async def ws_endpoint(websocket: WebSocket):
 
             if is_new_session:
                 try:
-                    title_llm_model = None
-                    try:
-                        title_llm_model = await create_title_llm_for_user(user_id)
-                    except ValueError:
-                        title_llm_model = None
-                    session_title = await generate_session_title(title_llm_model, question, session_id)
+                    # 立即使用兜底标题，不阻塞等待 LLM
+                    from utils.session_utils import _build_fallback_session_title
+                    session_title = _build_fallback_session_title(session_id)
                     resolved_agent_id = await setup_new_session(
                         user_id=user_id,
                         session_id=session_id,
@@ -441,7 +489,7 @@ async def ws_endpoint(websocket: WebSocket):
                         agent_id=agent_id,
                         agent_kind=resolved_agent_kind,
                     )
-                    # 发送 session_allocated 消息
+                    # 发送 session_allocated 消息（兜底标题，后续延迟更新）
                     await manager.send(
                         AgentMessage.session_allocated(
                             session_id=session_id,
@@ -472,7 +520,11 @@ async def ws_endpoint(websocket: WebSocket):
                             if old and not old.done():
                                 old.cancel()
                             t = asyncio.create_task(
-                                _run_agent_stream(_sid, act, uid, tok, pl)
+                                _run_agent_stream(
+                                    _sid, act, uid, tok, pl,
+                                    _is_new_session=True,
+                                    _user_first_question=question,
+                                )
                             )
                             _stream_tasks[_sid] = t
                             await t
@@ -558,6 +610,8 @@ async def ws_endpoint(websocket: WebSocket):
                     user_token,
                     msg,
                     allow_if_missing=is_new_session,
+                    _is_new_session=is_new_session,
+                    _user_first_question=question,
                 )
             )
             _stream_tasks[session_id] = task

@@ -33,7 +33,7 @@ _DEFAULT_MAX_INPUT_TOKENS = 131072
 
 # 预警阈值
 WARNING_THRESHOLD = 0.70   # 70% 开始预警
-CRITICAL_THRESHOLD = 0.80  # 85% 危险（自动摘要触发点）
+CRITICAL_THRESHOLD = 0.2  # 85% 危险（自动摘要触发点）
 
 
 @dataclass

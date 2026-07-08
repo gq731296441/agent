@@ -52,6 +52,27 @@ async def upsert_user_session(
         return str(result)
 
 
+async def update_session_title(user_id: str, session_id: str, new_title: str) -> bool:
+    """仅更新会话标题（用于延迟标题生成），不影响其他字段。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.execute(
+                """
+                UPDATE user_sessions
+                SET session_name = $1, updated_at = CURRENT_TIMESTAMP
+                WHERE session_id = $2 AND user_id = $3 AND is_deleted = FALSE
+                """,
+                new_title,
+                UUID(session_id) if isinstance(session_id, str) else session_id,
+                user_id,
+            )
+            return result == "UPDATE 1"
+        except Exception as e:
+            logger.error(f"【会话】更新标题失败 session={session_id} error={e}")
+            return False
+
+
 async def get_session_meta(session_id: str) -> Optional[Dict[str, Any]]:
     """获取会话元数据（含 agent_kind / frozen / epoch）。"""
     pool = await db_manager.get_pool()

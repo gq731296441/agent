@@ -217,7 +217,7 @@ async def create_user_aux_llms(user_id: str) -> Dict[str, Any]:
         api_key=api_key,
         streaming=False,
         temperature=0.1,
-        use_reasoning=True,
+        use_reasoning=False,
     )
     return {"tool_judge": tool_judge, "summary": summary, "title": title}
 

@@ -2,7 +2,10 @@
 """
 会话工具函数，供 WebSocket 和 SSE 接口共用。
 """
+import json
 import uuid
+from uuid import UUID
+
 from db import storage
 from config import get_logger
 
@@ -110,27 +113,47 @@ async def setup_new_session(
     return resolved_agent_id if resolved_kind == "subscription" else None
 
 
-async def generate_session_title(title_llm, question: str, session_id: str) -> str:
-    """基于用户首问生成会话标题，失败时回退到默认标题。
+async def generate_session_title(
+    title_llm,
+    question: str,
+    session_id: str,
+    reply: str = None
+) -> str:
+    """基于用户首问（可选加助手回复）生成会话标题，失败时回退到默认标题。
 
     Args:
         title_llm: 标题生成 LLM 实例（可为 None，此时使用兜底标题）
         question: 用户首条提问
         session_id: 会话 ID
+        reply: 首轮助手回复（延迟生成时传入，提供更准确的标题）
     """
     from langchain_core.messages import HumanMessage
     from agent_server.prompts import TITLE_GENERATION_PROMPT
 
     fallback_title = _build_fallback_session_title(session_id)
     normalized_question = (question or "").strip()
-    if not normalized_question:
+
+    # 构造 messages_text：有 reply 时同时包含用户问题和助手回复
+    if reply:
+        normalized_reply = (reply or "").strip()
+        if normalized_reply:
+            messages_text = (
+                f"用户问题:\n{normalized_question[:500]}\n\n"
+                f"助手回复:\n{normalized_reply[:500]}"
+            )
+        else:
+            messages_text = normalized_question[:1000]
+    else:
+        messages_text = normalized_question[:1000]
+
+    if not messages_text.strip():
         return fallback_title
 
     if title_llm is None:
         return fallback_title
 
     async def _try_generate(llm):
-        prompt = TITLE_GENERATION_PROMPT.format(messages=normalized_question[:1000])
+        prompt = TITLE_GENERATION_PROMPT.format(messages=messages_text)
         response = await llm.ainvoke([HumanMessage(content=prompt)])
         result = getattr(response, "content", "")
         if isinstance(result, list):
@@ -163,3 +186,100 @@ async def generate_session_title(title_llm, question: str, session_id: str) -> s
     except Exception as e:
         logger.warning(f"【会话】生成会话标题失败，使用兜底标题: {e}")
         return fallback_title
+
+
+async def deferred_generate_and_update_title(
+    session_id: str,
+    user_id: str,
+    question: str,
+) -> str:
+    """首轮 Agent 完成后延迟生成会话标题。
+
+    从 chat_history 提取助手回复，结合用户首问调用 LLM 生成标题，
+    然后更新 user_sessions.session_name。全程异常安全，失败时返回兜底标题。
+
+    Args:
+        session_id: 会话 ID
+        user_id: 用户 ID
+        question: 用户首条提问
+
+    Returns:
+        str: 新标题（生成失败时返回兜底标题）
+    """
+    from agent_server.llm import create_title_llm_for_user, create_title_llm
+    from db import storage
+    import asyncio
+
+    fallback = _build_fallback_session_title(session_id)
+
+    try:
+        # 1. 等待 0.5s 确保 chat_history 已落库
+        await asyncio.sleep(0.5)
+
+        # 2. 获取会话最近 20 条历史记录（按时间倒序）
+        recent = await storage.fetch_history_by_session(
+            UUID(session_id) if isinstance(session_id, str) else session_id,
+            limit=20,
+            offset=0,
+        )
+
+        # 3. 提取助手 CHAT 文本回复
+        reply_parts = []
+        for record in recent:  # 按 created_at DESC，需反转
+            content = record.get("content")
+            if isinstance(content, str):
+                try:
+                    content = json.loads(content)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            text = ""
+            if isinstance(content, dict):
+                text = content.get("text", "") or content.get("content", "")
+            elif isinstance(content, str):
+                text = content
+            if (
+                str(record.get("sender", "")).lower() == "assistant"
+                and str(record.get("type", "")).lower() == "chat"
+                and text
+            ):
+                reply_parts.append(text)
+
+        # 时间正序排列
+        reply_parts.reverse()
+        reply = "\n".join(reply_parts)
+        if not reply:
+            logger.info(f"【会话】未找到助手回复 session={session_id}，使用兜底标题")
+            return fallback
+
+        # 4. 创建标题 LLM（per-user，失败时回退全局）
+        title_llm = None
+        try:
+            title_llm = await create_title_llm_for_user(user_id)
+        except (ValueError, Exception):
+            try:
+                title_llm = create_title_llm()
+            except Exception:
+                pass
+
+        if title_llm is None:
+            logger.info(f"【会话】无法创建标题 LLM session={session_id}，使用兜底标题")
+            return fallback
+
+        # 5. 生成标题（含用户问题和助手回复）
+        new_title = await generate_session_title(
+            title_llm, question, session_id, reply=reply
+        )
+
+        # 6. 更新 DB
+        await storage.update_session_title(user_id, session_id, new_title)
+
+        logger.info(
+            f"【会话】延迟标题生成完成 session={session_id} title={new_title}"
+        )
+        return new_title
+
+    except Exception as e:
+        logger.warning(
+            f"【会话】延迟标题生成失败 session={session_id} error={e}"
+        )
+        return fallback

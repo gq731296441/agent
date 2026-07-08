@@ -19,6 +19,7 @@ class MessageType(str, Enum):
     SESSION_ALLOCATED = "session_allocated"  # 会话分配通知
     SESSION_WARMING = "session_warming"    # 会话预热中
     SESSION_READY = "session_ready"        # 会话就绪
+    SESSION_TITLE_UPDATED = "session_title_updated"  # 会话标题更新（延迟生成）
     MESSAGE_QUEUED = "message_queued"      # 消息已排队
     REASONING = "reasoning"          # 推理状态通知（告知前端正在推理中）
     REASONING_FINAL = "reasoning_final"  # 推理完整文本（存储 + 推送）
@@ -37,6 +38,8 @@ class MessageType(str, Enum):
     SANDBOX_STATUS = "sandbox_status"  # 沙箱容量与 session 列表（WebSocket 推送）
     RUN_METRICS = "run_metrics"  # Deep run 结束指标（token + 耗时，仅推送前端）
     TOOL_ARGS_STREAM = "tool_args_stream"  # 工具调用参数的流式增量（write_file/edit_file 的 content 逐 chunk 推送）
+    CONTEXT_COMPRESSING = "context_compressing"    # 上下文压缩中（前端展示进度提示）
+    CONTEXT_COMPRESSED = "context_compressed"      # 上下文压缩完成
 
 
 class SenderType(str, Enum):

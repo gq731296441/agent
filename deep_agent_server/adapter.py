@@ -275,6 +275,8 @@ class DeepEventAdapter:
         self._tool_event_inputs: Dict[str, dict] = {}
         # 当前 model 段是否已将推理刷为 reasoning_final（避免 CoT 每 chunk 重复刷库）
         self._reasoning_segment_flushed: bool = False
+        # 上下文压缩后抑制当前 model 段输出（防止摘要推理和摘要内容泄露到前端/DB）
+        self._summarization_suppress: bool = False
 
     def bind_hitl_resume(
         self,
@@ -385,7 +387,7 @@ class DeepEventAdapter:
         return str(content)
 
     async def _emit_chat_chunk(self, text: str) -> AsyncGenerator[dict, None]:
-        if not text:
+        if not text or self._summarization_suppress:
             return
         self._current_llm_text += text
         self._chat_streamed = True
@@ -402,7 +404,7 @@ class DeepEventAdapter:
 
     async def _append_reasoning_chunk(self, chunk: str) -> AsyncGenerator[dict, None]:
         """累积推理文本；开启 REASONING_STREAM_ENABLED 时按 chunk 推前端。"""
-        if not chunk:
+        if not chunk or self._summarization_suppress:
             return
         self._current_reasoning_text += chunk
         if app_config.REASONING_STREAM_ENABLED:
@@ -430,6 +432,9 @@ class DeepEventAdapter:
             )
 
     async def _flush_reasoning_text(self) -> AsyncGenerator[dict, None]:
+        if self._summarization_suppress:
+            self._current_reasoning_text = ""
+            return
         text = (self._current_reasoning_text or "").strip()
         if not text:
             return
@@ -448,7 +453,7 @@ class DeepEventAdapter:
 
     async def _flush_reasoning_if_needed(self) -> AsyncGenerator[dict, None]:
         """将当前 model 段累积的推理一次性刷为 reasoning_final。"""
-        if self._reasoning_segment_flushed:
+        if self._reasoning_segment_flushed or self._summarization_suppress:
             return
         text = (self._current_reasoning_text or "").strip()
         if not text:
@@ -459,6 +464,10 @@ class DeepEventAdapter:
 
     async def flush_assistant_text(self) -> AsyncGenerator[dict, None]:
         """刷新助手文本：推前端 CHAT（若未流式推送）+ 存库 LLM_TEXT_FINAL。"""
+        if self._summarization_suppress:
+            self._current_llm_text = ""
+            self._chat_streamed = False
+            return
         text = (self._current_llm_text or "").strip()
         if not text:
             return
@@ -489,6 +498,16 @@ class DeepEventAdapter:
         self, *, skip_reasoning: bool = False
     ) -> AsyncGenerator[dict, None]:
         """离开 model 节点或流结束时：刷 think 缓冲、推理与助手正文（与 Light runner 对齐）。"""
+        # 上下文压缩触发后，跳过当前 model 段的 finalize，
+        # 防止摘要推理和摘要内容被落库为 REASONING_FINAL / LLM_TEXT_FINAL
+        if self._summarization_suppress:
+            self._current_llm_text = ""
+            self._current_reasoning_text = ""
+            self._chat_streamed = False
+            self._reasoning_segment_flushed = False
+            self._reasoning_notified = False
+            self._think_parser.reset()
+            return
         thinking_part, answer_part = self._think_parser.flush()
         if thinking_part:
             self._current_reasoning_text += thinking_part
@@ -624,6 +643,27 @@ class DeepEventAdapter:
                 result_text=result_text if isinstance(result_text, str) else str(result_text),
             )
 
+    async def adapt_custom_event(self, chunk: Any) -> AsyncGenerator[dict, None]:
+        """处理 stream_mode=custom 事件（中间件通过 stream_writer 发射）。"""
+        if not isinstance(chunk, dict):
+            return
+        event_type = chunk.get("type", "")
+        if event_type == "context_compressing":
+            # 中间件在调用 _acreate_summary 之前发射，通知前端开始压缩
+            yield self._enrich(
+                AgentMessage(
+                    type=MessageType.CONTEXT_COMPRESSING,
+                    sender=SenderType.SYSTEM,
+                    session_id=self.session_id,
+                    content={
+                        "message": "正在压缩上下文...",
+                        "cutoff_index": chunk.get("cutoff_index"),
+                    },
+                    save=False,
+                ),
+                track_step=False,
+            )
+
     async def adapt_astream_chunk(
         self, mode: str, chunk: Any
     ) -> AsyncGenerator[dict, None]:
@@ -648,12 +688,30 @@ class DeepEventAdapter:
                     f"[Adapter] 检测到上下文压缩: cutoff={event.get('cutoff_index')}, "
                     f"file={event.get('file_path', 'N/A')}"
                 )
+                # 清除压缩过程中泄露的推理/聊天文本，防止被 finalize 落库
+                self._summarization_suppress = True
+                self._current_llm_text = ""
+                self._current_reasoning_text = ""
+                self._chat_streamed = False
+                self._reasoning_notified = False
+                self._reasoning_segment_flushed = False
+                self._think_parser.reset()
+                # 同时清理工具调用累积器中的待处理数据（摘要模型调用可能产生幻觉工具）
+                self._merge_accumulated_tool_calls()
+                self._pending_tool_calls.clear()
+                self._pending_tool_inputs.clear()
+                self._pending_subagent_inputs.clear()
+
                 yield self._enrich(
                     AgentMessage(
-                        type=MessageType.STATUS,
+                        type=MessageType.CONTEXT_COMPRESSED,
                         sender=SenderType.SYSTEM,
                         session_id=self.session_id,
-                        content="上下文已压缩",
+                        content={
+                            "message": "上下文已压缩",
+                            "cutoff_index": event.get("cutoff_index"),
+                            "file_path": event.get("file_path"),
+                        },
                         save=False,
                     ),
                     track_step=False,
@@ -748,6 +806,8 @@ class DeepEventAdapter:
                 self._reasoning_notified = False
                 self._reasoning_segment_flushed = False
                 self._think_parser.reset()
+                # 进入新的 model 段，清除压缩抑制标志（正常输出不受影响）
+                self._summarization_suppress = False
 
             # 优先处理 reasoning_content 字段（CoT 模型）；有则禁用 think 标签解析
             reasoning_chunk = extract_reasoning_from_chunk(message_chunk)
