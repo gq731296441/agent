@@ -223,8 +223,18 @@ async def create_user_aux_llms(user_id: str) -> Dict[str, Any]:
 
 
 async def create_title_llm_for_user(user_id: str):
-    aux = await create_user_aux_llms(user_id)
-    return aux["title"]
+    """创建 per-user 标题生成 LLM（仅创建 title，不浪费创建 tool_judge/summary）。"""
+    from db import deep_storage
+
+    model, base_url, api_key = await deep_storage.resolve_user_aux_llm_credentials(user_id)
+    return create_llm_from_config(
+        model=model,
+        base_url=base_url,
+        api_key=api_key,
+        streaming=False,
+        temperature=0.1,
+        use_reasoning=False,
+    )
 
 
 async def create_agent_llm_for_user(user_id: str, agent_kind: str = "default"):

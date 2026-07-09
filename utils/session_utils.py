@@ -117,7 +117,7 @@ async def generate_session_title(
     title_llm,
     question: str,
     session_id: str,
-    reply: str = None
+    reply: str | None = None
 ) -> str:
     """基于用户首问（可选加助手回复）生成会话标题，失败时回退到默认标题。
 
@@ -192,66 +192,58 @@ async def deferred_generate_and_update_title(
     session_id: str,
     user_id: str,
     question: str,
+    reply: str | None = None,
 ) -> str:
     """首轮 Agent 完成后延迟生成会话标题。
 
-    从 chat_history 提取助手回复，结合用户首问调用 LLM 生成标题，
-    然后更新 user_sessions.session_name。全程异常安全，失败时返回兜底标题。
+    优先使用调用方传入的 reply（已在流消费过程中积累，避免 DB 查询），
+    未传入时回退到从 chat_history 提取。全程异常安全，失败时返回兜底标题。
 
     Args:
         session_id: 会话 ID
         user_id: 用户 ID
         question: 用户首条提问
+        reply: 助手首轮回复文本（可选，由调用方在流消费过程中积累）
 
     Returns:
         str: 新标题（生成失败时返回兜底标题）
     """
     from agent_server.llm import create_title_llm_for_user, create_title_llm
     from db import storage
-    import asyncio
 
     fallback = _build_fallback_session_title(session_id)
 
     try:
-        # 1. 等待 0.5s 确保 chat_history 已落库
-        await asyncio.sleep(0.5)
-
-        # 2. 获取会话最近 20 条历史记录（按时间倒序）
-        recent = await storage.fetch_history_by_session(
-            UUID(session_id) if isinstance(session_id, str) else session_id,
-            limit=20,
-            offset=0,
-        )
-
-        # 3. 提取助手 CHAT 文本回复
-        reply_parts = []
-        for record in recent:  # 按 created_at DESC，需反转
-            content = record.get("content")
-            if isinstance(content, str):
-                try:
-                    content = json.loads(content)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            text = ""
-            if isinstance(content, dict):
-                text = content.get("text", "") or content.get("content", "")
-            elif isinstance(content, str):
-                text = content
-            if (
-                str(record.get("sender", "")).lower() == "assistant"
-                and str(record.get("type", "")).lower() == "chat"
-                and text
-            ):
-                reply_parts.append(text)
-
-        # 时间正序排列
-        reply_parts.reverse()
-        reply = "\n".join(reply_parts)
+        # 1. 获取助手回复：优先使用调用方传入的（已在内存中积累），否则从 DB 查询
         if not reply:
-            logger.info(f"【会话】未找到助手回复 session={session_id}，使用兜底标题")
-            return fallback
+            recent = await storage.fetch_history_by_session(
+                UUID(session_id) if isinstance(session_id, str) else session_id,
+                limit=20,
+                offset=0,
+            )
+            reply_parts = []
+            for record in recent:
+                content = record.get("content")
+                if isinstance(content, str):
+                    try:
+                        content = json.loads(content)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                text = ""
+                if isinstance(content, dict):
+                    text = content.get("text", "") or content.get("content", "")
+                elif isinstance(content, str):
+                    text = content
+                if (
+                    str(record.get("sender", "")).lower() == "assistant"
+                    and str(record.get("type", "")).lower() == "chat"
+                    and text
+                ):
+                    reply_parts.append(text)
+            reply_parts.reverse()
+            reply = "\n".join(reply_parts) or None
 
-        # 4. 创建标题 LLM（per-user，失败时回退全局）
+        # 2. 创建标题 LLM（per-user，失败时回退全局）
         title_llm = None
         try:
             title_llm = await create_title_llm_for_user(user_id)
@@ -265,12 +257,12 @@ async def deferred_generate_and_update_title(
             logger.info(f"【会话】无法创建标题 LLM session={session_id}，使用兜底标题")
             return fallback
 
-        # 5. 生成标题（含用户问题和助手回复）
+        # 3. 生成标题（有 reply 时质量更高，无 reply 时仅用 question）
         new_title = await generate_session_title(
             title_llm, question, session_id, reply=reply
         )
 
-        # 6. 更新 DB
+        # 4. 更新 DB
         await storage.update_session_title(user_id, session_id, new_title)
 
         logger.info(

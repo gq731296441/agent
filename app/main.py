@@ -346,6 +346,7 @@ async def ws_endpoint(websocket: WebSocket):
         session_id: str,
         user_id: str,
         question: str,
+        reply: str | None = None,
     ):
         """后台任务：生成标题 → 更新 DB → 推送 SESSION_TITLE_UPDATED。异常安全。"""
         try:
@@ -355,6 +356,7 @@ async def ws_endpoint(websocket: WebSocket):
                 session_id=session_id,
                 user_id=user_id,
                 question=question,
+                reply=reply,
             )
             # 推送标题更新到前端
             await manager.send(
@@ -392,6 +394,8 @@ async def ws_endpoint(websocket: WebSocket):
         与主接收循环解耦，避免阻塞 pong 处理。
         """
         end_reason = None
+        # 在流消费过程中积累助手 CHAT 文本，供标题生成直接使用（避免 DB 查询）
+        _reply_parts: list = []
         try:
             async for message in process_agent_stream(
                 manager_agents=_manager_agents,
@@ -403,13 +407,32 @@ async def ws_endpoint(websocket: WebSocket):
                 allow_if_missing=allow_if_missing,
                 wait_on_queue=True,
             ):
+                # 积累助手 CHAT 文本用于标题生成
+                msg_type = message.get("type", "")
+                if msg_type == "chat":
+                    content = message.get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        _reply_parts.append(content.strip())
+
                 # 追踪 END 消息的 reason，用于延迟标题生成判断
-                if message.get("type") == "end":
+                if msg_type == "end":
                     raw = message.get("content", "")
                     if isinstance(raw, dict):
                         end_reason = raw.get("text", "")
                     else:
                         end_reason = str(raw)
+                    # 收到 END 消息时立即启动标题生成（与收尾清理并行）
+                    if _is_new_session and end_reason in ("completed", "stop", "error"):
+                        reply_text = "\n".join(_reply_parts) if _reply_parts else None
+                        asyncio.create_task(
+                            _deferred_title_update(
+                                session_id=session_id,
+                                user_id=user_id,
+                                question=_user_first_question,
+                                reply=reply_text,
+                            )
+                        )
+
                 await manager.send(message, session_id)
         except asyncio.CancelledError:
             logger.info(f"【WebSocket】Agent 流任务被取消, session_id: {session_id}")
@@ -417,13 +440,15 @@ async def ws_endpoint(websocket: WebSocket):
             logger.error(f"【WebSocket】Agent 流任务异常, session_id: {session_id}, error: {e}")
         finally:
             _stream_tasks.pop(session_id, None)
-            # 首轮正常完成后，异步生成标题
-            if _is_new_session and end_reason == "completed":
+            # 兜底：如果 END 消息未被检测到（如中断/异常），仍尝试生成标题
+            if _is_new_session and not end_reason:
+                reply_text = "\n".join(_reply_parts) if _reply_parts else None
                 asyncio.create_task(
                     _deferred_title_update(
                         session_id=session_id,
                         user_id=user_id,
                         question=_user_first_question,
+                        reply=reply_text,
                     )
                 )
 
