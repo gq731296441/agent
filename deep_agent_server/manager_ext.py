@@ -204,6 +204,11 @@ async def create_deep_agent_for_session(
         except Exception as e:
             return None, f"加载 MCP 工具失败: {e}"
 
+    # 合并内置工具（无需 MCP 配置，始终可用）
+    from builtin_tools import get_builtin_tools
+    builtin_tools = get_builtin_tools(user_id=user_id, user_token=user_token)
+    mcp_tools = builtin_tools + mcp_tools  # 内置工具排前面，LLM 优先看到
+
     if app_config.SANDBOX_ENABLED and not skip_sandbox:
         try:
             await ensure_session_skill_mount(

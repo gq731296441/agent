@@ -72,6 +72,12 @@ class BaseConfig(BaseSettings):
         description="Mock MRM MCP 工具 ID",
     )
 
+    # ==================== 内置工具配置 ====================
+    EMP_INFO_API_URL: str = Field(
+        default="https://icenterapi.zte.com.cn/zte-km-icenter-addresearch/user/plain/docs/search",
+        description="员工信息查询 API 地址",
+    )
+
     # ==================== WebSocket 超时配置 ====================
     HEARTBEAT_INTERVAL: int = Field(default=30, description="WebSocket 心跳间隔（秒）")
     HEARTBEAT_TIMEOUT: int = Field(default=600, description="WebSocket 心跳超时（秒）")
