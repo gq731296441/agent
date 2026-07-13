@@ -165,17 +165,24 @@ async def lifespan(app: FastAPI):
 
             agent_ids = await _ds.list_all_subscription_agent_ids()
             migrated = 0
+            errors = 0
             for aid in agent_ids:
-                root = get_agent_skills_dir(aid)
-                if not root.is_dir():
-                    market_ids = await _ds.get_agent_market_skill_ids(aid)
-                    if market_ids:
-                        sync_skills_to_agent(aid, market_ids)
-                        migrated += 1
-            if migrated:
+                try:
+                    root = get_agent_skills_dir(aid)
+                    if not root.is_dir():
+                        market_ids = await _ds.get_agent_market_skill_ids(aid)
+                        if market_ids:
+                            sync_skills_to_agent(aid, market_ids)
+                            migrated += 1
+                except Exception as e:
+                    errors += 1
+                    logger.warning(
+                        f"【AgentSkill】迁移单个智能体失败 agent_id={aid}: {e}"
+                    )
+            if migrated or errors:
                 logger.info(
-                    f"【AgentSkill】启动迁移: 为 {migrated}/{len(agent_ids)} 个智能体"
-                    f" 初始化了 .agents/ 目录"
+                    f"【AgentSkill】启动迁移完成: migrated={migrated} errors={errors} "
+                    f"total={len(agent_ids)}"
                 )
             else:
                 logger.debug(

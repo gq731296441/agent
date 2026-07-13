@@ -1309,19 +1309,38 @@ async def get_agent_skill_names(agent_id: str) -> List[Dict[str, str]]:
 
 
 async def get_agent_market_skill_ids(agent_id: str) -> List[str]:
-    """获取智能体绑定的 market_skill_id 列表（优先 JOIN，回退快照名）。"""
+    """获取智能体绑定的 market_skill_id 列表。
+
+    优先级：user_installed_skills.market_skill_id > snapshot_skill_name >
+    snapshot_install_dir 的末尾目录名。
+    """
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT COALESCE(uis.market_skill_id, b.snapshot_skill_name) AS skill_id
+            SELECT
+                COALESCE(
+                    uis.market_skill_id,
+                    NULLIF(b.snapshot_skill_name, ''),
+                    b.snapshot_install_dir
+                ) AS skill_id
             FROM user_agent_skill_bindings b
             LEFT JOIN user_installed_skills uis ON b.installed_skill_id = uis.id
             WHERE b.agent_id = $1
             """,
             _uuid(agent_id),
         )
-        return [r["skill_id"] for r in rows if r.get("skill_id")]
+        result: List[str] = []
+        for r in rows:
+            raw = (r.get("skill_id") or "").strip()
+            if not raw:
+                continue
+            # 若是路径格式 (如 /data/.../skills/my-skill)，提取末尾目录名
+            if "/" in raw:
+                raw = raw.rstrip("/\\").rsplit("/", 1)[-1]
+            if raw and raw not in result:
+                result.append(raw)
+        return result
 
 
 async def list_all_subscription_agent_ids() -> List[str]:

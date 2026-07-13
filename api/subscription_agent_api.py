@@ -139,15 +139,28 @@ async def get_agent(agent_id: str, user_id: str = Query(...)):
     mcp_ids = await deep_storage.get_agent_mcp_ids(agent_id)
     mcps = []
     if mcp_ids:
+        name_map: Dict[int, str] = {}
+        # 优先用创建者的 MCP catalog
         creator_id = agent.get("user_id") or agent.get("creator_user_id") or ""
         if creator_id:
             try:
                 mcp_list, _ = await _resolve_mcp_source_list(creator_id)
-                name_map = {m["id"]: m["name"] for m in mcp_list}
+                name_map = {int(m["id"]): m["name"] for m in mcp_list if m.get("id")}
             except Exception:
                 name_map = {}
-            for mid in mcp_ids:
-                mcps.append({"id": mid, "name": name_map.get(mid, "")})
+        # 创建者 catalog 未命中的 MCP，fallback 到查看者的 catalog
+        missing_ids = [mid for mid in mcp_ids if mid not in name_map or not name_map[mid]]
+        if missing_ids and user_id != creator_id:
+            try:
+                viewer_list, _ = await _resolve_mcp_source_list(user_id)
+                for m in viewer_list:
+                    mid = int(m.get("id") or 0)
+                    if mid in missing_ids and m.get("name"):
+                        name_map[mid] = m["name"]
+            except Exception:
+                pass
+        for mid in mcp_ids:
+            mcps.append({"id": mid, "name": name_map.get(mid, "")})
     agent["mcps"] = mcps
 
     # 解析 Skill：id + name 合并返回
