@@ -55,8 +55,9 @@ async def resolve_mcp_list(
     payload_mcp: list,
     *,
     agent_kind: str = "default",
+    creator_user_id: str = "",
 ) -> list:
-    """合并 agent 模板 MCP 绑定与请求 payload；订阅体按绑定 id + 订阅者 catalog 过滤。"""
+    """合并 agent 模板 MCP 绑定与请求 payload；订阅体按绑定 id + 创建者 catalog 过滤。"""
     if agent_kind == "default":
         # 默认智能体：严格以请求 capabilities.mcp 为准；空列表 = 用户未勾选任何 MCP。
         # 开发环境不再在此处静默注入 Mock（与 skills 空列表语义对齐）。
@@ -73,7 +74,8 @@ async def resolve_mcp_list(
     from api.mcp_api import _resolve_mcp_source_list
 
     try:
-        catalog, _ = await _resolve_mcp_source_list(user_id)
+        # 订阅智能体：用创建者的 user_id 获取 MCP 目录，而非订阅者
+        catalog, _ = await _resolve_mcp_source_list(creator_user_id or user_id)
         id_to_item = {int(i.get("id")): i for i in catalog if i.get("id")}
         return [id_to_item[mid] for mid in binding_ids if mid in id_to_item]
     except Exception:
@@ -89,10 +91,15 @@ async def _resolve_skill_dirs_for_agent(
     creator_user_id: str,
 ) -> List[str]:
     if agent_kind == "subscription" and agent_id:
-        bound = await deep_storage.get_agent_skill_install_dirs(agent_id, creator_user_id)
-        if bound:
-            return bound
-        return []
+        from deep_agent_server.workspace import get_agent_skills_dir
+
+        root = get_agent_skills_dir(agent_id)
+        if not root.is_dir():
+            return []
+        return [
+            str(p) for p in sorted(root.iterdir())
+            if p.is_dir() and (p / "SKILL.md").is_file()
+        ]
     return resolve_skill_dirs(user_id, None)
 
 
@@ -127,6 +134,7 @@ async def create_deep_agent_for_session(
         resolved_agent_id or "",
         mcp_list or [],
         agent_kind=agent_kind,
+        creator_user_id=creator_user_id,
     )
     mcp_hash = manager._mcp_list_hash(mcp_list)
     token_fp = manager._token_fingerprint(user_token)
@@ -209,6 +217,15 @@ async def create_deep_agent_for_session(
     builtin_tools = get_builtin_tools(user_id=user_id, user_token=user_token)
     mcp_tools = builtin_tools + mcp_tools  # 内置工具排前面，LLM 优先看到
 
+    # 订阅智能体的 agent_skills_root 与 agent_id_for_sandbox
+    agent_skills_root = None
+    agent_id_for_sandbox = None
+    if agent_kind == "subscription" and resolved_agent_id:
+        from deep_agent_server.workspace import get_agent_skills_dir
+
+        agent_skills_root = get_agent_skills_dir(resolved_agent_id)
+        agent_id_for_sandbox = resolved_agent_id
+
     if app_config.SANDBOX_ENABLED and not skip_sandbox:
         try:
             await ensure_session_skill_mount(
@@ -217,6 +234,7 @@ async def create_deep_agent_for_session(
                 skill_candidate_dirs,
                 selected_skill_ids,
                 manager=manager,
+                agent_id=agent_id_for_sandbox,
             )
         except SkillSelectionLockedError as lock_err:
             return None, lock_err.to_error_payload()
@@ -245,6 +263,8 @@ async def create_deep_agent_for_session(
             agent_kind=agent_kind,
             skip_sandbox=skip_sandbox,
             user_token=user_token,
+            agent_skills_root=agent_skills_root,
+            agent_id_for_sandbox=agent_id_for_sandbox,
             llm=llm,
         )
     except SandboxUserLimitExceeded as limit_err:

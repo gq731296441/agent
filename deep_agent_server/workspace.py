@@ -20,6 +20,7 @@ from config import get_logger
 logger = get_logger(__name__)
 
 _USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_@.+~-]+$")
+_AGENT_ID_PATTERN = re.compile(r"^[a-fA-F0-9-]+$")
 
 
 def validate_user_id(user_id: str) -> str:
@@ -28,6 +29,14 @@ def validate_user_id(user_id: str) -> str:
     if not uid or not _USER_ID_PATTERN.match(uid):
         raise ValueError(f"非法 user_id: {user_id}")
     return uid
+
+
+def validate_agent_id(agent_id: str) -> str:
+    """校验 agent_id 格式（UUID），防止路径穿越。"""
+    aid = (agent_id or "").strip()
+    if not aid or not _AGENT_ID_PATTERN.match(aid):
+        raise ValueError(f"非法 agent_id: {agent_id}")
+    return aid
 
 
 def get_user_root(user_id: str) -> Path:
@@ -89,6 +98,80 @@ def get_sandbox_workspace_dir(user_id: str, session_id: str) -> Path:
 
 def get_sandbox_skills_dir(user_id: str) -> Path:
     return get_sandbox_user_root(user_id) / "skills"
+
+
+# ==================== Agent 专属目录（订阅智能体） ====================
+
+def get_agent_root(agent_id: str) -> Path:
+    """订阅智能体专属根目录：{WORKSPACE_ROOT}/.agents/{agent_id}/。"""
+    aid = validate_agent_id(agent_id)
+    return Path(app_config.get_workspace_root()) / ".agents" / aid
+
+
+def get_agent_skills_dir(agent_id: str) -> Path:
+    """订阅智能体专属 skills 目录：{WORKSPACE_ROOT}/.agents/{agent_id}/skills/。"""
+    return get_agent_root(agent_id) / "skills"
+
+
+def get_sandbox_agent_skills_dir(agent_id: str) -> Path:
+    """沙箱视角的 agent 专属 skills 目录。"""
+    aid = validate_agent_id(agent_id)
+    return Path(get_sandbox_workspace_root()) / ".agents" / aid / "skills"
+
+
+def remove_agent_directory(agent_id: str) -> None:
+    """删除订阅智能体专属目录（硬删除时调用）。"""
+    root = get_agent_root(agent_id)
+    if root.exists():
+        shutil.rmtree(root, ignore_errors=True)
+        logger.info(f"[Workspace] 已删除 agent 专属目录 {root}")
+    else:
+        logger.debug(f"[Workspace] agent 目录不存在，跳过清理: {root}")
+
+
+def _sync_agent_skill_to_sandbox(agent_id: str, skill_id: str) -> bool:
+    """将 agent skill 从 WORKSPACE_ROOT 同步到 SANDBOX_WORKSPACE_ROOT。
+
+    远程 Docker 场景下，bind mount 源必须在 VM 本地可访问的 SANDBOX 路径上。
+    若 WORKSPACE 路径（NFS 客户端）与 SANDBOX 路径（NFS 服务端 export）分离，
+    需要将文件拷贝到 SANDBOX 侧。
+    """
+    sid = (skill_id or "").strip().strip("/\\")
+    if not sid:
+        return False
+
+    ws_skill = get_agent_skills_dir(agent_id) / sid
+    sandbox_skill = get_sandbox_agent_skills_dir(agent_id) / sid
+
+    if not ws_skill.is_dir():
+        return False
+    try:
+        if ws_skill.resolve() == sandbox_skill.resolve():
+            return False
+    except OSError:
+        pass
+    if not _workspace_roots_differ():
+        return False
+    if (app_config.SANDBOX_DOCKER_HOST or "").strip():
+        # 远程 dockerd：skill 数据已在虚机 NFS export 中，无需拷贝
+        return False
+
+    sandbox_skill.parent.mkdir(parents=True, exist_ok=True)
+    if _skill_tree_has_files(sandbox_skill):
+        try:
+            if sandbox_skill.stat().st_mtime >= ws_skill.stat().st_mtime:
+                return False
+        except OSError:
+            pass
+
+    if sandbox_skill.exists():
+        shutil.rmtree(sandbox_skill, ignore_errors=True)
+    shutil.copytree(ws_skill, sandbox_skill)
+    logger.info(
+        f"[Workspace] synced agent skill to sandbox bind path "
+        f"agent={agent_id} skill={sid} dst={sandbox_skill}"
+    )
+    return True
 
 
 def _workspace_roots_differ() -> bool:
@@ -180,17 +263,42 @@ def sync_skills_to_sandbox_bind_paths(user_id: str, skill_ids: list) -> bool:
     return changed
 
 
-def resolve_skill_bind_host_path(user_id: str, skill_id: str) -> Optional[Path]:
+def resolve_skill_bind_host_path(
+    user_id: str, skill_id: str, *, agent_id: Optional[str] = None
+) -> Optional[Path]:
     """解析 Docker bind mount 应使用的宿主机 skill 目录（须含文件）。
 
     远程沙箱时 Agent 进程往往只能访问 WORKSPACE_ROOT（如 NFS 挂到 /data/cmtool/agent），
     而 dockerd 在虚机上 bind 的是 SANDBOX_WORKSPACE_ROOT（如 /data/cmtool/agent-test）。
     二者为同一 NFS export 时，Agent 侧可能 stat 不到 agent-test 路径，但仍应 bind 虚机上的
     sandbox 路径。若 sandbox 路径在虚机上为空而 agent 路径有文件，则 fallback bind agent 路径。
+
+    若传入 agent_id，优先检查 .agents/{agent_id}/skills/{skill_id} 下的文件。
     """
     sid = (skill_id or "").strip().strip("/\\")
     if not sid or ".." in sid or "/" in sid or "\\" in sid:
         return None
+
+    # 订阅智能体：优先使用 agent 专属 skills 目录
+    if agent_id:
+        agent_skill = get_agent_skills_dir(agent_id) / sid
+        sandbox_agent_skill = get_sandbox_agent_skills_dir(agent_id) / sid
+
+        # 远程 dockerd：直接信任 NFS 对齐，返回 SANDBOX 路径
+        # （Agent 进程 stat 不到 VM 上的 SANDBOX 路径，但 NFS 保证数据一致）
+        if (app_config.SANDBOX_DOCKER_HOST or "").strip() and _workspace_roots_differ():
+            _sync_agent_skill_to_sandbox(agent_id, sid)
+            logger.info(
+                f"[Workspace] skill docker bind (agent sandbox remote): {sandbox_agent_skill}"
+            )
+            return sandbox_agent_skill
+
+        if _skill_tree_has_files(agent_skill):
+            logger.info(f"[Workspace] skill docker bind (agent): {agent_skill}")
+            return agent_skill.resolve()
+        if _skill_tree_has_files(sandbox_agent_skill):
+            logger.info(f"[Workspace] skill docker bind (agent sandbox): {sandbox_agent_skill}")
+            return sandbox_agent_skill.resolve()
 
     sync_skill_to_sandbox_bind_path(user_id, sid)
 

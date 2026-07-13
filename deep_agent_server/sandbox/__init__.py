@@ -60,6 +60,9 @@ async def get_sandbox_backend_factory_if_enabled(
     session_id: str,
     store=None,
     user_token: Optional[str] = None,
+    *,
+    agent_skills_root=None,
+    agent_id: Optional[str] = None,
 ):
     """SANDBOX_ENABLED=false 或 Docker 不可用时返回 None（降级无 execute）。"""
     if not app_config.SANDBOX_ENABLED:
@@ -76,6 +79,8 @@ async def get_sandbox_backend_factory_if_enabled(
             session_id=session_id,
             store=store,
             user_token=user_token,
+            agent_skills_root=agent_skills_root,
+            agent_id=agent_id,
         )
     except SandboxUserLimitExceeded:
         raise

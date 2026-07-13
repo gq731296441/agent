@@ -23,17 +23,37 @@ def build_filesystem_routes(
     store=None,
     *,
     skills_root: Optional[Path] = None,
+    agent_skills_root: Optional[Path] = None,
 ) -> dict:
-    """CompositeBackend 的文件路由（/skills、/workspace、可选 /memories）。"""
-    resolved_skills_root = str(skills_root if skills_root is not None else get_skills_dir(user_id))
+    """CompositeBackend 的文件路由（/skills、/workspace、可选 /memories）。
+
+    agent_skills_root 不为 None 时 /skills/ 路由到订阅智能体专属目录，
+    跳过 QuotaFilesystemBackend（agent skill 不计入用户配额）。
+    """
+    if agent_skills_root is not None:
+        resolved_skills_root = str(agent_skills_root)
+    elif skills_root is not None:
+        resolved_skills_root = str(skills_root)
+    else:
+        resolved_skills_root = str(get_skills_dir(user_id))
+
     workspace_root = str(get_workspace_dir(user_id, session_id))
-    routes = {
-        "/skills/": QuotaFilesystemBackend(
+
+    if agent_skills_root is not None:
+        # 订阅智能体：/skills/ 不计入配额
+        skills_route = FilesystemBackend(
+            root_dir=resolved_skills_root, virtual_mode=True
+        )
+    else:
+        skills_route = QuotaFilesystemBackend(
             FilesystemBackend(root_dir=resolved_skills_root, virtual_mode=True),
             user_id=user_id,
             file_kind="skill",
             route_prefix="skills",
-        ),
+        )
+
+    routes = {
+        "/skills/": skills_route,
         "/workspace/": QuotaFilesystemBackend(
             FilesystemBackend(root_dir=workspace_root, virtual_mode=True),
             user_id=user_id,
@@ -56,6 +76,9 @@ def build_sandbox_backend_factory(
     container_id: str,
     store=None,
     user_token: Optional[str] = None,
+    *,
+    agent_skills_root: Optional[Path] = None,
+    agent_id: Optional[str] = None,
 ):
     """返回 deepagents BackendFactory：每次 resolve 时构建带 /skills、/workspace 路由的沙箱 backend。"""
 
@@ -70,18 +93,29 @@ def build_sandbox_backend_factory(
             store=store,
             user_token=user_token,
             skills_root=skills_root,
+            agent_skills_root=agent_skills_root,
+            agent_id=agent_id,
         )
 
     return _factory
 
 
-def build_backend_factory(user_id: str, session_id: str, store=None):
+def build_backend_factory(
+    user_id: str,
+    session_id: str,
+    store=None,
+    *,
+    agent_skills_root: Optional[Path] = None,
+):
     """返回 create_deep_agent 可用的 backend 工厂（lambda rt）。"""
 
     def _factory(rt):
         return CompositeBackend(
             default=StateBackend(),
-            routes=build_filesystem_routes(user_id, session_id, store=store),
+            routes=build_filesystem_routes(
+                user_id, session_id, store=store,
+                agent_skills_root=agent_skills_root,
+            ),
         )
 
     return _factory
@@ -148,10 +182,15 @@ def build_permissions(allowed_skill_ids: Optional[list] = None) -> list:
         for sid in allowed_skill_ids:
             sid = str(sid).strip()
             if sid:
+                # Allow the directory itself (for ls listing) AND its contents
                 perms.append(
                     FilesystemPermission(
                         operations=["read"],
-                        paths=[f"/skills/{sid}/**"],
+                        paths=[
+                            f"/skills/{sid}",
+                            f"/skills/{sid}/",
+                            f"/skills/{sid}/**",
+                        ],
                         mode="allow",
                     )
                 )

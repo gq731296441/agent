@@ -187,6 +187,7 @@ async def ensure_session_skill_mount(
     *,
     manager=None,
     force_recreate: bool = False,
+    agent_id: Optional[str] = None,
 ) -> MountResult:
     """
     确保 session skill mount 与勾选一致。
@@ -260,6 +261,7 @@ async def ensure_session_skill_mount(
             or skills_synced
             or (stored_key is not None and stored_key != selection_key)
         ),
+        agent_id=agent_id,
     )
 
     return MountResult(

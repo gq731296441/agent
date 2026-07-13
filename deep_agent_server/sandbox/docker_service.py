@@ -65,6 +65,9 @@ class DockerSandboxService(SandboxService):
         session_id: str,
         store=None,
         user_token: Optional[str] = None,
+        *,
+        agent_skills_root=None,
+        agent_id: Optional[str] = None,
     ):
         from deep_agent_server.backend_factory import build_sandbox_backend_factory
 
@@ -75,6 +78,8 @@ class DockerSandboxService(SandboxService):
             handle.container_id,
             store=store,
             user_token=user_token,
+            agent_skills_root=agent_skills_root,
+            agent_id=agent_id,
         )
 
     async def ensure_with_skills(
@@ -85,6 +90,7 @@ class DockerSandboxService(SandboxService):
         mounted_skill_ids: List[str],
         selection_key: str,
         force_recreate: bool = False,
+        agent_id: Optional[str] = None,
     ) -> bool:
         """
         确保容器 bind mount 与 selection_key 一致。
@@ -140,6 +146,7 @@ class DockerSandboxService(SandboxService):
                     user_id,
                     session_id,
                     mounted_skill_ids or [],
+                    agent_id,
                 )
                 ws_path = str(get_sandbox_workspace_dir(user_id, session_id))
                 await self._persist_container(
@@ -612,6 +619,8 @@ class DockerSandboxService(SandboxService):
         user_id: str,
         session_id: str,
         mounted_skill_ids: Optional[List[str]] = None,
+        *,
+        agent_id: Optional[str] = None,
     ) -> dict:
         ws_host = str(get_sandbox_workspace_dir(user_id, session_id))
         os.makedirs(ws_host, exist_ok=True)
@@ -624,7 +633,9 @@ class DockerSandboxService(SandboxService):
             sid = str(sid).strip().strip("/\\")
             if not sid or ".." in sid:
                 continue
-            host_skill = resolve_skill_bind_host_path(user_id, sid)
+            host_skill = resolve_skill_bind_host_path(
+                user_id, sid, agent_id=agent_id
+            )
             if host_skill is not None:
                 bind_src = str(host_skill.resolve())
                 volumes[bind_src] = {
@@ -696,6 +707,7 @@ class DockerSandboxService(SandboxService):
         user_id: str,
         session_id: str,
         mounted_skill_ids: Optional[List[str]] = None,
+        agent_id: Optional[str] = None,
     ) -> str:
         client = self._get_docker()
         name = self._container_name(user_id, session_id)
@@ -707,7 +719,8 @@ class DockerSandboxService(SandboxService):
             pass
 
         run_kwargs = self._build_container_run_kwargs(
-            user_id, session_id, mounted_skill_ids
+            user_id, session_id, mounted_skill_ids,
+            agent_id=agent_id,
         )
         container = client.containers.run(**run_kwargs)
         return container.id

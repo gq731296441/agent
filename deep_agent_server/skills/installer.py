@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import List
 
 from config import get_logger
 from config.config import app_config
@@ -137,3 +138,43 @@ async def uninstall_skill_for_user(user_id: str, skill_id: str) -> None:
 
     await refresh_workspace_usage(user_id)
     await deep_storage.insert_audit_log(user_id, "skill_unsubscribe", target=sid)
+
+
+def sync_skills_to_agent(agent_id: str, market_skill_ids: List[str]) -> None:
+    """将 skill-repo 中的 skill 全量覆盖到订阅智能体专属目录。
+
+    每次调用时清空旧目录后重建，确保与绑定列表完全一致。
+    文件从 skill-repo/ 拷贝，不依赖创建者的 user_installed_skills。
+    """
+    from deep_agent_server.workspace import get_agent_skills_dir
+
+    sid_list = [s.strip() for s in market_skill_ids if s and s.strip()]
+    agent_skills = get_agent_skills_dir(agent_id)
+
+    # 清空旧目录后重建
+    if agent_skills.exists():
+        shutil.rmtree(agent_skills)
+    agent_skills.mkdir(parents=True, exist_ok=True)
+
+    synced = 0
+    for sid in sid_list:
+        try:
+            repo_dir = get_repo_skill_dir(sid)
+        except SkillInstallError:
+            logger.warning(
+                f"[SkillInstall] sync_skills_to_agent 跳过: skill_id={sid} "
+                f"在 skill-repo 中不存在"
+            )
+            continue
+        target = agent_skills / sid
+        shutil.copytree(repo_dir, target)
+        synced += 1
+        logger.info(
+            f"[SkillInstall] synced skill to agent agent_id={agent_id} "
+            f"skill={sid} src={repo_dir} dst={target}"
+        )
+
+    logger.info(
+        f"[SkillInstall] sync_skills_to_agent done agent_id={agent_id} "
+        f"synced={synced} total_bound={len(sid_list)}"
+    )

@@ -9,6 +9,8 @@ from api.mcp_api import _resolve_mcp_source_list
 from common.schemas import ApiResponse, ListApiResponse
 from config.config import app_config
 from db import deep_storage
+from deep_agent_server.skills.installer import sync_skills_to_agent
+from deep_agent_server.workspace import remove_agent_directory
 
 router = APIRouter(prefix="/subscription-agents", tags=["subscription-agents"])
 
@@ -118,7 +120,10 @@ async def create_agent(body: SubscriptionAgentCreate = Body(...)):
     if body.mcp_ids:
         await deep_storage.set_agent_mcp_bindings(agent_id, body.mcp_ids)
     if body.skill_ids:
-        await deep_storage.set_agent_skill_bindings(agent_id, body.user_id, body.skill_ids)
+        market_ids = await deep_storage.set_agent_skill_bindings(
+            agent_id, body.user_id, body.skill_ids
+        )
+        sync_skills_to_agent(agent_id, market_ids)
     return ApiResponse.success(data={"agent_id": agent_id})
 
 
@@ -179,7 +184,10 @@ async def update_agent(
     if body.mcp_ids is not None:
         await deep_storage.set_agent_mcp_bindings(agent_id, body.mcp_ids)
     if body.skill_ids is not None:
-        await deep_storage.set_agent_skill_bindings(agent_id, user_id, body.skill_ids)
+        market_ids = await deep_storage.set_agent_skill_bindings(
+            agent_id, user_id, body.skill_ids
+        )
+        sync_skills_to_agent(agent_id, market_ids)
     if not ok and body.mcp_ids is None and body.skill_ids is None:
         return ApiResponse.error(msg="无更新或 Agent 不存在", code=404)
     # 切换为私有时冻结所有订阅者
@@ -193,6 +201,7 @@ async def delete_agent(agent_id: str, user_id: str = Query(...)):
     ok = await deep_storage.hard_delete_user_agent(agent_id, user_id)
     if not ok:
         return ApiResponse.error(msg="智能体不存在", code=404)
+    remove_agent_directory(agent_id)
     return ApiResponse.success(msg="已删除")
 
 
@@ -202,6 +211,7 @@ async def permanently_delete_agent(agent_id: str, user_id: str = Query(...)):
     ok = await deep_storage.hard_delete_user_agent(agent_id, user_id)
     if not ok:
         return ApiResponse.error(msg="智能体不存在", code=404)
+    remove_agent_directory(agent_id)
     return ApiResponse.success(msg="已删除")
 
 

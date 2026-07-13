@@ -84,13 +84,17 @@ class DockerSandboxBackend(CompositeBackend):
         store: Any = None,
         user_token: Optional[str] = None,
         skills_root: Optional[Path] = None,
+        agent_skills_root: Optional[Path] = None,
+        agent_id: Optional[str] = None,
     ):
         self.user_id = user_id
         self.container_id = container_id
         self.session_id = session_id
+        self.agent_id = agent_id
         self._exec_backend = _DockerExecBackend(user_id, container_id, user_token=user_token)
         routes = build_filesystem_routes(
-            user_id, session_id, store=store, skills_root=skills_root
+            user_id, session_id, store=store, skills_root=skills_root,
+            agent_skills_root=agent_skills_root,
         )
         super().__init__(
             default=self._exec_backend,

@@ -28,8 +28,14 @@ class SkillCatalogEntry:
 def scan_skill_repo(repo_root: str | Path | None = None) -> List[SkillCatalogEntry]:
     """遍历 repo 子目录，要求存在 SKILL.md。"""
     root = Path(repo_root or app_config.get_skill_repo_root())
+    logger.info(f"[SkillSync] 扫描 skill-repo: {root}")
     if not root.is_dir():
-        logger.warning(f"[SkillSync] repo 目录不存在: {root}")
+        logger.error(
+            f"[SkillSync] repo 目录不存在: {root} —— "
+            "请检查: 1) skill-repo/ 是否打进 Docker 镜像或挂载; "
+            "2) 环境变量 SKILL_REPO_ROOT 是否配置正确; "
+            "3) K8s ConfigMap/Volume 是否已创建"
+        )
         return []
 
     entries: List[SkillCatalogEntry] = []
@@ -61,6 +67,13 @@ def scan_skill_repo(repo_root: str | Path | None = None) -> List[SkillCatalogEnt
 async def sync_catalog_from_repo(repo_root: str | Path | None = None) -> dict:
     """扫描 repo 并 upsert skill_catalog；缺失目录标记 archived。"""
     entries = scan_skill_repo(repo_root)
+    if not entries:
+        logger.warning(
+            "[SkillSync] 扫描结果为空，跳过同步 —— "
+            "如确认 skill-repo 中有 SKILL.md 文件，请检查路径权限和目录结构"
+        )
+        return {"synced": 0, "deleted": 0, "skill_ids": []}
+
     present_ids: List[str] = []
     for entry in entries:
         present_ids.append(entry.skill_id)

@@ -1034,19 +1034,26 @@ async def list_skill_catalog_ids() -> List[str]:
 
 
 async def delete_missing_skills(present_ids: List[str]) -> int:
-    """删除不在 present_ids 中的 catalog 记录（以 skill-repo 为准完全覆盖）。"""
+    """删除不在 present_ids 中的 catalog 记录（以 skill-repo 为准完全覆盖）。
+
+    注意：present_ids 为空时跳过删除，防止 skill-repo 扫描异常导致全量清空。
+    """
+    if not present_ids:
+        logger.warning(
+            "[SkillSync] present_ids 为空，跳过删除操作 —— "
+            "请检查 skill-repo 目录是否正确部署/挂载，或 SKILL_REPO_ROOT 配置是否正确"
+        )
+        return 0
+
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
-        if present_ids:
-            result = await conn.execute(
-                """
-                DELETE FROM skill_catalog
-                WHERE skill_id != ALL($1::text[])
-                """,
-                present_ids,
-            )
-        else:
-            result = await conn.execute("DELETE FROM skill_catalog")
+        result = await conn.execute(
+            """
+            DELETE FROM skill_catalog
+            WHERE skill_id != ALL($1::text[])
+            """,
+            present_ids,
+        )
         try:
             return int(result.split()[-1])
         except (ValueError, IndexError):
@@ -1231,8 +1238,9 @@ async def set_agent_skill_bindings(
     agent_id: str,
     creator_user_id: str,
     installed_skill_ids: List[str],
-) -> None:
-    """绑定 skill 并写入路径快照。"""
+) -> List[str]:
+    """绑定 skill 并写入路径快照；返回收集到的 market_skill_id 列表。"""
+    market_skill_ids: List[str] = []
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -1243,7 +1251,7 @@ async def set_agent_skill_bindings(
             for sid in installed_skill_ids:
                 row = await conn.fetchrow(
                     """
-                    SELECT id, install_dir, skill_name FROM user_installed_skills
+                    SELECT id, install_dir, skill_name, market_skill_id FROM user_installed_skills
                     WHERE id = $1 AND user_id = $2
                     """,
                     _uuid(sid),
@@ -1251,6 +1259,7 @@ async def set_agent_skill_bindings(
                 )
                 if not row:
                     continue
+                market_skill_ids.append(row["market_skill_id"])
                 await conn.execute(
                     """
                     INSERT INTO user_agent_skill_bindings (
@@ -1269,6 +1278,7 @@ async def set_agent_skill_bindings(
                 """,
                 _uuid(agent_id),
             )
+    return market_skill_ids
 
 
 async def get_agent_skill_binding_ids(agent_id: str) -> List[str]:
@@ -1296,6 +1306,36 @@ async def get_agent_skill_names(agent_id: str) -> List[Dict[str, str]]:
             }
             for r in rows
         ]
+
+
+async def get_agent_market_skill_ids(agent_id: str) -> List[str]:
+    """获取智能体绑定的 market_skill_id 列表（优先 JOIN，回退快照名）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT COALESCE(uis.market_skill_id, b.snapshot_skill_name) AS skill_id
+            FROM user_agent_skill_bindings b
+            LEFT JOIN user_installed_skills uis ON b.installed_skill_id = uis.id
+            WHERE b.agent_id = $1
+            """,
+            _uuid(agent_id),
+        )
+        return [r["skill_id"] for r in rows if r.get("skill_id")]
+
+
+async def list_all_subscription_agent_ids() -> List[str]:
+    """返回所有未删除的订阅智能体 ID。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id FROM user_agents
+            WHERE is_deleted = FALSE
+            ORDER BY created_at
+            """
+        )
+        return [str(r["id"]) for r in rows]
 
 
 # ==================== Sandbox LRU ====================

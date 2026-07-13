@@ -5,6 +5,7 @@ interrupt_on 等组件，并返回 DeepAgentWrapper 供 runner 消费。
 """
 
 import os
+from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 from deepagents import create_deep_agent
@@ -298,6 +299,8 @@ async def create_deep_agent_instance(
     user_token: Optional[str] = None,
     matched_skill_dirs: Optional[List[str]] = None,  # deprecated, ignored
     llm=None,
+    agent_skills_root: Optional[Path] = None,
+    agent_id_for_sandbox: Optional[str] = None,
 ) -> Tuple[Optional[DeepAgentWrapper], Optional[str]]:
     """
     创建 Deep Agent 实例。
@@ -320,10 +323,15 @@ async def create_deep_agent_instance(
         # 渐进式披露：system prompt 只含 name/description，正文按需 read_file
         metas = exposed_skill_metas or []
         sandbox_mode = False
-        backend = build_backend_factory(user_id, session_id, store=store)
+        backend = build_backend_factory(
+            user_id, session_id, store=store,
+            agent_skills_root=agent_skills_root,
+        )
         if not skip_sandbox:
             sandbox_backend_factory = await get_sandbox_backend_factory_if_enabled(
-                user_id, session_id=session_id, store=store, user_token=user_token
+                user_id, session_id=session_id, store=store, user_token=user_token,
+                agent_skills_root=agent_skills_root,
+                agent_id=agent_id_for_sandbox,
             )
             if sandbox_backend_factory is not None:
                 backend = sandbox_backend_factory(None)

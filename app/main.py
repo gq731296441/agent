@@ -36,7 +36,7 @@ from db import storage
 from db.database import db_manager
 from api import session_api, agent_api, mcp_api, search_api, stats_api
 from api import agent_run_api, artifact_api, user_agent_api, skill_api, skill_internal_api, workspace_api, sandbox_api
-from api import user_llm_api, subscription_agent_api, user_memory_api
+from api import user_llm_api, subscription_agent_api, user_memory_api, logs_api
 from api.search_api import process_agent_stream
 from deep_agent_server.session.readiness import SessionReadinessService
 from config import setup_logging, get_logger, app_config
@@ -150,10 +150,39 @@ async def lifespan(app: FastAPI):
             try:
                 from deep_agent_server.skills.catalog_sync import sync_catalog_from_repo
 
+                repo_root = app_config.get_skill_repo_root()
+                logger.info(f"【SkillCatalog】开始同步, repo_root={repo_root}")
                 sync_result = await sync_catalog_from_repo()
                 logger.info(f"【SkillCatalog】启动同步: {sync_result}")
             except Exception as e:
                 logger.warning(f"【SkillCatalog】启动同步失败: {e}")
+
+        # 确保所有已有订阅智能体的 .agents/{agent_id}/skills/ 目录已初始化
+        try:
+            from deep_agent_server.workspace import get_agent_skills_dir
+            from deep_agent_server.skills.installer import sync_skills_to_agent
+            from db import deep_storage as _ds
+
+            agent_ids = await _ds.list_all_subscription_agent_ids()
+            migrated = 0
+            for aid in agent_ids:
+                root = get_agent_skills_dir(aid)
+                if not root.is_dir():
+                    market_ids = await _ds.get_agent_market_skill_ids(aid)
+                    if market_ids:
+                        sync_skills_to_agent(aid, market_ids)
+                        migrated += 1
+            if migrated:
+                logger.info(
+                    f"【AgentSkill】启动迁移: 为 {migrated}/{len(agent_ids)} 个智能体"
+                    f" 初始化了 .agents/ 目录"
+                )
+            else:
+                logger.debug(
+                    f"【AgentSkill】所有 {len(agent_ids)} 个智能体的 .agents/ 目录已就绪"
+                )
+        except Exception as e:
+            logger.warning(f"【AgentSkill】启动迁移失败: {e}")
 
         from deep_agent_server.sandbox.status_notify import set_sandbox_status_notifier
         from deep_agent_server.hitl.sweeper import (
@@ -284,6 +313,7 @@ app.include_router(user_llm_api.router)
 app.include_router(subscription_agent_api.router)
 app.include_router(skill_api.router)
 app.include_router(skill_internal_api.router)
+app.include_router(logs_api.router)
 app.include_router(workspace_api.router)
 app.include_router(sandbox_api.router)
 
