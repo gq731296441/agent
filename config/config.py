@@ -231,7 +231,7 @@ class BaseConfig(BaseSettings):
         description="应用启动时从 skill-repo 同步 skill_catalog 表",
     )
     SKILL_INTERNAL_TOKEN: Optional[str] = Field(
-        default=None,
+        default="agent-cmtool",
         description="管理接口 /internal/skills/* 鉴权 Token（X-Internal-Token）",
     )
 
