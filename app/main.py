@@ -191,6 +191,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"【AgentSkill】启动迁移失败: {e}")
 
+        # 内置默认技能：启动时为所有用户主动安装到 skills/ 目录
+        try:
+            from deep_agent_server.skills.selector import ensure_builtin_skills_for_all_users
+            builtin_result = ensure_builtin_skills_for_all_users()
+            logger.info(f"【BuiltinSkill】启动安装完成: {builtin_result}")
+        except Exception as e:
+            logger.warning(f"【BuiltinSkill】启动安装失败: {e}")
+
         from deep_agent_server.sandbox.status_notify import set_sandbox_status_notifier
         from deep_agent_server.hitl.sweeper import (
             set_hitl_ws_notifier,

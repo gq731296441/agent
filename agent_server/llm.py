@@ -93,7 +93,7 @@ def _base_llm_kwargs() -> Dict[str, Any]:
     return {
         "temperature": 0.1,
         "streaming": True,
-        "max_retries": 5,
+        "max_retries": 10,  # 5→10，429 短期退避约 55s 总等待
         "http_client": httpx.Client(
             trust_env=False,
             timeout=Timeout(300.0, read=300.0, write=300.0, connect=60.0)

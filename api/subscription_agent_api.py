@@ -7,12 +7,21 @@ from pydantic import BaseModel, Field
 
 from api.mcp_api import _resolve_mcp_source_list
 from common.schemas import ApiResponse, ListApiResponse
-from config.config import app_config
 from db import deep_storage
 from deep_agent_server.skills.installer import sync_skills_to_agent
 from deep_agent_server.workspace import remove_agent_directory
 
 router = APIRouter(prefix="/subscription-agents", tags=["subscription-agents"])
+
+
+class McpBindingItem(BaseModel):
+    id: int
+    name: str = ""
+
+
+class SkillBindingItem(BaseModel):
+    id: str
+    name: str = ""
 
 
 class SubscriptionAgentCreate(BaseModel):
@@ -22,8 +31,22 @@ class SubscriptionAgentCreate(BaseModel):
     system_prompt: str = ""
     visibility: str = "public"
     config: Dict[str, Any] = Field(default_factory=dict)
-    mcp_ids: List[int] = Field(default_factory=list)
-    skill_ids: List[str] = Field(default_factory=list)
+    mcp_ids: List[int] = Field(
+        default_factory=list,
+        description="[兼容旧版] MCP ID 列表；优先使用 mcps 字段",
+    )
+    mcps: List[McpBindingItem] = Field(
+        default_factory=list,
+        description="能力市场中的 MCP 列表（含 id + name）",
+    )
+    skill_ids: List[str] = Field(
+        default_factory=list,
+        description="[兼容旧版] market_skill_id 列表；优先使用 skills 字段",
+    )
+    skills: List[SkillBindingItem] = Field(
+        default_factory=list,
+        description="能力市场中的 Skill 列表（含 id + name）",
+    )
 
 
 class SubscriptionAgentUpdate(BaseModel):
@@ -32,24 +55,33 @@ class SubscriptionAgentUpdate(BaseModel):
     system_prompt: Optional[str] = None
     visibility: Optional[str] = None
     config: Optional[Dict[str, Any]] = None
-    mcp_ids: Optional[List[int]] = None
-    skill_ids: Optional[List[str]] = None
+    mcp_ids: Optional[List[int]] = Field(
+        default=None,
+        description="[兼容旧版] MCP ID 列表；优先使用 mcps 字段",
+    )
+    mcps: Optional[List[McpBindingItem]] = Field(
+        default=None,
+        description="能力市场中的 MCP 列表（含 id + name）",
+    )
+    skill_ids: Optional[List[str]] = Field(
+        default=None,
+        description="[兼容旧版] market_skill_id 列表；优先使用 skills 字段",
+    )
+    skills: Optional[List[SkillBindingItem]] = Field(
+        default=None,
+        description="能力市场中的 Skill 列表（含 id + name）",
+    )
 
 
-async def _validate_creator_mcp_ids(user_id: str, mcp_ids: List[int]) -> Optional[str]:
+async def _resolve_mcp_names(user_id: str, mcp_ids: List[int]) -> Dict[int, str]:
+    """从用户的 MCP catalog 中批量解析名称。"""
     if not mcp_ids:
-        return None
+        return {}
     try:
-        items, _source = await _resolve_mcp_source_list(user_id)
-        allowed = {int(i.get("id")) for i in items if i.get("id")}
-        invalid = [m for m in mcp_ids if int(m) not in allowed]
-        if invalid:
-            return f"MCP ID 无效或未订阅: {invalid}"
-    except Exception as e:
-        if app_config.MCP_USE_MOCK or app_config.ENVIRONMENT == "development":
-            return None
-        return f"无法校验 MCP 列表: {e}"
-    return None
+        mcp_list, _ = await _resolve_mcp_source_list(user_id)
+        return {int(m["id"]): m["name"] for m in mcp_list if m.get("id") and m.get("name")}
+    except Exception:
+        return {}
 
 
 from utils.agent_avatar import avatar_color_from_seed
@@ -106,9 +138,6 @@ async def create_agent(body: SubscriptionAgentCreate = Body(...)):
     vis = (body.visibility or "public").lower()
     if vis not in ("public", "private"):
         return ApiResponse.error(msg="visibility 须为 public 或 private", code=400)
-    err = await _validate_creator_mcp_ids(body.user_id, body.mcp_ids)
-    if err:
-        return ApiResponse.error(msg=err, code=400)
     agent_id = await deep_storage.create_user_agent(
         body.user_id,
         body.name,
@@ -117,11 +146,31 @@ async def create_agent(body: SubscriptionAgentCreate = Body(...)):
         visibility=vis,
         config=body.config,
     )
-    if body.mcp_ids:
-        await deep_storage.set_agent_mcp_bindings(agent_id, body.mcp_ids)
-    if body.skill_ids:
+    # MCP 绑定：优先使用 mcps（含名称），兼容旧 mcp_ids
+    if body.mcps:
+        mcp_ids = [m.id for m in body.mcps]
+        mcp_names = {m.id: m.name for m in body.mcps if m.name}
+    elif body.mcp_ids:
+        mcp_ids = body.mcp_ids
+        mcp_names = await _resolve_mcp_names(body.user_id, body.mcp_ids)
+    else:
+        mcp_ids = []
+        mcp_names = {}
+    if mcp_ids:
+        await deep_storage.set_agent_mcp_bindings(agent_id, mcp_ids, mcp_names=mcp_names)
+    # Skill 绑定：优先使用 skills（含名称），兼容旧 skill_ids
+    if body.skills:
+        skill_id_list = [s.id for s in body.skills]
+        skill_name_map = {s.id: s.name for s in body.skills if s.name}
+    elif body.skill_ids:
+        skill_id_list = body.skill_ids
+        skill_name_map = None
+    else:
+        skill_id_list = []
+        skill_name_map = None
+    if skill_id_list:
         market_ids = await deep_storage.set_agent_skill_bindings(
-            agent_id, body.user_id, body.skill_ids
+            agent_id, body.user_id, skill_id_list, skill_names=skill_name_map
         )
         sync_skills_to_agent(agent_id, market_ids)
     return ApiResponse.success(data={"agent_id": agent_id})
@@ -140,25 +189,19 @@ async def get_agent(agent_id: str, user_id: str = Query(...)):
     mcps = []
     if mcp_ids:
         name_map: Dict[int, str] = {}
-        # 优先用创建者的 MCP catalog
+        # L1: 创建者的 MCP catalog
         creator_id = agent.get("user_id") or agent.get("creator_user_id") or ""
         if creator_id:
-            try:
-                mcp_list, _ = await _resolve_mcp_source_list(creator_id)
-                name_map = {int(m["id"]): m["name"] for m in mcp_list if m.get("id")}
-            except Exception:
-                name_map = {}
-        # 创建者 catalog 未命中的 MCP，fallback 到查看者的 catalog
+            name_map.update(await _resolve_mcp_names(creator_id, mcp_ids))
+        # L2: 查看者的 MCP catalog（兜底未命中的）
         missing_ids = [mid for mid in mcp_ids if mid not in name_map or not name_map[mid]]
         if missing_ids and user_id != creator_id:
-            try:
-                viewer_list, _ = await _resolve_mcp_source_list(user_id)
-                for m in viewer_list:
-                    mid = int(m.get("id") or 0)
-                    if mid in missing_ids and m.get("name"):
-                        name_map[mid] = m["name"]
-            except Exception:
-                pass
+            name_map.update(await _resolve_mcp_names(user_id, missing_ids))
+        # L3: DB 快照（最终兜底）
+        snapshots = await deep_storage.get_agent_mcp_snapshot_names(agent_id)
+        for mid, snap_name in snapshots.items():
+            if mid in mcp_ids and (mid not in name_map or not name_map[mid]):
+                name_map[mid] = snap_name
         for mid in mcp_ids:
             mcps.append({"id": mid, "name": name_map.get(mid, "")})
     agent["mcps"] = mcps
@@ -181,10 +224,6 @@ async def update_agent(
     body: SubscriptionAgentUpdate = Body(...),
     user_id: str = Query(...),
 ):
-    if body.mcp_ids is not None:
-        err = await _validate_creator_mcp_ids(user_id, body.mcp_ids)
-        if err:
-            return ApiResponse.error(msg=err, code=400)
     ok = await deep_storage.update_user_agent(
         agent_id,
         user_id,
@@ -194,14 +233,28 @@ async def update_agent(
         visibility=body.visibility,
         config=body.config,
     )
-    if body.mcp_ids is not None:
-        await deep_storage.set_agent_mcp_bindings(agent_id, body.mcp_ids)
-    if body.skill_ids is not None:
+    if body.mcps is not None or body.mcp_ids is not None:
+        if body.mcps is not None:
+            mcp_ids: List[int] = [m.id for m in body.mcps]
+            mcp_names = {m.id: m.name for m in body.mcps if m.name}
+        else:
+            mcp_ids = list(body.mcp_ids or [])
+            mcp_names = await _resolve_mcp_names(user_id, mcp_ids)
+        await deep_storage.set_agent_mcp_bindings(
+            agent_id, mcp_ids, mcp_names=mcp_names
+        )
+    if body.skills is not None or body.skill_ids is not None:
+        if body.skills is not None:
+            skill_id_list = [s.id for s in body.skills]
+            skill_name_map = {s.id: s.name for s in body.skills if s.name}
+        else:
+            skill_id_list = list(body.skill_ids or [])
+            skill_name_map = None
         market_ids = await deep_storage.set_agent_skill_bindings(
-            agent_id, user_id, body.skill_ids
+            agent_id, user_id, skill_id_list, skill_names=skill_name_map
         )
         sync_skills_to_agent(agent_id, market_ids)
-    if not ok and body.mcp_ids is None and body.skill_ids is None:
+    if not ok and body.mcp_ids is None and body.mcps is None and body.skill_ids is None and body.skills is None:
         return ApiResponse.error(msg="无更新或 Agent 不存在", code=404)
     # 切换为私有时冻结所有订阅者
     if body.visibility == "private":

@@ -729,7 +729,7 @@ async def hard_delete_user_agent(agent_id: str, user_id: str) -> bool:
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # 1. 冻结所有使用该智能体的活跃会话
+            # 1. 冻结所有订阅者的活跃会话（仅禁止新对话，保留历史记录可查看）
             await conn.execute(
                 """
                 UPDATE user_sessions SET subscription_frozen = TRUE, updated_at = CURRENT_TIMESTAMP
@@ -746,14 +746,15 @@ async def hard_delete_user_agent(agent_id: str, user_id: str) -> bool:
                 """,
                 _uuid(agent_id),
             )
-            # 3. 软删除关联会话
+            # 3. 仅软删除创建者自己的会话（订阅者的会话保留在列表中）
             await conn.execute(
                 """
                 UPDATE user_sessions
                 SET is_deleted = TRUE, updated_at = CURRENT_TIMESTAMP
-                WHERE agent_id = $1 AND agent_kind = 'subscription'
+                WHERE agent_id = $1 AND agent_kind = 'subscription' AND user_id = $2
                 """,
                 _uuid(agent_id),
+                user_id,
             )
             # 4. 删除关联的运行记录
             await conn.execute(
@@ -793,8 +794,12 @@ async def freeze_agent_subscribers(agent_id: str, owner_user_id: str) -> None:
             )
 
 
-async def set_agent_mcp_bindings(agent_id: str, mcp_ids: List[int]) -> None:
+async def set_agent_mcp_bindings(
+    agent_id: str, mcp_ids: List[int], *, mcp_names: Dict[int, str] | None = None
+) -> None:
+    """写入 MCP 绑定，可选存储名称快照。"""
     pool = await db_manager.get_pool()
+    names = mcp_names or {}
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -802,10 +807,15 @@ async def set_agent_mcp_bindings(agent_id: str, mcp_ids: List[int]) -> None:
                 _uuid(agent_id),
             )
             for mid in mcp_ids:
+                name = (names.get(int(mid)) or "").strip() or None
                 await conn.execute(
-                    "INSERT INTO user_agent_mcp_bindings (agent_id, mcp_id) VALUES ($1, $2)",
+                    """
+                    INSERT INTO user_agent_mcp_bindings (agent_id, mcp_id, snapshot_mcp_name)
+                    VALUES ($1, $2, $3)
+                    """,
                     _uuid(agent_id),
                     int(mid),
+                    name,
                 )
             await conn.execute(
                 """
@@ -824,6 +834,21 @@ async def get_agent_mcp_ids(agent_id: str) -> List[int]:
             _uuid(agent_id),
         )
         return [r["mcp_id"] for r in rows]
+
+
+async def get_agent_mcp_snapshot_names(agent_id: str) -> Dict[int, str]:
+    """获取智能体绑定的 MCP 名称快照 {mcp_id: snapshot_mcp_name}。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT mcp_id, snapshot_mcp_name FROM user_agent_mcp_bindings WHERE agent_id = $1",
+            _uuid(agent_id),
+        )
+        return {
+            r["mcp_id"]: r["snapshot_mcp_name"]
+            for r in rows
+            if r.get("snapshot_mcp_name")
+        }
 
 
 async def get_or_create_default_agent(user_id: str) -> str:
@@ -1237,40 +1262,59 @@ async def get_agent_skill_install_dirs(
 async def set_agent_skill_bindings(
     agent_id: str,
     creator_user_id: str,
-    installed_skill_ids: List[str],
+    market_skill_ids: List[str],
+    *,
+    skill_names: Dict[str, str] | None = None,
 ) -> List[str]:
-    """绑定 skill 并写入路径快照；返回收集到的 market_skill_id 列表。"""
-    market_skill_ids: List[str] = []
+    """绑定 skill（从能力市场选择）并写入快照；返回绑定的 market_skill_id 列表。"""
+    names = skill_names or {}
     pool = await db_manager.get_pool()
+    bound: List[str] = []
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(
                 "DELETE FROM user_agent_skill_bindings WHERE agent_id = $1",
                 _uuid(agent_id),
             )
-            for sid in installed_skill_ids:
-                row = await conn.fetchrow(
-                    """
-                    SELECT id, install_dir, skill_name, market_skill_id FROM user_installed_skills
-                    WHERE id = $1 AND user_id = $2
-                    """,
-                    _uuid(sid),
-                    creator_user_id,
-                )
-                if not row:
+            for sid in market_skill_ids:
+                sid = (sid or "").strip()
+                if not sid:
                     continue
-                market_skill_ids.append(row["market_skill_id"])
+                # 名称优先级：前端传入 > skill_catalog > id 兜底
+                skill_name = (names.get(sid) or "").strip()
+                if not skill_name:
+                    cat = await conn.fetchrow(
+                        "SELECT name FROM skill_catalog WHERE skill_id = $1", sid
+                    )
+                    skill_name = cat["name"] if cat else sid
+
+                # 尝试获取创建者的安装记录（若已安装则关联，用于卸载时的绑定检查）
+                installed_row = await conn.fetchrow(
+                    """SELECT id FROM user_installed_skills
+                       WHERE user_id = $1 AND market_skill_id = $2""",
+                    creator_user_id,
+                    sid,
+                )
+                installed_id = installed_row["id"] if installed_row else None
+
+                # snapshot_install_dir 记录实际运行时路径
+                from deep_agent_server.workspace import get_agent_skills_dir
+                agent_skill_dir = str(get_agent_skills_dir(agent_id) / sid)
+
                 await conn.execute(
                     """
                     INSERT INTO user_agent_skill_bindings (
-                        agent_id, installed_skill_id, snapshot_install_dir, snapshot_skill_name
-                    ) VALUES ($1, $2, $3, $4)
+                        agent_id, installed_skill_id, snapshot_install_dir,
+                        snapshot_skill_name, market_skill_id
+                    ) VALUES ($1, $2, $3, $4, $5)
                     """,
                     _uuid(agent_id),
-                    row["id"],
-                    row["install_dir"],
-                    row["skill_name"],
+                    installed_id,
+                    agent_skill_dir,
+                    skill_name,
+                    sid,
                 )
+                bound.append(sid)
             await conn.execute(
                 """
                 UPDATE user_agents SET config_version = config_version + 1, updated_at = CURRENT_TIMESTAMP
@@ -1278,69 +1322,51 @@ async def set_agent_skill_bindings(
                 """,
                 _uuid(agent_id),
             )
-    return market_skill_ids
+    return bound
 
 
 async def get_agent_skill_binding_ids(agent_id: str) -> List[str]:
+    """返回智能体绑定的 market_skill_id 列表。"""
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT installed_skill_id FROM user_agent_skill_bindings WHERE agent_id = $1",
+            "SELECT market_skill_id FROM user_agent_skill_bindings WHERE agent_id = $1",
             _uuid(agent_id),
         )
-        return [str(r["installed_skill_id"]) for r in rows]
+        return [r["market_skill_id"] for r in rows if r.get("market_skill_id")]
 
 
 async def get_agent_skill_names(agent_id: str) -> List[Dict[str, str]]:
-    """获取智能体绑定的 Skill 名称列表（含 installed_skill_id 和 snapshot_skill_name）。"""
-    pool = await db_manager.get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT installed_skill_id, snapshot_skill_name FROM user_agent_skill_bindings WHERE agent_id = $1",
-            _uuid(agent_id),
-        )
-        return [
-            {
-                "installed_skill_id": str(r["installed_skill_id"]),
-                "skill_name": r["snapshot_skill_name"],
-            }
-            for r in rows
-        ]
+    """获取智能体绑定的 Skill 名称列表。
 
-
-async def get_agent_market_skill_ids(agent_id: str) -> List[str]:
-    """获取智能体绑定的 market_skill_id 列表。
-
-    优先级：user_installed_skills.market_skill_id > snapshot_skill_name >
-    snapshot_install_dir 的末尾目录名。
+    名称优先级：snapshot_skill_name > skill_catalog.name > market_skill_id 兜底。
     """
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """
-            SELECT
-                COALESCE(
-                    uis.market_skill_id,
-                    NULLIF(b.snapshot_skill_name, ''),
-                    b.snapshot_install_dir
-                ) AS skill_id
-            FROM user_agent_skill_bindings b
-            LEFT JOIN user_installed_skills uis ON b.installed_skill_id = uis.id
-            WHERE b.agent_id = $1
-            """,
+            """SELECT b.market_skill_id, b.snapshot_skill_name, c.name AS catalog_name
+               FROM user_agent_skill_bindings b
+               LEFT JOIN skill_catalog c ON c.skill_id = b.market_skill_id
+               WHERE b.agent_id = $1""",
             _uuid(agent_id),
         )
-        result: List[str] = []
+        result: List[Dict[str, str]] = []
         for r in rows:
-            raw = (r.get("skill_id") or "").strip()
-            if not raw:
-                continue
-            # 若是路径格式 (如 /data/.../skills/my-skill)，提取末尾目录名
-            if "/" in raw:
-                raw = raw.rstrip("/\\").rsplit("/", 1)[-1]
-            if raw and raw not in result:
-                result.append(raw)
+            mid = r["market_skill_id"] or ""
+            name = r["snapshot_skill_name"] or r["catalog_name"] or mid
+            result.append({"installed_skill_id": mid, "skill_name": name})
         return result
+
+
+async def get_agent_market_skill_ids(agent_id: str) -> List[str]:
+    """获取智能体绑定的 market_skill_id 列表（直接读 market_skill_id 列）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT market_skill_id FROM user_agent_skill_bindings WHERE agent_id = $1",
+            _uuid(agent_id),
+        )
+        return [r["market_skill_id"] for r in rows if r.get("market_skill_id")]
 
 
 async def list_all_subscription_agent_ids() -> List[str]:

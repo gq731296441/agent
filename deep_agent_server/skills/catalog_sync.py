@@ -10,6 +10,7 @@ from config.config import app_config
 from config import get_logger
 from db import deep_storage
 from deep_agent_server.skills.parser import parse_skill_md
+from deep_agent_server.skills.selector import BUILTIN_SKILL_IDS
 
 logger = get_logger(__name__)
 
@@ -44,6 +45,10 @@ def scan_skill_repo(repo_root: str | Path | None = None) -> List[SkillCatalogEnt
             continue
         skill_id = child.name
         if skill_id.startswith(".") or ".." in skill_id:
+            continue
+        # 内置默认技能不入 catalog（不参与订阅/退订）
+        if skill_id in BUILTIN_SKILL_IDS:
+            logger.debug(f"[SkillSync] 跳过内置技能: {skill_id}")
             continue
         if not (child / "SKILL.md").is_file():
             continue

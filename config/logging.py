@@ -64,7 +64,7 @@ def setup_logging(
     # 确保日志目录存在
     log_path = Path(log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # 添加文件日志，支持轮转和自动清理
     logger.add(
         log_file,
@@ -82,7 +82,12 @@ def setup_logging(
         diagnose=diagnose,
         enqueue=True,          # 异步写入，提高性能
     )
-    
+
+    # 抑制 LangGraph Store batch 后台 Task 被取消时的 asyncio 噪音警告
+    # "Task was destroyed but it is pending!" — 无害，是 langgraph 内部清理时序问题
+    import logging as _stdlib_logging
+    _stdlib_logging.getLogger("asyncio").setLevel(_stdlib_logging.CRITICAL)
+
     logger.info(f"📝 日志系统初始化完成 - 级别: {log_level}, 文件: {log_file}")
 
 

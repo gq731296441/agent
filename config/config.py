@@ -95,7 +95,7 @@ class BaseConfig(BaseSettings):
     MCP_CACHE_TTL: int = Field(default=600, description="MCP 工具验证缓存 TTL（秒）")
     MCP_VALIDATE_TIMEOUT: float = Field(default=8.0, description="单个 MCP 连通性探测超时（秒）")
     MCP_USER_TOOLS_CACHE_TTL: int = Field(default=120, description="用户 MCP 工具列表接口响应缓存 TTL（秒）")
-    AGENT_CACHE_ENABLED: bool = Field(default=False, description="是否启用 Agent 编译图会话级缓存")
+    AGENT_CACHE_ENABLED: bool = Field(default=True, description="是否启用 Agent 编译图会话级缓存")
     TOOL_JUDGE_SKIP_MAX_CHARS: int = Field(default=500, description="工具结果低于此字符数时跳过 judge LLM")
 
     # ==================== Deep Agent 配置 ====================
@@ -108,6 +108,8 @@ class BaseConfig(BaseSettings):
         ),
     )
     DEEP_TIMEOUT_SECONDS: int = Field(default=600, description="Deep Agent 单次运行超时（秒）")
+    LLM_RATE_LIMIT_BASE_WAIT: float = Field(default=10.0, description="429 限流退避基础等待（秒）")
+    LLM_RATE_LIMIT_MAX_WAIT: float = Field(default=120.0, description="429 限流退避单次最大等待（秒）")
     HITL_ENABLED: bool = Field(default=False, description="全局 HITL 开关。False 时 Agent 自动执行工具调用，无需人工审批")
     HITL_PENDING_TTL_MINUTES: int = Field(default=30, description="HITL 待审批超时（分钟），超时后自动终止 run")
     HITL_SWEEPER_INTERVAL_SECONDS: int = Field(default=60, description="HITL 过期扫描间隔（秒）；0=禁用")

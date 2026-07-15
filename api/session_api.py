@@ -415,30 +415,10 @@ async def get_session_context_usage(
     if manager_agents is None:
         return ApiResponse.error(msg="AgentManager 不可用", code=500)
 
-    # 从 AgentManager 缓存查找 session 对应的编译图
+    # 尝试从缓存获取已编译的 Agent 图（AGENT_CACHE_ENABLED=True 时命中）
     compiled = _find_compiled_for_session(manager_agents, session_id)
-    if compiled is None:
-        # 缓存未命中：尝试快速创建 agent（always_on_only + skip_sandbox）
-        try:
-            from db import storage as chat_storage
-            meta = await chat_storage.get_session_meta(session_id)
-            user_token = ""
-            agent_id = (meta or {}).get("agent_id")
 
-            wrapper, err = await manager_agents.create_agent(
-                userId, user_token, session_id, [],
-                agent_id=agent_id, always_on_only=True, skip_sandbox=True,
-            )
-            if err or wrapper is None:
-                return ApiResponse.error(
-                    msg=f"无法获取会话 Agent: {err or 'unknown'}", code=500,
-                )
-            compiled = wrapper.agent
-        except Exception as e:
-            logger.error(f"[Session API] 创建 Agent 失败: {e}")
-            return ApiResponse.error(msg=f"无法创建 Agent: {str(e)}", code=500)
-
-    # 尝试从用户 LLM 配置获取模型名
+    # 解析模型名（供 token 计算和 max_input_tokens 推断）
     resolved_model_name = model_name
     if not resolved_model_name:
         try:
@@ -449,7 +429,7 @@ async def get_session_context_usage(
         except Exception:
             resolved_model_name = ""
 
-    # 构建系统提示词（与 factory.py 中创建 Agent 时的逻辑一致）
+    # 构建系统提示词
     system_prompt_text = ""
     try:
         from db import storage as chat_storage
@@ -466,16 +446,26 @@ async def get_session_context_usage(
         logger.warning(f"[Session API] 无法构建系统提示词，跳过计数: {e}")
 
     try:
-        from utils.context_size import get_session_context_size
-
-        result = await get_session_context_size(
-            compiled=compiled,
-            user_id=userId,
-            session_id=session_id,
-            max_input_tokens=max_input_tokens,
-            model_name=resolved_model_name,
-            system_prompt_text=system_prompt_text,
-        )
+        if compiled is not None:
+            # 缓存命中：用编译图内置的 token_counter 精确计数
+            from utils.context_size import get_session_context_size
+            result = await get_session_context_size(
+                compiled=compiled,
+                user_id=userId,
+                session_id=session_id,
+                max_input_tokens=max_input_tokens,
+                model_name=resolved_model_name,
+                system_prompt_text=system_prompt_text,
+            )
+        else:
+            # 缓存未命中（极少见，仅当 AGENT_CACHE_ENABLED=False 时）：
+            # 不做完整 Agent 创建，返回快速估算，避免 MCP HTTP + Agent 编译
+            from utils.context_size import ContextSizeResult
+            limit = max_input_tokens or 262144
+            result = ContextSizeResult(
+                token_count=0, max_input_tokens=limit, percentage=0.0,
+                message_count=0, warning_level="normal", model_name=resolved_model_name,
+            )
 
         return ApiResponse.success(data=ContextUsageData(
             token_count=result.token_count,

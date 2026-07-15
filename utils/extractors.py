@@ -11,7 +11,6 @@
 
 from typing import Optional, Dict, List, Any, Tuple
 import json
-from json_repair import repair_json
 from config import get_logger
 
 logger = get_logger(__name__)
@@ -286,29 +285,32 @@ class ToolCallAccumulator:
     
     def parse_and_clear(self) -> List[Dict[str, Any]]:
         """解析所有累积的工具调用并清空缓冲区。
-        
+
         自动过滤：
         1. 不完整（缺少 name 或 id）的无效工具调用
         2. 不在已注册工具列表中的幻觉工具调用
-        
+
+        不对 JSON 解析做拦截或修复 —— 解析失败时返回空字典，
+        让 LLM 流式参数自然拼接，由下游 Pydantic 校验反馈错误。
+
         Returns:
             工具调用数据列表，每项包含 tool_name, args, tool_call_id
         """
         if not self._accumulated:
             return []
-        
+
         result = []
         for idx, tc in self._accumulated.items():
             try:
                 tool_name = tc.get("name")
                 args_str = tc.get("args", "{}")
                 tool_id = tc.get("id")
-                
+
                 # 过滤掉不完整的工具调用（LLM 产生的 invalid_tool_calls 可能缺少关键字段）
                 if not tool_name or not tool_id:
                     logger.warning(f"【Extractor】跳过不完整的工具调用 index={idx}: name={tool_name}, id={tool_id}")
                     continue
-                
+
                 # 校验工具是否在已注册的工具列表中，过滤 LLM 幻觉产生的虚假工具
                 if self._valid_tool_names and tool_name not in self._valid_tool_names:
                     logger.warning(
@@ -317,31 +319,16 @@ class ToolCallAccumulator:
                         f"可用工具: {self._valid_tool_names}"
                     )
                     continue
-                
-                # 解析参数字符串为字典
+
+                # 解析参数字符串为字典。不拦截、不修复，让 LLM 流式输出的
+                # 参数自然拼接。解析失败时用空字典兜底，由下游 Pydantic 校验
+                # 生成错误反馈给模型。
                 args_dict = {}
                 if args_str:
                     try:
                         args_dict = json.loads(args_str)
-                    except (json.JSONDecodeError, TypeError) as e:
-                        # LLM 流式拼接可能产生畸形 JSON（缺括号、缺引号等），
-                        # 使用 json_repair 尝试自动修复
-                        logger.warning(
-                            f"【Extractor】Tool Args 标准解析失败，尝试自动修复: {e}"
-                        )
-                        try:
-                            args_dict = repair_json(args_str, return_objects=True)
-                            if not isinstance(args_dict, dict):
-                                args_dict = {"raw_args": args_dict}
-                            logger.info(
-                                f"【Extractor】Tool Args 自动修复成功: {list(args_dict.keys())}"
-                            )
-                        except Exception as repair_err:
-                            logger.error(
-                                f"【Extractor】Tool Args 自动修复也失败: {repair_err}, "
-                                f"Content: {args_str}"
-                            )
-                            args_dict = {"raw_args": args_str}
+                    except (json.JSONDecodeError, TypeError):
+                        args_dict = {}
 
                 result.append({
                     "tool_name": tool_name,
@@ -351,7 +338,7 @@ class ToolCallAccumulator:
             except Exception as e:
                 logger.error(f"【Extractor】解析工具调用 index={idx} 时异常: {e}, 已跳过")
                 continue
-        
+
         self._accumulated.clear()
         return result
     

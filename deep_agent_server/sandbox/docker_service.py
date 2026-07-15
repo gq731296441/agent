@@ -171,8 +171,10 @@ class DockerSandboxService(SandboxService):
     async def _finalize_running_container(
         self, user_id: str, session_id: str, container_id: str
     ) -> None:
-        """宿主机 + 容器内统一工作区权限：/workspace 可写，.sandbox 只读。"""
-        await ensure_session_dirs(user_id, session_id)
+        """宿主机 + 容器内统一工作区权限：/workspace 可写，.sandbox 只读。
+
+        注意：不调用 ensure_session_dirs —— 调用方（ensure_with_skills/ensure_running）
+        已在容器创建前确保目录存在，此处只需修正权限。"""
         await asyncio.to_thread(
             ensure_session_workspace_permissions, user_id, session_id
         )

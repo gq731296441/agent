@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import random
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -427,6 +428,30 @@ async def run_deep_agent(
 
                 if should_retry(classification) and retry_count < max_retries:
                     retry_count += 1
+
+                    # 429 / 限流：指数退避后重试，避免立即重试加剧限流
+                    if classification.category == "rate_limit":
+                        base = app_config.LLM_RATE_LIMIT_BASE_WAIT
+                        cap = app_config.LLM_RATE_LIMIT_MAX_WAIT
+                        wait = min(base * (2 ** (retry_count - 1)), cap)
+                        jitter = random.uniform(0, wait * 0.15)
+                        total_wait = wait + jitter
+                        logger.warning(
+                            f"[DeepRunner] 429 限流，等待 {total_wait:.0f}s 后重试 "
+                            f"(第 {retry_count}/{max_retries} 次)"
+                        )
+                        yield AgentMessage(
+                            type=MessageType.STATUS,
+                            sender=SenderType.SYSTEM,
+                            session_id=session_id,
+                            content={
+                                "text": f"API 限流，等待 {total_wait:.0f}s 后重试 "
+                                        f"(第 {retry_count}/{max_retries} 次)…"
+                            },
+                            save=False,
+                        ).to_dict()
+                        await asyncio.sleep(total_wait)
+
                     stream_input = {"messages": [HumanMessage(content="请继续完成之前的任务。")]}
                     continue
 
@@ -558,6 +583,21 @@ async def _stream(
         # _rdbg.info(f"[STREAM] mode={mode}, {_chunk_repr}")
 
         if mode == "tools":
+            # tools 事件走 adapt_tools_stream_chunk，会绕过 _adapt_messages_chunk 中的
+            # model→tools 转换检测（adapter.py:798），导致模型生成的 CHAT 文本未在
+            # 工具调用之前刷新落库。此处兜底：若有待刷新的 model 段文本，先刷再发工具调用。
+            if adapter._current_llm_text or adapter._current_reasoning_text:
+                async for msg in adapter.finalize_model_segment():
+                    async for out in _yield_adapter_messages(
+                        msg, adapter, compiled, config, agent_wrapper, store
+                    ):
+                        yield out
+                async for msg in adapter._emit_pending_tool_starts():
+                    async for out in _yield_adapter_messages(
+                        msg, adapter, compiled, config, agent_wrapper, store
+                    ):
+                        yield out
+
             async for msg in adapter.adapt_tools_stream_chunk(namespace, chunk):
                 async for out in _yield_adapter_messages(
                     msg, adapter, compiled, config, agent_wrapper, store

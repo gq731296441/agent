@@ -18,8 +18,10 @@ from deep_agent_server.backend_factory import (
     build_interrupt_on,
     build_permissions,
 )
+from agent_server.middleware.RateLimitMiddleware import RateLimitMiddleware
 from deep_agent_server.middleware.context_overflow_guard import ContextOverflowGuardMiddleware
 from deep_agent_server.sandbox import get_sandbox_backend_factory_if_enabled
+# import deep_agent_server.tool_patches  # noqa: F401 — 模块导入即生效：替换 write_file/edit_file 描述为分块版本
 
 
 # ---- 替换 _get_approximate_token_counter 为准确版本 ----
@@ -337,11 +339,16 @@ async def create_deep_agent_instance(
                 backend = sandbox_backend_factory(None)
                 sandbox_mode = True
         system_prompt += build_skills_system_prompt(metas, sandbox_mode=sandbox_mode)
+        from deep_agent_server.skills.selector import BUILTIN_SKILL_IDS
         allowed_skill_ids = None
         if selected_skill_ids is not None:
             allowed_skill_ids = [
                 str(s).strip() for s in selected_skill_ids if str(s).strip()
             ]
+            # 内置默认技能始终加入权限白名单
+            for bid in BUILTIN_SKILL_IDS:
+                if bid not in allowed_skill_ids:
+                    allowed_skill_ids.append(bid)
 
         subagents = config.get("subagents") or None
         interrupt_on = build_interrupt_on(config) if app_config.AGENT_RUNTIME == "deep" else None
@@ -363,6 +370,15 @@ async def create_deep_agent_instance(
         # 使 SummarizationMiddleware 的兜底摘要重试机制能正常触发。
         overflow_guard = ContextOverflowGuardMiddleware()
 
+        # RateLimitMiddleware：429 限流时长时间退避重试，避免 agent 任务崩溃。
+        # OpenAI client 内置 max_retries=10 处理短时波动（~55s），
+        # 此中间件处理持续限流：30s→45s→67s→100s→120s(封顶)，直至 DEEP_TIMEOUT 触发。
+        rate_limit_mw = RateLimitMiddleware(
+            max_retries=50,           # 远超 DEEP_TIMEOUT 内可完成的重试次数
+            base_wait_seconds=30.0,
+            max_wait_seconds=120.0,
+        )
+
         agent = create_deep_agent(
             model=model,
             tools=mcp_tools or [],
@@ -374,7 +390,7 @@ async def create_deep_agent_instance(
             subagents=subagents,
             checkpointer=checkpointer,
             store=store,
-            middleware=[overflow_guard],
+            middleware=[overflow_guard, rate_limit_mw],
         )
         trigger_metas = loaded_skill_metas or []
         logger.info(

@@ -57,18 +57,28 @@ class _DockerExecBackend(SandboxBackendProtocol):
 
     def _exec_sync(self, command: str, timeout: int) -> tuple[str, int]:
         client = get_docker_client()
-        c = client.containers.get(self.container_id)
+        try:
+            c = client.containers.get(self.container_id)
+        except Exception as e:
+            return f"沙箱容器不可用: {e}", 1
         exec_env = build_exec_user_env(self.user_id, self.user_token)
         prefix = shell_env_prefix(exec_env)
         kwargs: dict = {"workdir": "/workspace", "demux": False}
         if exec_env:
             kwargs["environment"] = exec_env
         cmd = prefix + command if prefix else command
-        code, out = c.exec_run(
-            ["bash", "-lc", cmd],
-            user="root",
-            **kwargs,
-        )
+        try:
+            code, out = c.exec_run(
+                ["bash", "-lc", cmd],
+                user="root",
+                **kwargs,
+            )
+        except Exception as e:
+            # 容器可能已被 TTL 清理或异常退出，返回友好错误让模型感知
+            msg = str(e) or repr(e)
+            if "not running" in msg:
+                return "沙箱容器已停止（可能因空闲超时被回收），请重试或开启新会话", 1
+            return f"沙箱执行失败: {msg}", 1
         text = out.decode("utf-8", errors="replace") if out else ""
         return text, int(code)
 

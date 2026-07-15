@@ -27,6 +27,7 @@ _SANDBOX_SECTION = """
 当沙箱启用时，系统提供一个隔离的 Docker 容器用于命令执行：
 
 - **文件工具**（`read_file`、`write_file`、`edit_file`、`ls`、`glob`、`grep`）在**宿主机**上执行，使用 `/skills/`、`/workspace/` 路径。
+- 创建和写入文件时需要遵循 **工作区文件写入和编辑策略**，严禁一次性写入大量数据，否则会导致超时失败。
 - **`execute` 工具**在**沙箱容器内**执行，工作目录为 `/workspace`。
 - 容器内 `/workspace` 与宿主机 `/workspace/` 是同一份共享数据，通过 NFS 或 bind mount 实时同步。
 - 技能在容器内的只读挂载路径为 `/mnt/skills/{{skill_id}}/`，内容与 `/skills/{{skill_id}}/` 一致。
@@ -57,20 +58,18 @@ _MCP_SKILL_SECTION = """
   2. 完整说明在 `/skills/{{skill_id}}/SKILL.md` 中，使用 `read_file` 按需读取。
   3. 技能中的脚本通过 `execute` 在容器内运行，路径使用 `/mnt/skills/{{skill_id}}/`。
 - 未在下方列出的技能均处于**已关闭**状态，不要尝试访问或绕过限制。
-"""
 
-_TOOL_RULES_SECTION = """
-# 操作规范
-
-## 工具调用规范
+**网页制作专项技能**：
+- `vanilla-web-builder` 和 `frontend-design` 是网页制作的核心技能，当用户请求涉及网页、HTML、网站制作、前端页面时会自动加载。
+- **这些任务必须结合两个技能来完成**：
+  1. 先读取技能说明：`read_file(file_path="/skills/vanilla-web-builder/SKILL.md")` 和 `read_file(file_path="/skills/frontend-design/SKILL.md")`（注意路径前缀 `/skills/`）
+  2. `frontend-design` 负责视觉设计方向（配色、排版、美学决策）
+  3. `vanilla-web-builder` 负责技术实现，必须严格按照该技能的指导去创建网页（分块构建 HTML/CSS/JS 单文件）
+  4. 严格遵循两个技能的指导，不得绕过。
 
 **选择与调用：**
 - 用户选择的工具和skill技能会随时改变，调用前需确认工具是否开启。
 - 工具和技能中的 token 参数以系统提示中的'用户token'为准，不使用过期 token。
-
-**参数提取：**
-- 从用户描述中精准提取参数，工具、技能脚本参数填写准确。。
-- 涉及用户身份、组织、权限的参数，必须与当前用户上下文校验一致。
 
 **容错与重试（最多 3 次）：**
 - 参数错误 → 修正后重试（同一参数最多重试 1 次）。
@@ -78,6 +77,28 @@ _TOOL_RULES_SECTION = """
 - 服务异常 → 告知系统暂时不可用，建议稍后重试。
 - 数据不存在 → 如实反馈"未查询到相关结果"，提供排查建议。
 - 同类型问题累计失败 3 次，向用户报告错误并**停止重试**。
+
+"""
+
+_FILE_WRITING_STRATEGY = """
+# 工作区文件创建和编辑策略
+
+## 核心规则
+- 灵活使用 `write_file`、`read_file` 和 `edit_file` 工具进行创建和编辑文件。
+- 同一文件只调用一次 `write_file`工具，后续修改全部用 `edit_file`工具。
+
+## 分块流程
+1. **规划**：首先调用 `write_todos` 工具，创建包含所有内容块的任务清单，每个块不超过 1000 字符。
+2. **骨架**：调用 `write_file` 工具（必须提供 `file_path` 和 `content`）写入最小结构 + 占位符。
+3. **填充**：使用 `edit_file` 工具（必须提供 `file_path`, `old_string`, `new_string`）逐个替换占位符。
+4. **验证**：每完成 2-3 个块，调用 `read_file` 工具检查文件状态。
+5. **收尾**：最后用 `edit_file` 删除残余占位符。
+
+## 注意事项
+- 不要调用 `write_file` / `edit_file`工具 传入超过 1000 字符
+- 遗漏工具的必填参数
+- 不要多次调用 `write_file` 工具覆盖同一文件
+
 """
 
 _SAFETY_BOUNDARIES = """
@@ -101,7 +122,7 @@ _CORE_PRINCIPLES = (
     _ENV_AND_FS_SECTION
     + _SANDBOX_SECTION
     + _MCP_SKILL_SECTION
-    + _TOOL_RULES_SECTION
+    + _FILE_WRITING_STRATEGY
     + _SAFETY_BOUNDARIES
 )
 
@@ -183,7 +204,7 @@ TITLE_GENERATION_PROMPT = """
 ## 目标
 请为以下对话生成一个简洁明了的标题，25字以内。
 标题需准确概括对话的核心主题。
-直接输出标题内容，不要任何多余的解释或引导语。
+直接输出标题正文内容，不要任何多余的解释或引导语，不要使用markdown语法，不要输出标题两字。
 如果对话内容无法明确概括出一个主题，请生成一个通用标题，如"日常对话"。
 
 ## 对话内容：

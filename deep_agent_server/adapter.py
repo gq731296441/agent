@@ -1035,22 +1035,41 @@ class DeepEventAdapter:
                 )
 
     def _merge_accumulated_tool_calls(self) -> None:
-        """将流式 tool_call_chunks 合并进 pending 列表（Deep 无 custom 流 tool_call 事件）。"""
-        for tc in self._tool_call_accumulator.parse_and_clear():
+        """将流式 tool_call_chunks 合并进 pending 列表。
+
+        直接从 accumulator 读取原始累积数据，不经过 parse_and_clear 的
+        JSON 解析，让模型流式参数自然拼接。参数解析由下游 normalize_tool_call
+        统一处理（失败时自动包 _raw）。
+        """
+        raw_accumulated = self._tool_call_accumulator._accumulated
+        for idx, tc in raw_accumulated.items():
+            tool_name = tc.get("name")
+            tool_id = tc.get("id")
+            args_raw = tc.get("args") or ""
+
+            if not tool_name or not tool_id:
+                continue
+
+            # 校验是否为已注册工具（过滤幻觉工具调用）
+            valid_names = self._tool_call_accumulator._valid_tool_names
+            if valid_names and tool_name not in valid_names:
+                continue
+
             entry = {
-                "id": tc["tool_call_id"],
-                "name": tc["tool_name"],
-                "args": tc["args"],
+                "id": tool_id,
+                "name": tool_name,
+                "args": args_raw,  # 原始字符串，不解析，由 normalize_tool_call 兜底
             }
             tc_id = entry["id"]
             if tc_id:
-                self._pending_tool_inputs[tc_id] = tc["args"]
+                self._pending_tool_inputs[tc_id] = args_raw
             existing_ids = {
                 item.get("id") for item in self._pending_tool_calls if isinstance(item, dict)
             }
             if tc_id not in existing_ids:
                 self._pending_tool_calls.append(entry)
-        # parse_and_clear 已清空 accumulator，同步清理流式追踪状态
+
+        self._tool_call_accumulator._accumulated.clear()
         self._streamed_tool_args.clear()
         self._tool_progress_emitted.clear()
 
@@ -1095,6 +1114,12 @@ class DeepEventAdapter:
         result_text = msg.content if isinstance(msg.content, str) else str(msg.content or "")
         tool_call_id = getattr(msg, "tool_call_id", "") or ""
         pending_args = self._pending_tool_inputs.get(tool_call_id, {})
+        # 兼容 _merge_accumulated_tool_calls 透传的原始 args 字符串
+        if isinstance(pending_args, str):
+            try:
+                pending_args = json.loads(pending_args) if pending_args.strip() else {}
+            except json.JSONDecodeError:
+                pending_args = {}
         resolved_name = self._resolve_tool_name(tool_call_id, tool_name, pending_args)
 
         if self._tool_already_completed(tool_call_id):

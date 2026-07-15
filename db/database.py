@@ -324,12 +324,78 @@ class DatabaseManager:
             "ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS skills JSONB DEFAULT '[]'::jsonb",
             "ALTER TABLE user_agents ADD COLUMN IF NOT EXISTS avatar_color TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS install_count BIGINT NOT NULL DEFAULT 0",
+            "ALTER TABLE user_agent_skill_bindings ADD COLUMN IF NOT EXISTS market_skill_id TEXT",
+            "ALTER TABLE user_agent_mcp_bindings ADD COLUMN IF NOT EXISTS snapshot_mcp_name TEXT",
         ]
         for col_sql in alter_columns:
             try:
                 await conn.execute(col_sql)
             except Exception:
                 pass
+
+        # 回填 user_agent_skill_bindings.market_skill_id
+        try:
+            await conn.execute(
+                """
+                UPDATE user_agent_skill_bindings b
+                SET market_skill_id = uis.market_skill_id
+                FROM user_installed_skills uis
+                WHERE b.installed_skill_id = uis.id AND b.market_skill_id IS NULL
+                """
+            )
+        except Exception:
+            pass
+        try:
+            await conn.execute(
+                """
+                UPDATE user_agent_skill_bindings
+                SET market_skill_id = snapshot_skill_name
+                WHERE market_skill_id IS NULL AND snapshot_skill_name IS NOT NULL
+                """
+            )
+        except Exception:
+            pass
+
+        # 第三级回填：从 snapshot_install_dir 提取目录名
+        try:
+            await conn.execute(
+                """
+                UPDATE user_agent_skill_bindings
+                SET market_skill_id = substring(snapshot_install_dir from '[^/]+$')
+                WHERE market_skill_id IS NULL
+                  AND snapshot_install_dir IS NOT NULL
+                  AND snapshot_install_dir <> ''
+                """
+            )
+        except Exception:
+            pass
+
+        # 将 PK 从 (agent_id, installed_skill_id) 迁移到 (agent_id, market_skill_id)
+        # 这样创建者可以直接从能力市场选择 skill（无需先安装）
+        try:
+            await conn.execute(
+                "ALTER TABLE user_agent_skill_bindings DROP CONSTRAINT IF EXISTS user_agent_skill_bindings_pkey"
+            )
+        except Exception:
+            pass
+        try:
+            await conn.execute(
+                "ALTER TABLE user_agent_skill_bindings ALTER COLUMN installed_skill_id DROP NOT NULL"
+            )
+        except Exception:
+            pass
+        try:
+            await conn.execute(
+                "ALTER TABLE user_agent_skill_bindings ALTER COLUMN market_skill_id SET NOT NULL"
+            )
+        except Exception:
+            pass
+        try:
+            await conn.execute(
+                "ALTER TABLE user_agent_skill_bindings ADD PRIMARY KEY (agent_id, market_skill_id)"
+            )
+        except Exception:
+            pass
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_secrets (

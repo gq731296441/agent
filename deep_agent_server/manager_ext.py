@@ -90,13 +90,29 @@ async def _resolve_skill_dirs_for_agent(
     agent_id: str,
     creator_user_id: str,
 ) -> List[str]:
-    if agent_kind == "subscription" and agent_id:
-        from deep_agent_server.workspace import get_agent_skills_dir
+    # 内置技能对所有智能体类型默认可用
+    from deep_agent_server.skills.selector import (
+        _ensure_builtin_skill_in_user_dir,
+        _ensure_builtin_skill_in_user_dir_for_agent,
+        BUILTIN_SKILL_IDS,
+    )
+    from deep_agent_server.workspace import get_agent_skills_dir
 
+    builtin: List[str] = []
+    for bid in BUILTIN_SKILL_IDS:
+        if agent_kind == "subscription" and agent_id:
+            # 订阅智能体：symlink 到 agent skills 目录
+            d = _ensure_builtin_skill_in_user_dir_for_agent(agent_id, bid)
+        else:
+            d = _ensure_builtin_skill_in_user_dir(user_id, bid)
+        if d:
+            builtin.append(d)
+
+    if agent_kind == "subscription" and agent_id:
         root = get_agent_skills_dir(agent_id)
         if not root.is_dir():
-            return []
-        return [
+            return builtin
+        return builtin + [
             str(p) for p in sorted(root.iterdir())
             if p.is_dir() and (p / "SKILL.md").is_file()
         ]
@@ -194,7 +210,37 @@ async def create_deep_agent_for_session(
         f"{mcp_hash}:{token_fp}:{skill_hash}:{sandbox_tag}"
     )
 
-    if app_config.AGENT_CACHE_ENABLED and cache_key in manager._agent_cache:
+    # 订阅智能体的 agent_skills_root 与 agent_id_for_sandbox
+    agent_skills_root = None
+    agent_id_for_sandbox = None
+    if agent_kind == "subscription" and resolved_agent_id:
+        from deep_agent_server.workspace import get_agent_skills_dir
+
+        agent_skills_root = get_agent_skills_dir(resolved_agent_id)
+        agent_id_for_sandbox = resolved_agent_id
+
+    # 沙箱生命周期独立于 Agent 缓存：即使缓存命中，也必须确保沙箱存活。
+    # 容器的 container_id 会随重建而变化，缓存的 Agent wrapper 可能持有旧 ID。
+    sandbox_recreated = False
+    if app_config.SANDBOX_ENABLED and not skip_sandbox:
+        try:
+            mount_result = await ensure_session_skill_mount(
+                user_id,
+                session_id,
+                skill_candidate_dirs,
+                selected_skill_ids,
+                manager=manager,
+                agent_id=agent_id_for_sandbox,
+            )
+            sandbox_recreated = mount_result.recreated
+        except SkillSelectionLockedError as lock_err:
+            return None, lock_err.to_error_payload()
+
+    if (
+        app_config.AGENT_CACHE_ENABLED
+        and not sandbox_recreated  # 沙箱重建后必须刷新 Agent（container_id 变了）
+        and cache_key in manager._agent_cache
+    ):
         cached, cached_fp, cached_mh, cached_aid, cached_sh = manager._agent_cache[cache_key]
         if (
             cached_fp == token_fp
@@ -216,28 +262,6 @@ async def create_deep_agent_for_session(
     from builtin_tools import get_builtin_tools
     builtin_tools = get_builtin_tools(user_id=user_id, user_token=user_token)
     mcp_tools = builtin_tools + mcp_tools  # 内置工具排前面，LLM 优先看到
-
-    # 订阅智能体的 agent_skills_root 与 agent_id_for_sandbox
-    agent_skills_root = None
-    agent_id_for_sandbox = None
-    if agent_kind == "subscription" and resolved_agent_id:
-        from deep_agent_server.workspace import get_agent_skills_dir
-
-        agent_skills_root = get_agent_skills_dir(resolved_agent_id)
-        agent_id_for_sandbox = resolved_agent_id
-
-    if app_config.SANDBOX_ENABLED and not skip_sandbox:
-        try:
-            await ensure_session_skill_mount(
-                user_id,
-                session_id,
-                skill_candidate_dirs,
-                selected_skill_ids,
-                manager=manager,
-                agent_id=agent_id_for_sandbox,
-            )
-        except SkillSelectionLockedError as lock_err:
-            return None, lock_err.to_error_payload()
 
     try:
         llm = await create_agent_llm_for_user(user_id, agent_kind)
