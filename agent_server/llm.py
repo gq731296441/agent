@@ -39,27 +39,27 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
             return None
 
         # 诊断：统计 tool_calls 参数的流式 chunk
-        try:
-            choices = chunk.get("choices", [])
-            if choices:
-                delta = choices[0].get("delta", {})
-                tool_calls = delta.get("tool_calls") or []
-                if tool_calls:
-                    _llm_chunk_counters["tool_args_chunks"] += 1
-                    for tc in tool_calls:
-                        fn = tc.get("function") or {}
-                        args = fn.get("arguments") or ""
-                        _llm_chunk_counters["total"] += 1
-                        args_preview = args[:300] + ("..." if len(args) > 300 else "")
-                        logger.info(
-                            f"[LLM_CHUNK] #{_llm_chunk_counters['total']} "
-                            f"(tc_batch #{_llm_chunk_counters['tool_args_chunks']}), "
-                            f"index={tc.get('index')}, name={fn.get('name')}, "
-                            f"args_len={len(args)}, id={repr(tc.get('id'))}"
-                            f"\n  args_preview={repr(args_preview)}"
-                        )
-        except Exception as e:
-            logger.debug(f"⚠️ [LLM_CHUNK诊断] 提取 tool_calls 参数出错: {e}")
+        # try:
+        #     choices = chunk.get("choices", [])
+        #     if choices:
+        #         delta = choices[0].get("delta", {})
+        #         tool_calls = delta.get("tool_calls") or []
+        #         if tool_calls:
+        #             _llm_chunk_counters["tool_args_chunks"] += 1
+        #             for tc in tool_calls:
+        #                 fn = tc.get("function") or {}
+        #                 args = fn.get("arguments") or ""
+        #                 _llm_chunk_counters["total"] += 1
+        #                 args_preview = args[:300] + ("..." if len(args) > 300 else "")
+        #                 logger.info(
+        #                     f"[LLM_CHUNK] #{_llm_chunk_counters['total']} "
+        #                     f"(tc_batch #{_llm_chunk_counters['tool_args_chunks']}), "
+        #                     f"index={tc.get('index')}, name={fn.get('name')}, "
+        #                     f"args_len={len(args)}, id={repr(tc.get('id'))}"
+        #                     f"\n  args_preview={repr(args_preview)}"
+        #                 )
+        # except Exception as e:
+        #     logger.debug(f"⚠️ [LLM_CHUNK诊断] 提取 tool_calls 参数出错: {e}")
 
         # 从原始 chunk 中提取推理内容（兼容 reasoning_content / reasoning）
         try:

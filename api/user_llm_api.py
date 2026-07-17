@@ -1,5 +1,6 @@
 """用户级 LLM 配置 API。"""
 
+import asyncio
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Body, Query
@@ -8,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from agent_server.llm import create_llm_from_config
 from common.schemas import ApiResponse
+from config import app_config
 from db import deep_storage
 
 router = APIRouter(prefix="/users/me", tags=["user-llm"])
@@ -152,6 +154,7 @@ async def test_llm_config(
             msg="请先保存配置或填写完整的 model、base_url、api_key 后测试",
             code=400,
         )
+    timeout = app_config.LLM_TEST_TIMEOUT_SECONDS
     try:
         llm = create_llm_from_config(
             model=model,
@@ -160,7 +163,10 @@ async def test_llm_config(
             streaming=False,
             use_reasoning=False,
         )
-        resp = await llm.ainvoke([HumanMessage(content="Hi, reply with OK only.")])
+        resp = await asyncio.wait_for(
+            llm.ainvoke([HumanMessage(content="Hi, reply with OK only.")]),
+            timeout=timeout,
+        )
         text = getattr(resp, "content", str(resp))
         return ApiResponse.success(
             data={
@@ -168,6 +174,16 @@ async def test_llm_config(
                 "target": body.target,
                 "reply_preview": str(text)[:200],
             }
+        )
+    except asyncio.TimeoutError:
+        return ApiResponse.error(
+            msg=(
+                f"连接测试超时（{timeout}s），请检查："
+                "1) 模型名称是否正确；"
+                "2) Base URL 是否可达；"
+                "3) API Key 是否有效"
+            ),
+            code=502,
         )
     except Exception as e:
         return ApiResponse.error(msg=f"连接测试失败: {e}", code=502)

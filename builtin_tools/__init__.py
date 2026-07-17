@@ -20,7 +20,9 @@ def get_builtin_tools(user_id: str, user_token: str) -> List:
     后续新增内置工具在此注册。
     """
     from builtin_tools.user_info import create_get_employee_info
+    from builtin_tools.online_search import create_online_search
 
     return [
         create_get_employee_info(user_id=user_id, user_token=user_token),
+        create_online_search(user_id=user_id, user_token=user_token),
     ]

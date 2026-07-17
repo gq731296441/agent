@@ -77,6 +77,10 @@ class BaseConfig(BaseSettings):
         default="https://icenterapi.zte.com.cn/zte-km-icenter-addresearch/user/plain/docs/search",
         description="员工信息查询 API 地址",
     )
+    ONLINE_SEARCH_MCP_URL: str = Field(
+        default="http://nebulacoder.dev.zte.com.cn:40086/mcp",
+        description="联网搜索 MCP Server URL（nebulacoder API 封装，供内置 online_search 工具使用）",
+    )
 
     # ==================== WebSocket 超时配置 ====================
     HEARTBEAT_INTERVAL: int = Field(default=30, description="WebSocket 心跳间隔（秒）")
@@ -108,6 +112,7 @@ class BaseConfig(BaseSettings):
         ),
     )
     DEEP_TIMEOUT_SECONDS: int = Field(default=600, description="Deep Agent 单次运行超时（秒）")
+    LLM_TEST_TIMEOUT_SECONDS: int = Field(default=30, description="用户 LLM 连接测试超时（秒）")
     LLM_RATE_LIMIT_BASE_WAIT: float = Field(default=10.0, description="429 限流退避基础等待（秒）")
     LLM_RATE_LIMIT_MAX_WAIT: float = Field(default=120.0, description="429 限流退避单次最大等待（秒）")
     HITL_ENABLED: bool = Field(default=False, description="全局 HITL 开关。False 时 Agent 自动执行工具调用，无需人工审批")
@@ -136,6 +141,7 @@ class BaseConfig(BaseSettings):
     WORKSPACE_QUOTA_BYTES: int = Field(default=104857600, description="每用户工作区配额（100MB，含 skills）")
     SANDBOX_ENABLED: bool = Field(default=True, description="是否启用 Docker 沙箱 execute")
     SANDBOX_MEMORY_LIMIT: str = Field(default="512m", description="Docker 沙箱内存限制")
+    SANDBOX_PIDS_LIMIT: int = Field(default=512, description="Docker 沙箱 pids 限制（0=不限制），默认512防止 fork 炸弹")
     SANDBOX_CPU_LIMIT: float = Field(default=0.5, description="Docker 沙箱 CPU 限制")
     SANDBOX_IDLE_TTL_MINUTES: int = Field(default=20, description="空闲沙箱 TTL（分钟）")
     SANDBOX_IDLE_TTL_HOURS: Optional[int] = Field(
@@ -145,6 +151,10 @@ class BaseConfig(BaseSettings):
     SANDBOX_IMAGE: str = Field(
         default="langchain-agent-sandbox:3.11",
         description="Docker 沙箱镜像（见 deploy/sandbox/，需先 build/pull）",
+    )
+    SANDBOX_BASE_IMAGE: str = Field(
+        default="langchain-agent-sandbox-base:3.11",
+        description="沙箱基础镜像（系统依赖层：Node.js、Chromium、curl 等），由 deploy/sandbox/build_base.sh 构建",
     )
     SANDBOX_MAX_CONCURRENT: int = Field(default=25, description="全站同时 running 的沙箱数量上限")
     SANDBOX_MAX_PER_USER: int = Field(default=3, description="每用户 running 沙箱容器上限")

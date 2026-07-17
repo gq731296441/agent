@@ -74,12 +74,17 @@ class SubscriptionAgentUpdate(BaseModel):
 
 
 async def _resolve_mcp_names(user_id: str, mcp_ids: List[int]) -> Dict[int, str]:
-    """从用户的 MCP catalog 中批量解析名称。"""
+    """从用户的 MCP catalog 中批量解析名称，仅返回 mcp_ids 中指定的 ID。"""
     if not mcp_ids:
         return {}
     try:
         mcp_list, _ = await _resolve_mcp_source_list(user_id)
-        return {int(m["id"]): m["name"] for m in mcp_list if m.get("id") and m.get("name")}
+        target_ids = {int(mid) for mid in mcp_ids}
+        return {
+            int(m["id"]): m["name"]
+            for m in mcp_list
+            if m.get("id") and m.get("name") and int(m["id"]) in target_ids
+        }
     except Exception:
         return {}
 
@@ -150,6 +155,13 @@ async def create_agent(body: SubscriptionAgentCreate = Body(...)):
     if body.mcps:
         mcp_ids = [m.id for m in body.mcps]
         mcp_names = {m.id: m.name for m in body.mcps if m.name}
+        # 对前端未提供名称的 MCP，从 catalog 中解析兜底
+        unnamed_ids = [mid for mid in mcp_ids if mid not in mcp_names]
+        if unnamed_ids:
+            try:
+                mcp_names.update(await _resolve_mcp_names(body.user_id, unnamed_ids))
+            except Exception:
+                pass
     elif body.mcp_ids:
         mcp_ids = body.mcp_ids
         mcp_names = await _resolve_mcp_names(body.user_id, body.mcp_ids)
@@ -189,19 +201,21 @@ async def get_agent(agent_id: str, user_id: str = Query(...)):
     mcps = []
     if mcp_ids:
         name_map: Dict[int, str] = {}
-        # L1: 创建者的 MCP catalog
-        creator_id = agent.get("user_id") or agent.get("creator_user_id") or ""
-        if creator_id:
-            name_map.update(await _resolve_mcp_names(creator_id, mcp_ids))
-        # L2: 查看者的 MCP catalog（兜底未命中的）
-        missing_ids = [mid for mid in mcp_ids if mid not in name_map or not name_map[mid]]
-        if missing_ids and user_id != creator_id:
-            name_map.update(await _resolve_mcp_names(user_id, missing_ids))
-        # L3: DB 快照（最终兜底）
+        # L1: DB 快照（优先使用保存时存储的名称）
         snapshots = await deep_storage.get_agent_mcp_snapshot_names(agent_id)
         for mid, snap_name in snapshots.items():
-            if mid in mcp_ids and (mid not in name_map or not name_map[mid]):
+            if mid in mcp_ids:
                 name_map[mid] = snap_name
+        # L2: 创建者的 MCP catalog（兜底未命中的）
+        missing_ids = [mid for mid in mcp_ids if mid not in name_map or not name_map[mid]]
+        if missing_ids:
+            creator_id = agent.get("user_id") or agent.get("creator_user_id") or ""
+            if creator_id:
+                name_map.update(await _resolve_mcp_names(creator_id, missing_ids))
+        # L3: 查看者的 MCP catalog（最终兜底）
+        still_missing = [mid for mid in mcp_ids if mid not in name_map or not name_map[mid]]
+        if still_missing and user_id != (agent.get("user_id") or agent.get("creator_user_id") or ""):
+            name_map.update(await _resolve_mcp_names(user_id, still_missing))
         for mid in mcp_ids:
             mcps.append({"id": mid, "name": name_map.get(mid, "")})
     agent["mcps"] = mcps
@@ -237,6 +251,13 @@ async def update_agent(
         if body.mcps is not None:
             mcp_ids: List[int] = [m.id for m in body.mcps]
             mcp_names = {m.id: m.name for m in body.mcps if m.name}
+            # 对前端未提供名称的 MCP，从 catalog 中解析兜底
+            unnamed_ids = [mid for mid in mcp_ids if mid not in mcp_names]
+            if unnamed_ids:
+                try:
+                    mcp_names.update(await _resolve_mcp_names(user_id, unnamed_ids))
+                except Exception:
+                    pass
         else:
             mcp_ids = list(body.mcp_ids or [])
             mcp_names = await _resolve_mcp_names(user_id, mcp_ids)

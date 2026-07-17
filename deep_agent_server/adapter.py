@@ -776,23 +776,23 @@ class DeepEventAdapter:
         node = metadata.get("langgraph_node", "unknown")
 
         # 诊断日志：记录每次进入 _adapt_messages_chunk 的基本信息
-        from config import get_logger
-        _dbg = get_logger(__name__)
-        has_content = bool(getattr(message_chunk, "content", None))
-        has_tcc = bool(getattr(message_chunk, "tool_call_chunks", None))
-        has_tc = bool(getattr(message_chunk, "tool_calls", None))
-        if has_tcc or has_tc:  # 只记录与工具调用相关的chunk
-            tcc_info = ""
-            if has_tcc:
-                tcc_lens = [len(tc.get("args") or "") for tc in message_chunk.tool_call_chunks]
-                tcc_info = f"tcc={len(message_chunk.tool_call_chunks)}, args_lens={tcc_lens}"
-            tc_info = ""
-            if has_tc:
-                tc_info = f"tc={len(message_chunk.tool_calls)}"
-            _dbg.info(
-                f"[TOOL_ARGS_STREAM] node={node}, content={has_content}, "
-                f"last_node={self._last_node}, {tcc_info} {tc_info}"
-            )
+        # from config import get_logger
+        # _dbg = get_logger(__name__)
+        # has_content = bool(getattr(message_chunk, "content", None))
+        # has_tcc = bool(getattr(message_chunk, "tool_call_chunks", None))
+        # has_tc = bool(getattr(message_chunk, "tool_calls", None))
+        # if has_tcc or has_tc:  # 只记录与工具调用相关的chunk
+        #     tcc_info = ""
+        #     if has_tcc:
+        #         tcc_lens = [len(tc.get("args") or "") for tc in message_chunk.tool_call_chunks]
+        #         tcc_info = f"tcc={len(message_chunk.tool_call_chunks)}, args_lens={tcc_lens}"
+        #     tc_info = ""
+        #     if has_tc:
+        #         tc_info = f"tc={len(message_chunk.tool_calls)}"
+        #     _dbg.info(
+        #         f"[TOOL_ARGS_STREAM] node={node}, content={has_content}, "
+        #         f"last_node={self._last_node}, {tcc_info} {tc_info}"
+        #     )
 
         # 离开 model 节点时：先刷推理/回复，再 emit 缓存的 tool_call start
         if self._last_node == "model" and node != "model":

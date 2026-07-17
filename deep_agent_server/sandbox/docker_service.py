@@ -684,11 +684,14 @@ class DockerSandboxService(SandboxService):
             "command": "sleep infinity",
             "detach": True,
             "mem_limit": app_config.SANDBOX_MEMORY_LIMIT,
+            "pids_limit": int(getattr(app_config, "SANDBOX_PIDS_LIMIT", 512) or 0),
             "nano_cpus": int(app_config.SANDBOX_CPU_LIMIT * 1e9),
             "volumes": volumes,
             "working_dir": "/workspace",
             "name": self._container_name(user_id, session_id),
             "remove": False,
+            # 内核 4.19 seccomp 过滤阻止 pthread_create，必须 unconfined
+            "security_opt": ["seccomp=unconfined"],
         }
         if environment:
             kwargs["environment"] = environment
@@ -700,7 +703,7 @@ class DockerSandboxService(SandboxService):
                 "/root": "size=128m",
             }
             kwargs["cap_drop"] = ["ALL"]
-            kwargs["security_opt"] = ["no-new-privileges:true"]
+            kwargs["security_opt"] = kwargs.get("security_opt", []) + ["no-new-privileges:true"]
 
         return kwargs
 

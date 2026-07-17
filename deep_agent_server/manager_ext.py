@@ -97,6 +97,8 @@ async def _resolve_skill_dirs_for_agent(
         BUILTIN_SKILL_IDS,
     )
     from deep_agent_server.workspace import get_agent_skills_dir
+    from config import get_logger
+    _log = get_logger(__name__)
 
     builtin: List[str] = []
     for bid in BUILTIN_SKILL_IDS:
@@ -110,12 +112,19 @@ async def _resolve_skill_dirs_for_agent(
 
     if agent_kind == "subscription" and agent_id:
         root = get_agent_skills_dir(agent_id)
+        _log.debug(
+            f"[SkillDirs] agent_id={agent_id} root={root} "
+            f"exists={root.is_dir()} builtin={builtin}"
+        )
         if not root.is_dir():
+            _log.warning(f"[SkillDirs] agent skills 目录不存在: {root}")
             return builtin
-        return builtin + [
+        subdirs = [
             str(p) for p in sorted(root.iterdir())
             if p.is_dir() and (p / "SKILL.md").is_file()
         ]
+        _log.debug(f"[SkillDirs] subdirs with SKILL.md: {subdirs}")
+        return builtin + subdirs
     return resolve_skill_dirs(user_id, None)
 
 

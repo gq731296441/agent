@@ -275,9 +275,41 @@ app = FastAPI(lifespan=lifespan)
 
 # ==================== 中间件配置 ====================
 
+_PARAMS_MAX_CHARS = 500
+
+
+def _extract_request_params(request) -> str:
+    """从请求中提取参数摘要（限制字符数），用于失败日志排查。"""
+    parts = []
+
+    # query 参数 (如 ?user_id=xxx&page=1)
+    qp = dict(request.query_params)
+    if qp:
+        parts.append(f"query={qp}")
+
+    # 路径参数 (如 /users/{user_id}/...)
+    pp = dict(request.path_params)
+    if pp:
+        parts.append(f"path={pp}")
+
+    # 请求体 (仅 JSON，且仅在已被 Starlette 缓存时可用)
+    try:
+        body_bytes = getattr(request, "_body", None)
+        if body_bytes:
+            body_str = body_bytes.decode("utf-8", errors="replace")
+            parts.append(f"body={body_str}")
+    except Exception:
+        pass
+
+    raw = " | ".join(parts)
+    if len(raw) > _PARAMS_MAX_CHARS:
+        raw = raw[:_PARAMS_MAX_CHARS] + "..."
+    return raw
+
+
 @app.middleware("http")
 async def request_logging_middleware(request, call_next):
-    """统一记录 HTTP 请求路径、状态码与耗时。"""
+    """仅记录失败请求（≥400）的路径、参数、状态码与耗时。"""
     start_time = time.perf_counter()
     method = request.method
     path = request.url.path
@@ -285,14 +317,21 @@ async def request_logging_middleware(request, call_next):
     try:
         response = await call_next(request)
         duration_ms = (time.perf_counter() - start_time) * 1000
-        logger.info(
-            f"【HTTP】{method} {path} -> {response.status_code} | duration={duration_ms:.2f}ms"
-        )
+        if response.status_code >= 400:
+            params = _extract_request_params(request)
+            logger.warning(
+                f"【HTTP】{method} {path} -> {response.status_code} "
+                f"| duration={duration_ms:.2f}ms"
+                f"{' | ' + params if params else ''}"
+            )
         return response
-    except Exception as e:
+    except Exception:
         duration_ms = (time.perf_counter() - start_time) * 1000
+        params = _extract_request_params(request)
         logger.exception(
-            f"【HTTP】{method} {path} -> 500 | duration={duration_ms:.2f}ms | error={e}"
+            f"【HTTP】{method} {path} -> 500 "
+            f"| duration={duration_ms:.2f}ms"
+            f"{' | ' + params if params else ''}"
         )
         raise
 
