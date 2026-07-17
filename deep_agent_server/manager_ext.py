@@ -124,7 +124,14 @@ async def _resolve_skill_dirs_for_agent(
             if p.is_dir() and (p / "SKILL.md").is_file()
         ]
         _log.debug(f"[SkillDirs] subdirs with SKILL.md: {subdirs}")
-        return builtin + subdirs
+        # builtin 和 subdirs 可能有重叠，按顺序去重
+        seen = set()
+        result = []
+        for d in builtin + subdirs:
+            if d not in seen:
+                seen.add(d)
+                result.append(d)
+        return result
     return resolve_skill_dirs(user_id, None)
 
 

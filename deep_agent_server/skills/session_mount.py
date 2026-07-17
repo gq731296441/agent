@@ -71,11 +71,15 @@ async def resolve_mount_selected_skill_ids(
 
     manifest = read_mount_manifest(user_id, session_id)
     if manifest:
+        # 用户显式选择（包括空列表）优先
         raw = manifest.get("selected_skill_ids")
-        if raw is None:
-            raw = manifest.get("skill_ids")
         if raw is not None:
             return effective_selected_skill_ids(candidate_dirs, list(raw))
+        # 用户未显式选择 → 读取上次实际挂载的 skill（仅非空时沿用）
+        raw = manifest.get("skill_ids")
+        if raw:
+            return effective_selected_skill_ids(candidate_dirs, list(raw))
+        # skill_ids 为空 → 上次挂载为空（可能是 bug/异常），忽略，使用全部候选 skill
 
     from db import deep_storage
 
