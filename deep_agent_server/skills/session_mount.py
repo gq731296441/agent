@@ -71,9 +71,9 @@ async def resolve_mount_selected_skill_ids(
 
     manifest = read_mount_manifest(user_id, session_id)
     if manifest:
-        # 用户显式选择（包括空列表）优先
+        # 用户显式选择（仅非空时沿用，空列表可能是旧代码脏数据，视为未选择）
         raw = manifest.get("selected_skill_ids")
-        if raw is not None:
+        if raw:
             return effective_selected_skill_ids(candidate_dirs, list(raw))
         # 用户未显式选择 → 读取上次实际挂载的 skill（仅非空时沿用）
         raw = manifest.get("skill_ids")
@@ -96,8 +96,9 @@ async def resolve_mount_selected_skill_ids(
                     ids = [str(x) for x in parsed]
             except json.JSONDecodeError:
                 ids = None
-        if ids is not None:
+        if ids:
             return effective_selected_skill_ids(candidate_dirs, ids)
+        # ids 为空 → 上次挂载为空（可能是 bug/异常），忽略，使用全部候选 skill
     return None
 
 
@@ -215,6 +216,11 @@ async def ensure_session_skill_mount(
 
     selection_key = compute_selection_key(candidate_dirs, selected_skill_ids)
     skill_ids = resolve_mounted_skill_ids(candidate_dirs, selected_skill_ids)
+    logger.debug(
+        f"[SkillMount] resolve: candidate_count={len(candidate_dirs)} "
+        f"selected_skill_ids={selected_skill_ids} "
+        f"skill_ids={skill_ids}"
+    )
 
     await assert_skill_selection_change_allowed(
         user_id,

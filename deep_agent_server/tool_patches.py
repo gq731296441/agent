@@ -79,7 +79,15 @@ ENHANCED_WRITE_FILE_DESCRIPTION = """Creates a NEW file in the filesystem.
 
 **Important:**
 - `write_file` is for NEW files only. To modify an existing file, always use `edit_file`.
-- After writing the skeleton, immediately switch to `edit_file` – never call `write_file` on the same file again."""
+- After writing the skeleton, immediately switch to `edit_file` – never call `write_file` on the same file again.
+
+**Multi-file web projects:**
+- When building web pages, create a project subdirectory (e.g., `/workspace/web-project/` or `/workspace/report/`).
+- Split HTML structure, CSS styles, and JS logic into separate files — do NOT inline everything into a single .html file.
+- Use relative paths in HTML: `<link rel="stylesheet" href="style.css">` and `<script src="script.js"></script>`.
+- Do NOT use external CDN URLs (`https://...`) — all resources must be local workspace files in the same directory.
+- Standard project structure: `index.html` (entry) + `style.css` (styles) + `script.js` (logic).
+	- **IMPORTANT:** `write_file` automatically creates parent directories. Do NOT use `execute("mkdir ...")` to pre-create directories — this causes permission conflicts between the sandbox and host filesystem."""
 
 # ── 补丁 3：增强 edit_file 工具描述 ───────────────────────────────────────────
 ENHANCED_EDIT_FILE_DESCRIPTION = """Performs exact string replacements in files. This is the PRIMARY tool for building large files incrementally.

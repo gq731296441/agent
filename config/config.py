@@ -49,7 +49,11 @@ class BaseConfig(BaseSettings):
     # ==================== MCP 配置 ====================
     MCP_TOOLS_API_URL: str = Field(
         default="https://aip.zte.com.cn/trial/cmtool/api/v1/component/mcp/mine",
-        description="MCP 工具列表接口地址",
+        description="MCP 工具列表接口地址（当前用户 my 维度）",
+    )
+    MCP_ALL_TOOLS_API_URL: str = Field(
+        default="https://aip.zte.com.cn/trial/cmtool/api/v1/component/mcp/all",
+        description="MCP 全量工具列表接口地址",
     )
     MCP_USE_MOCK: bool = Field(
         default=False,
@@ -329,6 +333,7 @@ class DevConfig(BaseConfig):
     DEBUG: bool = True
     ENVIRONMENT: str = "dev"
     MCP_TOOLS_API_URL: str = "https://aip.zte.com.cn/trial/cmtool/api/v1/component/mcp/mine"
+    MCP_ALL_TOOLS_API_URL: str = "https://aip.zte.com.cn/trial/cmtool/api/v1/component/mcp/all"
     MCP_USE_MOCK: bool = False
     MCP_FALLBACK_TO_MOCK: bool = False
 
@@ -338,6 +343,7 @@ class TestConfig(BaseConfig):
     DEBUG: bool = True
     ENVIRONMENT: str = "test"
     MCP_TOOLS_API_URL: str = "https://aip.zte.com.cn/trial/cmtool/api/v1/component/mcp/mine"
+    MCP_ALL_TOOLS_API_URL: str = "https://aip.zte.com.cn/trial/cmtool/api/v1/component/mcp/all"
 
 
 class ProductionConfig(BaseConfig):
@@ -345,6 +351,7 @@ class ProductionConfig(BaseConfig):
     DEBUG: bool = False
     ENVIRONMENT: str = "production"
     MCP_TOOLS_API_URL: str = "https://aip.zte.com.cn/cmtool/api/v1/component/mcp/mine"
+    MCP_ALL_TOOLS_API_URL: str = "https://aip.zte.com.cn/cmtool/api/v1/component/mcp/all"
     MCP_USE_MOCK: bool = False
     MCP_FALLBACK_TO_MOCK: bool = False
     SKILL_CATALOG_AUTO_SYNC: bool = False

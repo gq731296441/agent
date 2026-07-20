@@ -5,10 +5,19 @@ deepagents 要求 CompositeBackend.default 实现 SandboxBackendProtocol，
 
 文件工具（read_file 等）必须走 routes 中的 /skills/、/workspace/；
 若误落到 default（_DockerExecBackend），会 NotImplementedError。
+
+容器命令以宿主机用户 UID:GID 执行，避免 root 创建的文件在 bind mount
+宿主机目录上产生 Permission denied（write_file 在宿主机以普通用户运行）。
 """
 
+import os
 from pathlib import Path
 from typing import Any, Optional
+
+# 宿主机进程 UID/GID，用于 docker exec 时以相同身份执行命令，
+# 确保 bind mount 目录中创建的文件 owner 与 FilesystemBackend 一致。
+_HOST_EXEC_UID = os.getuid()
+_HOST_EXEC_GID = os.getgid()
 
 from deepagents.backends.composite import (
     CompositeBackend,
@@ -70,7 +79,7 @@ class _DockerExecBackend(SandboxBackendProtocol):
         try:
             code, out = c.exec_run(
                 ["bash", "-lc", cmd],
-                user="root",
+                user=f"{_HOST_EXEC_UID}:{_HOST_EXEC_GID}",
                 **kwargs,
             )
         except Exception as e:

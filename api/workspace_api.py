@@ -34,6 +34,8 @@ async def workspace_files(
     user_id: str = Query(...),
     session_id: Optional[str] = Query(None),
     scope: str = Query("all", description="workspace|skills|artifacts|uploads|all"),
+    sort_by: str = Query("name", description="排序字段: name|size|time"),
+    sort_order: str = Query("asc", description="排序方向: asc|desc"),
 ):
     """
     列出工作区文件。
@@ -46,8 +48,15 @@ async def workspace_files(
         raise HTTPException(status_code=403, detail=SESSION_ACCESS_DENIED_MSG)
     if scope not in ("workspace", "skills", "artifacts", "uploads", "all"):
         raise HTTPException(status_code=400, detail="invalid scope")
+    if sort_by not in ("name", "size", "time"):
+        raise HTTPException(status_code=400, detail="sort_by 须为 name / size / time")
+    if sort_order not in ("asc", "desc"):
+        raise HTTPException(status_code=400, detail="sort_order 须为 asc / desc")
     try:
-        files = list_files(user_id, session_id=session_id, scope=scope)
+        files = list_files(
+            user_id, session_id=session_id, scope=scope,
+            sort_by=sort_by, sort_order=sort_order,
+        )
         return {"user_id": user_id, "session_id": session_id, "scope": scope, "files": files}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

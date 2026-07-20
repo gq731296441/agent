@@ -505,6 +505,8 @@ async def ws_endpoint(websocket: WebSocket):
                         end_reason = raw.get("text", "")
                     else:
                         end_reason = str(raw)
+                    # 立即清理 _stream_tasks，避免下一条消息到达时误判旧任务仍在运行
+                    _stream_tasks.pop(session_id, None)
                     # 收到 END 消息时立即启动标题生成（与收尾清理并行）
                     if _is_new_session and end_reason in ("completed", "stop", "error"):
                         reply_text = "\n".join(_reply_parts) if _reply_parts else None

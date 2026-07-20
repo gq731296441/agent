@@ -6,6 +6,7 @@
 
 import asyncio
 import mimetypes
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -21,6 +22,54 @@ from deep_agent_server.quota_service import (
 )
 
 logger = get_logger(__name__)
+
+# ── HTML 内容轻量校验 ────────────────────────────────────────────────────────
+_HTML_EXTENSIONS = {".html", ".htm"}
+
+# 检测外部 URL 引用的正则模式（警告但不拒绝）
+_EXTERNAL_SCRIPT_URL_RE = re.compile(
+    r'<script\s[^>]*src\s*=\s*["\']https?:', re.IGNORECASE
+)
+_EXTERNAL_LINK_URL_RE = re.compile(
+    r'<link\s[^>]*href\s*=\s*["\']https?:', re.IGNORECASE
+)
+# 检测是否包含基本 HTML 结构（拒绝纯文本被误写为 .html）
+_HTML_SKELETON_RE = re.compile(
+    r'<!DOCTYPE\s+html|<html[\s>]', re.IGNORECASE
+)
+
+
+def _check_html_write(file_path: str, content: str) -> Optional[str]:
+    """对 .html/.htm 文件做写入前轻量校验。
+
+    返回:
+        - None: 校验通过，允许写入
+        - str: 校验失败原因，应作为 WriteResult.error 返回
+    """
+    ext = Path(file_path).suffix.lower()
+    if ext not in _HTML_EXTENSIONS:
+        return None
+
+    # 1. 结构完整性检查 — 不通过则拒绝写入
+    if not _HTML_SKELETON_RE.search(content):
+        return (
+            "HTML 文件缺少基本结构: 必须以 <!DOCTYPE html> 或 <html> 开头。"
+            "请检查文件内容，确保写入的是合法的 HTML 文档。"
+        )
+
+    # 2. 外部 URL 引用检查 — 仅告警，不拒绝
+    warnings = []
+    if _EXTERNAL_SCRIPT_URL_RE.search(content):
+        warnings.append("检测到外部脚本引用 (script src=https://...)")
+    if _EXTERNAL_LINK_URL_RE.search(content):
+        warnings.append("检测到外部样式引用 (link href=https://...)")
+    if warnings:
+        logger.warning(
+            f"[HTML校验] {file_path}: {'; '.join(warnings)}，"
+            "外部资源可能导致预览无法正常加载"
+        )
+
+    return None
 
 
 def _mime_for_path(path: Path) -> str:
@@ -124,6 +173,9 @@ class QuotaFilesystemBackend:
         err = check_additional_bytes(self._user_id, utf8_len(content))
         if err:
             return WriteResult(error=err)
+        html_err = _check_html_write(file_path, content)
+        if html_err:
+            return WriteResult(error=html_err)
         result = self._inner.write(file_path, content)
         if not result.error:
             self._after_write_success(file_path)

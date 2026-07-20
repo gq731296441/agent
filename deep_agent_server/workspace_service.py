@@ -133,6 +133,8 @@ def list_files(
     *,
     session_id: str = None,
     scope: str = "all",
+    sort_by: str = "name",
+    sort_order: str = "asc",
 ) -> List[Dict[str, Any]]:
     uid = validate_user_id(user_id)
     root = get_user_root(uid)
@@ -165,7 +167,14 @@ def list_files(
         if not session_id:
             items.extend(_scan_tree(get_uploads_dir(uid), "uploads", "upload"))
 
-    items.sort(key=lambda x: x["path"])
+    # 排序
+    reverse = sort_order == "desc"
+    if sort_by == "size":
+        items.sort(key=lambda x: x["size_bytes"], reverse=reverse)
+    elif sort_by == "time":
+        items.sort(key=lambda x: x["updated_at"], reverse=reverse)
+    else:
+        items.sort(key=lambda x: x["path"], reverse=reverse)
     return items
 
 

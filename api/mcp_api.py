@@ -42,6 +42,7 @@ McpToolsResponse = ListApiResponse[McpToolItem]
 # ==================== 接口实现 ====================
 
 MCP_TOOLS_API_URL = app_config.MCP_TOOLS_API_URL
+MCP_ALL_TOOLS_API_URL = app_config.MCP_ALL_TOOLS_API_URL
 _user_tools_response_cache: Dict[str, Tuple[float, str, ListApiResponse]] = {}
 
 
@@ -114,6 +115,32 @@ async def _fetch_external_mcp_list(user_id: str) -> List[dict]:
         raise HTTPException(
             status_code=502,
             detail=f"获取 MCP 工具列表失败: {external_data.get('msg', '未知错误')}",
+        )
+
+    return external_data.get("data", []) or []
+
+
+async def _fetch_external_mcp_all_list() -> List[dict]:
+    """调用外部 cmtool 接口获取全量 MCP 列表（不限用户），失败时抛出异常。"""
+    async with httpx.AsyncClient(timeout=30.0, trust_env=False) as client:
+        response = await client.get(MCP_ALL_TOOLS_API_URL)
+
+        if response.status_code != 200:
+            logger.error(
+                f"[MCP API] 调用外部 all 接口失败, status: {response.status_code}, body: {response.text}"
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"获取全量 MCP 工具列表失败: 外部接口返回 {response.status_code}",
+            )
+
+        external_data = response.json()
+
+    if external_data.get("code") != 0 or not external_data.get("status"):
+        logger.error(f"[MCP API] 外部 all 接口返回错误: {external_data.get('msg')}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"获取全量 MCP 工具列表失败: {external_data.get('msg', '未知错误')}",
         )
 
     return external_data.get("data", []) or []
@@ -249,5 +276,42 @@ async def get_mcp_tools(
     except Exception as e:
         logger.error(f"[MCP API] 获取 MCP 工具列表异常: {e}")
         import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
+
+
+@router.get("/tools/all", response_model=McpToolsResponse, summary="获取全量MCP工具列表")
+async def get_all_mcp_tools(
+    validate: bool = Query(True, description="是否探测 MCP 连通性；false 时仅返回列表"),
+    refresh: bool = Query(False, description="是否强制重新探测（忽略服务端缓存）"),
+):
+    """获取所有 MCP 工具（不限用户），含连通性验证。结构和 /mcp/tools 一致。"""
+    import traceback
+
+    try:
+        external_raw = await _fetch_external_mcp_all_list()
+        mcp_list = [_normalize_mcp_item(item) for item in external_raw]
+        logger.info(f"[MCP API] 外部 all 接口返回 {len(mcp_list)} 个 MCP 工具")
+
+        if not validate:
+            return _build_tools_without_validation(mcp_list)
+
+        fingerprint = _mcp_list_fingerprint(mcp_list)
+        if not refresh:
+            cached = _get_user_tools_cache("__all__", fingerprint)
+            if cached is not None:
+                logger.info(f"[MCP API] all 命中缓存 key=__all__")
+                return cached
+
+        response = await _validate_and_build_response(
+            mcp_list, "", "external", force_refresh=refresh
+        )
+        if not refresh:
+            _set_user_tools_cache("__all__", fingerprint, response)
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[MCP API] 获取全量 MCP 工具列表失败: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")

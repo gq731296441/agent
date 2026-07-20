@@ -72,12 +72,46 @@ async def resolve_mcp_list(
         return [m for m in payload_mcp if int(m.get("id") or 0) in allowed]
 
     from api.mcp_api import _resolve_mcp_source_list
+    from config import get_logger
+    _mcp_log = get_logger(__name__)
 
     try:
         # 订阅智能体：用创建者的 user_id 获取 MCP 目录，而非订阅者
-        catalog, _ = await _resolve_mcp_source_list(creator_user_id or user_id)
+        catalog, source = await _resolve_mcp_source_list(creator_user_id or user_id)
         id_to_item = {int(i.get("id")): i for i in catalog if i.get("id")}
-        return [id_to_item[mid] for mid in binding_ids if mid in id_to_item]
+        matched = [id_to_item[mid] for mid in binding_ids if mid in id_to_item]
+        missing_ids = [mid for mid in binding_ids if mid not in id_to_item]
+
+        # ID 对不上时，用 snapshot_mcp_name 做名称兜底匹配
+        if missing_ids:
+            snapshots = await deep_storage.get_agent_mcp_snapshot_names(agent_id)
+            seen_ids = {int(i.get("id")) for i in matched if i.get("id")}
+            name_to_item = {}
+            for item in catalog:
+                name = (item.get("name") or "").strip()
+                if name and name not in name_to_item:
+                    name_to_item[name] = item
+            for mid in missing_ids:
+                snap_name = snapshots.get(mid)
+                if snap_name and snap_name in name_to_item:
+                    item = name_to_item[snap_name]
+                    if int(item.get("id")) not in seen_ids:
+                        matched.append(item)
+                        seen_ids.add(int(item.get("id")))
+                        _mcp_log.info(
+                            f"[MCPResolve] id={mid} 未命中, 通过名称匹配: '{snap_name}' → id={item.get('id')}"
+                        )
+                    else:
+                        _mcp_log.debug(
+                            f"[MCPResolve] id={mid} 名称匹配 '{snap_name}' → id={item.get('id')} 已存在, 跳过"
+                        )
+
+        _mcp_log.debug(
+            f"[MCPResolve] agent_id={agent_id} creator={creator_user_id} "
+            f"bindings={binding_ids} catalog_size={len(catalog)} "
+            f"matched={len(matched)} missing_ids={[m for m in missing_ids if m not in {int(i.get('id')) for i in matched}]}"
+        )
+        return matched
     except Exception:
         if app_config.MCP_USE_MOCK or app_config.ENVIRONMENT == "development":
             return [{"id": mid} for mid in binding_ids]
