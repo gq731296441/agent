@@ -115,7 +115,7 @@ class BaseConfig(BaseSettings):
             "dev/test/prod 由部署侧将虚机 agent-dev|agent-test|agent-production NFS 挂到本路径，代码不区分环境。"
         ),
     )
-    DEEP_TIMEOUT_SECONDS: int = Field(default=600, description="Deep Agent 单次运行超时（秒）")
+    DEEP_TIMEOUT_SECONDS: int = Field(default=1800, description="Deep Agent 单次运行超时（秒）")
     LLM_TEST_TIMEOUT_SECONDS: int = Field(default=30, description="用户 LLM 连接测试超时（秒）")
     LLM_RATE_LIMIT_BASE_WAIT: float = Field(default=10.0, description="429 限流退避基础等待（秒）")
     LLM_RATE_LIMIT_MAX_WAIT: float = Field(default=120.0, description="429 限流退避单次最大等待（秒）")

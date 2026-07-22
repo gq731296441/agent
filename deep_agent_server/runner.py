@@ -229,18 +229,12 @@ async def run_deep_agent(
             {"name": getattr(t, "name", ""), "description": getattr(t, "description", "")}
             for t in (getattr(agent_wrapper, "mcp_tools", None) or [])
         ]
-        skill_summary = [
-            {"skill_id": getattr(m, "skill_id", ""),
-             "name": getattr(m, "name", ""),
-             "version": getattr(m, "version", "")}
-            for m in (getattr(agent_wrapper, "exposed_skill_metas", None) or [])
-        ]
         await deep_storage.create_agent_run(
             run_id, user_id, session_id,
             agent_id=resolved_agent_id,
             conversation_id=conversation_id,
             mcp_tools=mcp_summary,
-            skills=skill_summary,
+            skills=[],  # skills 由 SkillsMiddleware 管理，不再手动记录
         )
         publish_event(make_run_started(
             user_id=user_id,
@@ -248,27 +242,6 @@ async def run_deep_agent(
             run_id=run_id,
             conversation_id=conversation_id,
         ))
-
-    loaded_skills = getattr(agent_wrapper, "loaded_skills", None) or []
-    for meta in loaded_skills:
-        skill_name = getattr(meta, "name", None) or getattr(meta, "skill_id", "")
-        skill_msg = adapter._enrich(
-            AgentMessage(
-                type=MessageType.SKILL_LOADED,
-                sender=SenderType.SYSTEM,
-                session_id=session_id,
-                content={
-                    "skill_name": skill_name,
-                    "skill_dir": getattr(meta, "skill_dir", ""),
-                    "triggers": getattr(meta, "triggers", []),
-                },
-                save=False,
-            ),
-            track_step=False,
-        )
-        skill_msg["user_id"] = user_id
-        publish_event(normalize_agent_message(skill_msg))
-        yield skill_msg
 
     if not app_config.SANDBOX_ENABLED:
         logger.debug("[DeepRunner] SANDBOX_ENABLED=false，execute 工具不可用（文件读写仍可用）")
@@ -302,6 +275,30 @@ async def run_deep_agent(
     retry_count = 0
     max_retries = 2
     run_config, token_acc = attach_token_callback(config)
+
+    # ── 检测同 session 内 skill/MCP 变更，清过期状态 + 通知 agent ──
+    config_changes = getattr(agent_wrapper, "config_changes", None) or {}
+    change_notices = []
+    if config_changes.get("skills"):
+        change_notices.append(
+            "⚠️ **技能配置已变更**：当前会话启用的技能发生了变化。"
+            "请使用 `ls /skills` 重新查看可用技能列表，不要依赖之前的记忆。"
+        )
+    if config_changes.get("mcp"):
+        change_notices.append(
+            "⚠️ **MCP 工具配置已变更**：当前会话可用的 MCP 工具发生了变化。"
+            "请重新确认可用的工具列表，不要依赖之前的记忆。"
+        )
+    if change_notices:
+        from langchain_core.messages import HumanMessage
+        notice = "\n\n".join(change_notices)
+        messages = stream_input.get("messages", [])
+        messages.append(HumanMessage(content=notice))
+        stream_input["messages"] = messages
+        logger.info(
+            f"[DeepRunner] 已注入配置变更通知 session={session_id} "
+            f"changes={list(config_changes.keys())}"
+        )
     run_started_at = datetime.now(timezone.utc)
 
     async def _finalize_tokens(status: str, error: str = "") -> dict:
@@ -538,7 +535,7 @@ async def _stream(
     stop_event: asyncio.Event,
     agent_wrapper,
 ) -> AsyncGenerator[dict, None]:
-    """核心 astream 循环：messages + updates + tools，遇 interrupt 前补刷工具落库。"""
+    """核心 astream 循环：v2 格式，直接从 ns 提取 tool_call_id 识别子 agent。"""
     store = getattr(agent_wrapper, "store", None)
 
     async def _flush_state_tools() -> AsyncGenerator[dict, None]:
@@ -553,19 +550,15 @@ async def _stream(
         config=config,
         stream_mode=["messages", "updates", "tools", "custom"],
         subgraphs=True,
+        version="v2",
     ):
         if stop_event and stop_event.is_set():
             raise asyncio.CancelledError("User stop")
 
-        namespace: tuple = ()
-        mode: str
-        chunk: Any
-        if isinstance(item, tuple) and len(item) == 3:
-            namespace, mode, chunk = item
-        elif isinstance(item, tuple) and len(item) == 2:
-            mode, chunk = item
-        else:
-            continue
+        # v2 格式：统一 dict {type, ns, data}
+        mode: str = item["type"]
+        namespace: tuple = item["ns"]
+        chunk: Any = item["data"]
 
         # 诊断日志：记录每次 astream yield 的 mode 和 chunk 大小
         # from config import get_logger as _runner_get_logger
@@ -583,21 +576,41 @@ async def _stream(
         # _rdbg.info(f"[STREAM] mode={mode}, {_chunk_repr}")
 
         if mode == "tools":
-            # tools 事件走 adapt_tools_stream_chunk，会绕过 _adapt_messages_chunk 中的
-            # model→tools 转换检测（adapter.py:798），导致模型生成的 CHAT 文本未在
-            # 工具调用之前刷新落库。此处兜底：若有待刷新的 model 段文本，先刷再发工具调用。
-            if adapter._current_llm_text or adapter._current_reasoning_text:
+            # tools 事件绕过 _adapt_messages_chunk，model→tools 转换可能未触发。
+            # 无论缓冲区是否为空都刷一次：空则 no-op，有内容则落库 + 推送。
+            #
+            # 关键：文本由「上一个 model 节点」产生，应使用 _last_model_namespace
+            # 而非当前 tools 事件的 namespace。否则子 agent 推理文本结束时，
+            # 主 agent 的 task tool-finished（namespace=()）会导致 subagent_run_id=null。
+            saved_ns = getattr(adapter, "_active_namespace", ())
+            flush_ns = adapter._last_model_namespace if adapter._last_model_namespace else namespace
+            adapter._active_namespace = flush_ns
+            # 预激活 + 排空 SUBAGENT_START，确保其先于 reasoning/chat 推送
+            adapter._pre_activate_namespace(flush_ns)
+            for msg in adapter._drain_pending_activations():
+                async for out in _yield_adapter_messages(
+                    msg, adapter, compiled, config, agent_wrapper, store
+                ):
+                    yield out
+            try:
+                # finalize_model_segment 使用 flush_ns（文本归属到产生文本的 model）
                 async for msg in adapter.finalize_model_segment():
                     async for out in _yield_adapter_messages(
                         msg, adapter, compiled, config, agent_wrapper, store
                     ):
                         yield out
-                async for msg in adapter._emit_pending_tool_starts():
-                    async for out in _yield_adapter_messages(
-                        msg, adapter, compiled, config, agent_wrapper, store
-                    ):
-                        yield out
+            finally:
+                adapter._active_namespace = saved_ns
 
+            # _emit_pending_tool_starts 在 finally 之后执行，使用 saved_ns
+            # 而非 flush_ns。工具归属到当前上下文，而非上一个 model 节点。
+            async for msg in adapter._emit_pending_tool_starts():
+                async for out in _yield_adapter_messages(
+                    msg, adapter, compiled, config, agent_wrapper, store
+                ):
+                    yield out
+
+            # tools 事件本身使用原始 namespace（子 agent 内部工具调用需要正确归属）
             async for msg in adapter.adapt_tools_stream_chunk(namespace, chunk):
                 async for out in _yield_adapter_messages(
                     msg, adapter, compiled, config, agent_wrapper, store
@@ -613,7 +626,14 @@ async def _stream(
                     yield out
             continue
 
-        async for msg in adapter.adapt_astream_chunk(mode, chunk):
+        async for msg in adapter.adapt_astream_chunk(mode, chunk, namespace=namespace):
+            async for out in _yield_adapter_messages(
+                msg, adapter, compiled, config, agent_wrapper, store
+            ):
+                yield out
+
+        # 排空延迟发射的 SUBAGENT_START（_activate_pregel 产生）
+        for msg in adapter._drain_pending_activations():
             async for out in _yield_adapter_messages(
                 msg, adapter, compiled, config, agent_wrapper, store
             ):
@@ -671,12 +691,51 @@ async def _resolve_task_args(
     content: dict,
     compiled,
     config: dict,
+    adapter: Optional[DeepEventAdapter] = None,
 ) -> dict:
+    """从 content / graph state / adapter 内部状态三级恢复 task 参数。"""
     args = content.get("args") or {}
     if args and task_call_args_ready(args):
         return args
     tool_call_id = content.get("tool_call_id") or ""
+
+    # 第一回退：graph state 中按 tool_call_id 查找
     recovered = await _lookup_tool_call_args(compiled, config, tool_call_id)
+    if recovered and task_call_args_ready(recovered):
+        return recovered
+
+    # 第二回退：adapter 内部状态（处理流式 chunk / 事件乱序场景）
+    if adapter is not None:
+        subagent_run_id = content.get("subagent_run_id") or ""
+        # 按 subagent_run_id 查 _active_subagent_inputs
+        if subagent_run_id:
+            cached = adapter._active_subagent_inputs.get(subagent_run_id)
+            if cached and isinstance(cached, dict) and task_call_args_ready(cached):
+                return cached
+        # 按 tool_call_id 查 _pending_subagent_inputs
+        if tool_call_id:
+            cached = adapter._pending_subagent_inputs.get(tool_call_id)
+            if cached and isinstance(cached, dict) and task_call_args_ready(cached):
+                return cached
+        # 按 tool_call_id 查 _active_subagents 得 UUID，再查 _active_subagent_inputs
+        if tool_call_id:
+            uuid_from_tc = adapter._active_subagents.get(tool_call_id)
+            if uuid_from_tc:
+                cached = adapter._active_subagent_inputs.get(uuid_from_tc)
+                if cached and isinstance(cached, dict) and task_call_args_ready(cached):
+                    return cached
+
+        # 第三回退：FIFO 队列（namespace UUID 与 LLM call_* ID 不匹配场景）
+        unmatched = getattr(adapter, "_unmatched_subagent_uuids", None)
+        if unmatched:
+            for _ in range(len(unmatched)):
+                candidate_uuid = unmatched.popleft()
+                candidate = adapter._active_subagent_inputs.get(candidate_uuid)
+                if candidate and isinstance(candidate, dict) and task_call_args_ready(candidate):
+                    return candidate
+                # 未匹配的放回队尾（可能属于后续的子智能体）
+                unmatched.append(candidate_uuid)
+
     return recovered or args
 
 
@@ -692,7 +751,7 @@ async def _enrich_task_subagent_start(
         return msg
 
     subagent_run_id = content.get("subagent_run_id")
-    args = await _resolve_task_args(content, compiled, config or {})
+    args = await _resolve_task_args(content, compiled, config or {}, adapter=adapter)
     content["args"] = args
     name = task_subagent_name(args)
     input_summary = summarize_subagent_input(
@@ -731,7 +790,7 @@ async def _finish_task_subagent(
 
     subagent_run_id = content.get("subagent_run_id") or str(uuid.uuid4())
     final_report = content.get("final_report") or content.get("tool_result") or ""
-    args = await _resolve_task_args(content, compiled, config or {})
+    args = await _resolve_task_args(content, compiled, config or {}, adapter=adapter)
     content["args"] = args
     name = content.get("name") or task_subagent_name(args)
     input_summary = content.get("input_summary") or summarize_subagent_input(

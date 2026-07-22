@@ -6,7 +6,7 @@ interrupt_on 等组件，并返回 DeepAgentWrapper 供 runner 消费。
 
 import os
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from deepagents import create_deep_agent
 
@@ -252,12 +252,89 @@ def _patch_acreate_summary_emit_compressing():
 
 
 from deep_agent_server.sandbox.exceptions import SandboxUserLimitExceeded
-from deep_agent_server.skills.selector import build_skills_system_prompt
 from agent_server.prompts import build_base_system_prompt, build_system_prompt
 
 logger = get_logger(__name__)
 
+def _patch_format_message_content():
+    """过滤 invalid_tool_call 内容块，防止其被序列化到 API 请求中。
+
+    v3 的 ChatModelStream._finalize_message() 会将 invalid_tool_calls
+    写入 AIMessage.content（type="invalid_tool_call" 块）。这些块在 checkpoint
+    持久化后会在下一轮请求中发送给 API，部分 API（如 nebulacoder）不支持此类型
+    并返回 400 错误。
+
+    修补 _format_message_content 将 invalid_tool_call 加入跳过列表。
+    """
+    try:
+        from langchain_openai.chat_models import base as _lc_oai_base
+        _orig = _lc_oai_base._format_message_content
+        if getattr(_orig, "_patched_zte_invalid_tc", False):
+            return
+
+        def _patched_format_message_content(content, api="chat/completions", role=None):
+            if content and isinstance(content, list):
+                formatted_content = []
+                for block in content:
+                    if (
+                        isinstance(block, dict)
+                        and "type" in block
+                        and block["type"]
+                        in ("tool_use", "thinking", "reasoning_content", "invalid_tool_call")
+                    ):
+                        continue
+                    # 其余逻辑与原始 _format_message_content 一致
+                    from langchain_openai.chat_models.base import (
+                        is_data_content_block,
+                        convert_to_openai_data_block,
+                    )
+                    if (
+                        isinstance(block, dict)
+                        and is_data_content_block(block)
+                        and not (
+                            api == "responses" and str(role or "").lower().startswith("ai")
+                        )
+                    ):
+                        formatted_content.append(convert_to_openai_data_block(block, api=api))
+                    elif (
+                        isinstance(block, dict)
+                        and block.get("type") == "image"
+                        and (source := block.get("source"))
+                        and isinstance(source, dict)
+                    ):
+                        if source.get("type") == "base64" and (
+                            (media_type := source.get("media_type"))
+                            and (data := source.get("data"))
+                        ):
+                            formatted_content.append(
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{media_type};base64,{data}"
+                                    },
+                                }
+                            )
+                        elif source.get("type") == "url" and (url := source.get("url")):
+                            formatted_content.append(
+                                {"type": "image_url", "image_url": {"url": url}}
+                            )
+                        else:
+                            continue
+                    else:
+                        formatted_content.append(block)
+            else:
+                formatted_content = content
+            return formatted_content
+
+        _patched_format_message_content._patched_zte_invalid_tc = True
+        _lc_oai_base._format_message_content = _patched_format_message_content
+        logger.info("[DeepFactory] 已修补 _format_message_content — 过滤 invalid_tool_call 块")
+    except Exception as e:
+        logger.warning(f"[DeepFactory] 修补 _format_message_content 失败: {e}")
+
+
 # 模块加载时执行补丁（确保 create_deep_agent 内部调用时已生效）
+_patch_format_message_content()
 _patch_token_counter_for_summarization()
 _patch_summary_message_format()
 _patch_acreate_summary_no_callbacks()
@@ -271,18 +348,14 @@ BUILTIN_TOOLS = {
 
 
 class DeepAgentWrapper:
-    """封装编译后的 Deep Agent 图及关联 store / 已触发 skills 元数据。"""
+    """封装编译后的 Deep Agent 图及关联 store。"""
 
-    def __init__(self, agent, store=None, loaded_skills=None,
-                 mcp_tools=None, exposed_skill_metas=None):
+    def __init__(self, agent, store=None, mcp_tools=None, config_changes=None):
         self.agent = agent
         self.store = store
-        # trigger 匹配的 skills（用于 run 开始时推送 SKILL_LOADED 事件）
-        self.loaded_skills = loaded_skills or []
-        # 本次 run 使用的 MCP 工具列表（用于记录到 agent_runs）
         self.mcp_tools = mcp_tools or []
-        # 本次 run 暴露的全部 Skill 元数据（用于记录到 agent_runs）
-        self.exposed_skill_metas = exposed_skill_metas or []
+        # 同 session 内 skill/MCP 变更标记，runner 用于清状态 + 通知 agent
+        self.config_changes = config_changes or {}
 
 
 async def create_deep_agent_instance(
@@ -292,24 +365,25 @@ async def create_deep_agent_instance(
     mcp_tools: list,
     checkpointer=None,
     store=None,
-    exposed_skill_metas: Optional[list] = None,
-    loaded_skill_metas: Optional[list] = None,
     selected_skill_ids: Optional[List[str]] = None,
     *,
     agent_kind: str = "default",
     skip_sandbox: bool = False,
     user_token: Optional[str] = None,
-    matched_skill_dirs: Optional[List[str]] = None,  # deprecated, ignored
     llm=None,
     agent_skills_root: Optional[Path] = None,
     agent_id_for_sandbox: Optional[str] = None,
+    config_changes: Optional[Dict[str, bool]] = None,
 ) -> Tuple[Optional[DeepAgentWrapper], Optional[str]]:
     """
     创建 Deep Agent 实例。
 
-    - exposed_skill_metas：写入 system prompt 的 skill 列表（渐进式披露）
-    - loaded_skill_metas：用户消息 trigger 匹配到的 skills（仅用于事件通知）
+    使用官方 SkillsMiddleware：skills=["/skills/"]
+    渐进式披露由 SkillsMiddleware 自动处理。
+
+    - selected_skill_ids：用户勾选的 skill ID 列表，控制 /skills/ 的可见性
     - skip_sandbox=True：warmup 阶段跳过 Docker 拉起，execute 暂不可用
+    - config_changes：同 session 内 skill/MCP 变更标记，传给 runner 清状态+通知
     """
     try:
         model = llm or create_agent_llm()
@@ -322,38 +396,27 @@ async def create_deep_agent_instance(
         else:
             system_prompt = build_system_prompt(user_id=user_id, user_token=user_token)
         config = user_agent.get("config") or {}
-        # 渐进式披露：system prompt 只含 name/description，正文按需 read_file
-        metas = exposed_skill_metas or []
         sandbox_mode = False
         backend = build_backend_factory(
             user_id, session_id, store=store,
             agent_skills_root=agent_skills_root,
+            selected_skill_ids=selected_skill_ids,
         )
         if not skip_sandbox:
             sandbox_backend_factory = await get_sandbox_backend_factory_if_enabled(
                 user_id, session_id=session_id, store=store, user_token=user_token,
                 agent_skills_root=agent_skills_root,
                 agent_id=agent_id_for_sandbox,
+                selected_skill_ids=selected_skill_ids,
             )
             if sandbox_backend_factory is not None:
                 backend = sandbox_backend_factory(None)
                 sandbox_mode = True
-        system_prompt += build_skills_system_prompt(metas, sandbox_mode=sandbox_mode)
-        from deep_agent_server.skills.selector import BUILTIN_SKILL_IDS
-        allowed_skill_ids = None
-        if selected_skill_ids is not None:
-            allowed_skill_ids = [
-                str(s).strip() for s in selected_skill_ids if str(s).strip()
-            ]
-            # 内置默认技能始终加入权限白名单
-            for bid in BUILTIN_SKILL_IDS:
-                if bid not in allowed_skill_ids:
-                    allowed_skill_ids.append(bid)
 
         subagents = config.get("subagents") or None
         interrupt_on = build_interrupt_on(config) if app_config.AGENT_RUNTIME == "deep" else None
 
-        permissions = build_permissions(allowed_skill_ids)
+        permissions = build_permissions()
 
         # 确保 model.profile 包含 max_input_tokens，使 SummarizationMiddleware
         # 使用基于分数的触发阈值（默认 85% 上下文窗口），而非回退到固定 token 数。
@@ -383,7 +446,7 @@ async def create_deep_agent_instance(
             model=model,
             tools=mcp_tools or [],
             system_prompt=system_prompt,
-            skills=None,
+            skills=["/skills/"],
             backend=backend,
             permissions=permissions,
             interrupt_on=interrupt_on,
@@ -392,13 +455,11 @@ async def create_deep_agent_instance(
             store=store,
             middleware=[overflow_guard, rate_limit_mw],
         )
-        trigger_metas = loaded_skill_metas or []
         logger.info(
             f"[DeepFactory] Agent 创建成功 session={session_id} "
-            f"exposed_skills={len(metas)} trigger_matched={len(trigger_metas)}"
+            f"selected_skill_ids={selected_skill_ids}"
         )
-        return DeepAgentWrapper(agent, store=store, loaded_skills=trigger_metas,
-                                mcp_tools=mcp_tools, exposed_skill_metas=metas), None
+        return DeepAgentWrapper(agent, store=store, mcp_tools=mcp_tools, config_changes=config_changes), None
     except SandboxUserLimitExceeded:
         raise
     except Exception as e:

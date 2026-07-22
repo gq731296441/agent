@@ -1,8 +1,13 @@
 """Deep Agent 创建路径 — 订阅/默认 Agent 解析。"""
 
-import hashlib
-import json
-from typing import Any, List, Optional, Tuple
+import logging
+from typing import Any, Dict, List, Optional, Tuple
+
+_log = logging.getLogger(__name__)
+
+# 追踪每个 session 的技能/MCP 选择，用于检测跨 turn 变更
+_SESSION_CONFIG_STATE: Dict[str, Dict[str, str]] = {}
+# key: "{user_id}#{session_id}", value: {"skills": selection_sig, "mcp": mcp_hash}
 
 from config.config import app_config
 from db import deep_storage, storage
@@ -12,10 +17,7 @@ from deep_agent_server.sandbox.exceptions import SandboxUserLimitExceeded
 from deep_agent_server.skills.selection_guard import SkillSelectionLockedError
 from deep_agent_server.skills.session_mount import ensure_session_skill_mount
 from deep_agent_server.skills.selector import (
-    SkillSelector,
     effective_selected_skill_ids,
-    match_skills,
-    resolve_selected_pool_dirs,
     resolve_skill_dirs,
 )
 from mcp_server.mcp_manager import McpToolService
@@ -218,31 +220,21 @@ async def create_deep_agent_for_session(
         selected_skill_ids = await resolve_mount_selected_skill_ids(
             user_id, session_id, skill_candidate_dirs, None
         )
-    if always_on_only:
-        always_on_dirs = [
-            m.skill_dir
-            for m in SkillSelector.load_metas(skill_candidate_dirs)
-            if m.always_on
-        ]
-        pool_dirs = resolve_selected_pool_dirs(always_on_dirs, selected_skill_ids)
-    else:
-        pool_dirs = resolve_selected_pool_dirs(skill_candidate_dirs, selected_skill_ids)
-    exposed_metas = SkillSelector.load_metas(pool_dirs)
-    _, trigger_metas = match_skills(
-        user_id,
-        resolved_agent_id,
-        user_message,
-        bound_dirs=skill_candidate_dirs,
-        always_on_only=always_on_only,
-        selected_skill_ids=selected_skill_ids,
-    )
-    selection_hash = SkillSelector.match_hash(
-        selected_skill_ids if selected_skill_ids is not None else ["*"]
-    )
-    skill_hash = SkillSelector.match_hash(
-        sorted(m.skill_id for m in exposed_metas)
-    ) + ":" + selection_hash
+
+    # 生成 selected_skill_ids 的缓存签名
+    selection_sig = ",".join(sorted(selected_skill_ids)) if selected_skill_ids else "*"
     sandbox_tag = "sbx-mount-v1" if app_config.SANDBOX_ENABLED else "no-sbx"
+
+    # 检测同 session 内 skill/MCP 是否变化（跨 turn），push 给 runner 注入通知
+    state_key = f"{user_id}#{session_id}"
+    prev_state = _SESSION_CONFIG_STATE.get(state_key, {})
+    config_changes: Dict[str, bool] = {}
+    if prev_state:
+        if prev_state.get("skills") != selection_sig:
+            config_changes["skills"] = True
+        if prev_state.get("mcp") != mcp_hash:
+            config_changes["mcp"] = True
+    _SESSION_CONFIG_STATE[state_key] = {"skills": selection_sig, "mcp": mcp_hash}
 
     config_version = int(user_agent.get("config_version") or 0)
     from agent_server.llm import create_agent_llm_for_user, llm_config_fingerprint
@@ -257,7 +249,7 @@ async def create_deep_agent_for_session(
     cache_agent_key = resolved_agent_id or "default"
     cache_key = (
         f"deep:{session_id}:{cache_agent_key}:cfg{config_version}:llm{llm_fp}:"
-        f"{mcp_hash}:{token_fp}:{skill_hash}:{sandbox_tag}"
+        f"{mcp_hash}:{token_fp}:skills{selection_sig}:{sandbox_tag}"
     )
 
     # 订阅智能体的 agent_skills_root 与 agent_id_for_sandbox
@@ -291,12 +283,12 @@ async def create_deep_agent_for_session(
         and not sandbox_recreated  # 沙箱重建后必须刷新 Agent（container_id 变了）
         and cache_key in manager._agent_cache
     ):
-        cached, cached_fp, cached_mh, cached_aid, cached_sh = manager._agent_cache[cache_key]
+        cached, cached_fp, cached_mh, cached_aid, cached_sel = manager._agent_cache[cache_key]
         if (
             cached_fp == token_fp
             and cached_mh == mcp_hash
             and cached_aid == cache_agent_key
-            and cached_sh == skill_hash
+            and cached_sel == selection_sig
         ):
             return cached, None
 
@@ -331,8 +323,6 @@ async def create_deep_agent_for_session(
             mcp_tools=mcp_tools,
             checkpointer=manager.checkpointer,
             store=manager.store,
-            exposed_skill_metas=exposed_metas,
-            loaded_skill_metas=trigger_metas,
             selected_skill_ids=selected_skill_ids,
             agent_kind=agent_kind,
             skip_sandbox=skip_sandbox,
@@ -340,6 +330,7 @@ async def create_deep_agent_for_session(
             agent_skills_root=agent_skills_root,
             agent_id_for_sandbox=agent_id_for_sandbox,
             llm=llm,
+            config_changes=config_changes,
         )
     except SandboxUserLimitExceeded as limit_err:
         return None, limit_err.to_error_payload()
@@ -349,6 +340,6 @@ async def create_deep_agent_for_session(
         return None, err
 
     if app_config.AGENT_CACHE_ENABLED:
-        manager._agent_cache[cache_key] = (wrapper, token_fp, mcp_hash, cache_agent_key, skill_hash)
+        manager._agent_cache[cache_key] = (wrapper, token_fp, mcp_hash, cache_agent_key, selection_sig)
 
     return wrapper, None

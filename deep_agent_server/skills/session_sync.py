@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import shutil
 from dataclasses import dataclass
@@ -15,7 +16,6 @@ from typing import Dict, List, Optional, Tuple
 
 from config import get_logger
 from deep_agent_server.skills.selector import (
-    SkillSelector,
     filter_skill_dirs_by_ids,
     resolve_selected_pool_dirs,
 )
@@ -48,7 +48,10 @@ def compute_selection_key(
         token = ["*"]
     else:
         token = sorted(str(s).strip() for s in selected_skill_ids if str(s).strip())
-    return SkillSelector.match_hash(token) + ":" + SkillSelector.match_hash(sorted(pool))
+    return (
+        hashlib.md5(json.dumps(token).encode()).hexdigest()[:12] + ":"
+        + hashlib.md5(json.dumps(sorted(pool)).encode()).hexdigest()[:12]
+    )
 
 
 def _manifest_path(mirror_dir: Path) -> Path:

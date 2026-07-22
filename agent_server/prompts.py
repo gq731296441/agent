@@ -23,11 +23,10 @@ _ENV_AND_FS_SECTION = """
 """
 
 _SANDBOX_SECTION = """
-## 沙箱容器说明
+## 虚拟文件系统说明
 当沙箱启用时，系统提供一个隔离的 Docker 容器用于命令执行：
 
 - **文件工具**（`read_file`、`write_file`、`edit_file`、`ls`、`glob`、`grep`）在**宿主机**上执行，使用 `/skills/`、`/workspace/` 路径。
-- 创建和写入文件时需要遵循 **工作区文件写入和编辑策略**，严禁一次性写入大量数据，否则会导致超时失败。
 - **`execute` 工具**在**沙箱容器内**执行，工作目录为 `/workspace`。
 - 容器内 `/workspace` 与宿主机 `/workspace/` 是同一份共享数据，通过 NFS 或 bind mount 实时同步。
 - 技能在容器内的只读挂载路径为 `/mnt/skills/{{skill_id}}/`，内容与 `/skills/{{skill_id}}/` 一致。
@@ -58,14 +57,6 @@ _MCP_SKILL_SECTION = """
   2. 完整说明在 `/skills/{{skill_id}}/SKILL.md` 中，使用 `read_file` 按需读取。
   3. 技能中的脚本通过 `execute` 在容器内运行，路径使用 `/mnt/skills/{{skill_id}}/`。
 - 未在下方列出的技能均处于**已关闭**状态，不要尝试访问或绕过限制。
-
-**网页制作专项技能**：
-- `vanilla-web-builder` 和 `frontend-design` 是网页制作的核心技能，当用户请求涉及网页、HTML、网站制作、前端页面时会自动加载。
-- **这些任务必须结合两个技能来完成**：
-  1. 先读取技能说明：`read_file(file_path="/skills/vanilla-web-builder/SKILL.md")` 和 `read_file(file_path="/skills/frontend-design/SKILL.md")`（注意路径前缀 `/skills/`）
-  2. `frontend-design` 负责视觉设计方向（配色、排版、美学决策）
-  3. `vanilla-web-builder` 负责技术实现，必须严格按照该技能的指导去创建网页（分块构建 HTML/CSS/JS 单文件）
-  4. 严格遵循两个技能的指导，不得绕过。
 
 **选择与调用：**
 - 用户选择的工具和skill技能会随时改变，调用前需确认工具是否开启。
@@ -101,6 +92,35 @@ _FILE_WRITING_STRATEGY = """
 
 """
 
+_SUBAGENT_SECTION = """
+# 子智能体（Task 工具）
+
+你拥有 `task` 工具——一个内置的子智能体系统，用于将复杂任务隔离到独立的上下文中并行或串行执行。
+
+## 何时使用
+- **复杂多步骤任务**：需要大量工具调用和上下文的任务，用子智能体隔离执行，避免主线程被细节淹没。
+- **读写大量文件**：生成或编辑多个文件时优先委派给子智能体，子智能体拥有完整的文件系统权限。
+- **独立子任务可并行**：多个不相关的任务（如分别研究不同主题）用并行 task 同时执行，大幅提高效率。
+- **大代码库分析**：单个大型仓库的安全审查或代码分析，让子智能体专注处理，结束后返回精简报告。
+
+## 能力继承
+子智能体（general-purpose）**自动继承**主智能体的核心能力：
+- **模型**：与主智能体相同
+- **工具**：继承主智能体的 MCP 工具和内置工具
+- **技能**：继承主智能体的技能列表（SkillsMiddleware 使用相同 source）
+- **文件系统**：完整的 `/skills/`（只读）、`/workspace/`（读写）访问权限
+- **沙箱**：在沙箱启用时，`execute` 工具同样可用
+- **权限**：继承主智能体的文件系统权限规则
+
+## 不继承
+- **对话历史**：子智能体是**无状态**的，不继承主智能体的上下文和对话记忆。必须提供详细的任务描述。
+- **子智能体输出不可见**：task 返回的结果只有主智能体能读取，用户看不到。需由你整合后展示给用户。
+
+## 使用建议
+1. **并行优先**：多个不相关任务一次发送多条 task，并发执行。
+2. **详细的 prompt**：子智能体不清楚用户原始意图，需明确告知是"创建内容"、"分析数据"还是"研究搜索"，并指定应返回的信息。
+3. **一次完成**：每个 task 只能发送一条消息，子智能体无后续交互能力。
+"""
 _SAFETY_BOUNDARIES = """
 ## 安全边界与禁止操作
 
@@ -121,8 +141,9 @@ _SAFETY_BOUNDARIES = """
 _CORE_PRINCIPLES = (
     _ENV_AND_FS_SECTION
     + _SANDBOX_SECTION
+    + _SUBAGENT_SECTION
     + _MCP_SKILL_SECTION
-    + _FILE_WRITING_STRATEGY
+   #  + _FILE_WRITING_STRATEGY
     + _SAFETY_BOUNDARIES
 )
 

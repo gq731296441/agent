@@ -68,6 +68,7 @@ class DockerSandboxService(SandboxService):
         *,
         agent_skills_root=None,
         agent_id: Optional[str] = None,
+        selected_skill_ids: Optional[list[str]] = None,
     ):
         from deep_agent_server.backend_factory import build_sandbox_backend_factory
 
@@ -80,6 +81,7 @@ class DockerSandboxService(SandboxService):
             user_token=user_token,
             agent_skills_root=agent_skills_root,
             agent_id=agent_id,
+            selected_skill_ids=selected_skill_ids,
         )
 
     async def ensure_with_skills(

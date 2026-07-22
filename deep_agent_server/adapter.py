@@ -8,6 +8,7 @@ run_id、conversation_id、step_index 等 Deep 模式专有字段。
 import json
 import mimetypes
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -22,6 +23,7 @@ from deep_agent_server.hitl.interrupt_handler import (
     parse_hitl_actions_from_interrupts,
 )
 from deep_agent_server.hitl.tool_call_link import match_hitl_action_index
+from deep_agent_server.subagent_record import summarize_subagent_input, task_subagent_name
 from utils.extractors import ThinkTagParser, ToolCallAccumulator, extract_reasoning_from_chunk, extract_streaming_json_field
 
 # 内置工具 → 前端 MessageType 映射（按 deepagents 工具名分组）
@@ -211,6 +213,20 @@ def _stringify_tool_stream_output(output: Any) -> str:
     return str(output)
 
 
+def _extract_tool_call_id_from_ns(namespace: tuple) -> Optional[str]:
+    """从 v2 namespace 提取 task 工具的 tool_call_id。
+
+    LangGraph v2 子图流中 namespace="tools:<tool_call_id>",
+    其中 tool_call_id 就是主 agent 调用 task() 时的 call_* ID。
+    """
+    if not namespace:
+        return None
+    for seg in namespace:
+        if seg.startswith("tools:"):
+            return seg.split(":", 1)[1]
+    return None
+
+
 class DeepEventAdapter:
     """
     LangGraph astream 输出 → AgentMessage 流式适配器。
@@ -259,6 +275,12 @@ class DeepEventAdapter:
         self._db_completed_tool_call_ids: set = set()
         # 子 agent 栈：{subagent_run_id, parent_tool_call_id}
         self._subagent_stack: List[dict] = []
+        # 当前 stream 的 LangGraph namespace（子图标识），用于并发子 agent 归属判断
+        self._active_namespace: tuple = ()
+        # 上次 model 节点对应的 namespace，检测跨子 agent 切換时强制 flush 缓冲区
+        self._last_model_namespace: tuple = ()
+        # 按 namespace 保存 tool_call_accumulator 状态，防止并发子 agent 的 chunk 交叉污染
+        self._ns_accumulator_backup: dict[tuple, dict] = {}
         self.interrupted = False
         self._think_parser = ThinkTagParser()
         self._reasoning_notified = False
@@ -277,6 +299,9 @@ class DeepEventAdapter:
         self._reasoning_segment_flushed: bool = False
         # 上下文压缩后抑制当前 model 段输出（防止摘要推理和摘要内容泄露到前端/DB）
         self._summarization_suppress: bool = False
+        # task 输入 FIFO 队列：namespace UUID 与 LLM tool_call_id 不匹配时，
+        # 按子智能体派发顺序关联正确的 task_input
+        self._unmatched_subagent_uuids: deque = deque()
 
     def bind_hitl_resume(
         self,
@@ -386,14 +411,122 @@ class DeepEventAdapter:
             return ""
         return str(content)
 
+    def _wrap_subagent_event(self, enriched: dict, subevent_type: str) -> dict:
+        """为 subagent_event 消息添加 subevent_type 字段，方便前端按原类型渲染。"""
+        enriched["subevent_type"] = subevent_type
+        return enriched
+
+    def _current_subagent_id(self) -> Optional[str]:
+        """返回当前子 agent 的 UUID。
+
+        v2 namespace "tools:<tool_call_id>" → _active_subagents[tool_call_id] → UUID。
+        100% 精准，无需 FIFO 猜测。
+        """
+        ns = getattr(self, "_active_namespace", ()) or ()
+        if not ns:
+            return None
+        tool_call_id = _extract_tool_call_id_from_ns(ns)
+        if not tool_call_id:
+            return None
+        # 获取或创建 UUID（_emit_single_tool_start 已建立映射）
+        sid = self._active_subagents.get(tool_call_id)
+        if not sid:
+            sid = str(uuid.uuid4())
+            self._active_subagents[tool_call_id] = sid
+        # 延迟发射 SUBAGENT_START（首次见到此 tool_call_id 的 namespace 事件时）
+        self._emit_subagent_start_if_needed(tool_call_id)
+        return sid
+
+    def _emit_subagent_start_if_needed(self, tool_call_id: str) -> None:
+        """首次见到 tool_call_id 的 namespace 事件时，发射 SUBAGENT_START。"""
+        if not hasattr(self, "_started_subagent_ids"):
+            self._started_subagent_ids: set[str] = set()
+        if tool_call_id in self._started_subagent_ids:
+            return
+        self._started_subagent_ids.add(tool_call_id)
+
+        # 通过 _active_subagents 获取 UUID（_emit_single_tool_start 已建立映射）
+        sid = self._active_subagents.get(tool_call_id)
+        if not sid:
+            sid = str(uuid.uuid4())
+            self._active_subagents[tool_call_id] = sid
+
+        # 查找 task input：按 UUID 查 _active_subagent_inputs →
+        # 按 tool_call_id 查 _pending_subagent_inputs →
+        # 按 FIFO 队列（namespace UUID 与 LLM call_* ID 不匹配时回退）
+        task_input = self._active_subagent_inputs.get(sid)
+        if not task_input:
+            task_input = self._pending_subagent_inputs.pop(tool_call_id, {})
+        if not task_input:
+            # namespace 中的 tool_call_id（LangGraph 内部 UUID）可能与
+            # LLM 的 tool_call_id（call_* 格式）不同。此时按派发顺序从
+            # FIFO 队列取出最近一个 task UUID 获取正确的 args。
+            while self._unmatched_subagent_uuids:
+                candidate_uuid = self._unmatched_subagent_uuids.popleft()
+                candidate = self._active_subagent_inputs.get(candidate_uuid)
+                if candidate and isinstance(candidate, dict) and (
+                    candidate.get("subagent_type") or candidate.get("description")
+                ):
+                    task_input = candidate
+                    # 将 namespace UUID 关联到正确的子 agent UUID，
+                    # 并同步更新 sid，确保 subagent_start 与后续
+                    # subagent_event 使用相同的 subagent_run_id
+                    self._active_subagents[tool_call_id] = candidate_uuid
+                    sid = candidate_uuid
+                    break
+        if not task_input:
+            # 所有回退均失败：记录告警信息辅助排查
+            from config import get_logger as _get_logger
+            _get_logger(__name__).warning(
+                f"[Adapter] _emit_subagent_start_if_needed 无法定位 task_input: "
+                f"tool_call_id={tool_call_id}, sid={sid}, "
+                f"active_subagents_keys={list(self._active_subagents.keys())}, "
+                f"active_subagent_inputs_keys={list(self._active_subagent_inputs.keys())}, "
+                f"unmatched_queue={list(self._unmatched_subagent_uuids)}"
+            )
+        if not task_input:
+            task_input = {}
+        self._active_subagent_inputs.setdefault(sid, task_input)
+
+        name = task_subagent_name(task_input) if task_input else "general-purpose"
+        input_summary = summarize_subagent_input(
+            task_input, max_chars=app_config.CONTENT_SUMMARY_MAX_CHARS
+        )
+
+        content = base_content(
+            run_id=self.run_id,
+            conversation_id=self.conversation_id,
+            tool_name="task",
+            tool_call_id=tool_call_id,
+            args=task_input,
+            subagent_run_id=sid,
+        )
+        content["name"] = name
+        content["input_summary"] = input_summary
+        content["status"] = "running"
+        msg = self._enrich(
+            AgentMessage(
+                type=MessageType.SUBAGENT_START,
+                sender=SenderType.SYSTEM,
+                session_id=self.session_id,
+                content=content,
+                save=True,
+            ),
+        )
+
+        if not hasattr(self, "_pending_activate_msgs"):
+            self._pending_activate_msgs: list[dict] = []
+        self._pending_activate_msgs.append(msg)
+
     async def _emit_chat_chunk(self, text: str) -> AsyncGenerator[dict, None]:
         if not text or self._summarization_suppress:
             return
         self._current_llm_text += text
         self._chat_streamed = True
-        yield self._enrich(
+        sid = self._current_subagent_id()
+        msg = self._enrich(
             AgentMessage(
-                type=MessageType.CHAT,
+                type=MessageType.SUBAGENT_EVENT if sid else MessageType.CHAT,
                 sender=SenderType.ASSISTANT,
                 session_id=self.session_id,
                 content=text,
@@ -401,6 +534,54 @@ class DeepEventAdapter:
             ),
             track_step=False,
         )
+        if sid:
+            msg["subagent_run_id"] = sid
+            self._wrap_subagent_event(msg, "chat")
+        yield msg
+
+    def _emit_reasoning_msg(self, raw_type: str, content, save: bool, track_step: bool = False) -> dict:
+        """产出推理消息；若在子 agent 上下文中自动包装为 SUBAGENT_EVENT。
+
+        主 agent 的 REASONING_FINAL（累积完整推理，save=True）仅落库不推送前端，
+        由 agent_manager 的类型过滤统一拦截。
+
+        子 agent 的 REASONING_FINAL 也包装为 SUBAGENT_EVENT（确保 DB 中按
+        subagent_run_id 正确分组），由 agent_manager 按 subevent_type 过滤
+        避免推送到前端。
+
+        子 agent 上下文中的 content 会附加 subevent_type 字段，
+        便于前端从历史记录加载时区分思考/回复。
+        """
+        sid = self._current_subagent_id()
+        is_db_only = raw_type in (MessageType.REASONING_FINAL,)
+        if is_db_only:
+            # REASONING_FINAL：子 agent 上下文中也转为 SUBAGENT_EVENT，
+            # 确保历史记录按 subagent_run_id 正确分组；
+            # agent_manager 按 subevent_type=="reasoning_final" 过滤 WS 推送
+            msg_type = MessageType.SUBAGENT_EVENT if sid else raw_type
+        else:
+            msg_type = MessageType.SUBAGENT_EVENT if sid else raw_type
+
+        # 子 agent 上下文中，content 附加 subevent_type 供历史记录识别
+        subevent_type = raw_type.value if isinstance(raw_type, type(MessageType.CHAT)) else str(raw_type)
+        if sid and isinstance(content, dict):
+            content = {**content, "subevent_type": subevent_type}
+
+        msg = self._enrich(
+            AgentMessage(
+                type=msg_type,
+                sender=SenderType.ASSISTANT,
+                session_id=self.session_id,
+                content=content,
+                save=save,
+            ),
+            track_step=track_step,
+        )
+        if sid:
+            msg["subagent_run_id"] = sid
+            if msg_type == MessageType.SUBAGENT_EVENT:
+                self._wrap_subagent_event(msg, subevent_type)
+        return msg
 
     async def _append_reasoning_chunk(self, chunk: str) -> AsyncGenerator[dict, None]:
         """累积推理文本；开启 REASONING_STREAM_ENABLED 时按 chunk 推前端。"""
@@ -408,62 +589,46 @@ class DeepEventAdapter:
             return
         self._current_reasoning_text += chunk
         if app_config.REASONING_STREAM_ENABLED:
-            yield self._enrich(
-                AgentMessage(
-                    type=MessageType.REASONING,
-                    sender=SenderType.ASSISTANT,
-                    session_id=self.session_id,
-                    content={"text": chunk},
-                    save=False,
-                ),
-                track_step=False,
+            yield self._emit_reasoning_msg(
+                MessageType.REASONING, {"text": chunk}, save=False
             )
         elif not self._reasoning_notified:
             self._reasoning_notified = True
-            yield self._enrich(
-                AgentMessage(
-                    type=MessageType.REASONING,
-                    sender=SenderType.ASSISTANT,
-                    session_id=self.session_id,
-                    content="正在推理中...",
-                    save=False,
-                ),
-                track_step=False,
+            yield self._emit_reasoning_msg(
+                MessageType.REASONING, "正在推理中...", save=False
             )
 
-    async def _flush_reasoning_text(self) -> AsyncGenerator[dict, None]:
+    async def _flush_reasoning_text(self, persist: bool = True) -> AsyncGenerator[dict, None]:
         if self._summarization_suppress:
             self._current_reasoning_text = ""
             return
         text = (self._current_reasoning_text or "").strip()
         if not text:
             return
-        yield self._enrich(
-            AgentMessage(
-                type=MessageType.REASONING_FINAL,
-                sender=SenderType.ASSISTANT,
-                session_id=self.session_id,
-                content={"text": text},
-                save=True,
-            ),
-            # 流式 reasoning chunk 不递增 step_index，final 须保持一致以便前端合并
-            track_step=not app_config.REASONING_STREAM_ENABLED,
-        )
+        if persist:
+            yield self._emit_reasoning_msg(
+                MessageType.REASONING_FINAL, {"text": text}, save=True,
+                track_step=not app_config.REASONING_STREAM_ENABLED,
+            )
         self._current_reasoning_text = ""
 
-    async def _flush_reasoning_if_needed(self) -> AsyncGenerator[dict, None]:
-        """将当前 model 段累积的推理一次性刷为 reasoning_final。"""
+    async def _flush_reasoning_if_needed(self, persist: bool = True) -> AsyncGenerator[dict, None]:
+        """将当前 model 段累积的推理一次性刷为 reasoning_final。
+        persist=False 时仅清缓冲不落库，用于 namespace 切换场景。
+        """
         if self._reasoning_segment_flushed or self._summarization_suppress:
             return
         text = (self._current_reasoning_text or "").strip()
         if not text:
             return
         self._reasoning_segment_flushed = True
-        async for msg in self._flush_reasoning_text():
+        async for msg in self._flush_reasoning_text(persist=persist):
             yield msg
 
-    async def flush_assistant_text(self) -> AsyncGenerator[dict, None]:
-        """刷新助手文本：推前端 CHAT（若未流式推送）+ 存库 LLM_TEXT_FINAL。"""
+    async def flush_assistant_text(self, persist: bool = True) -> AsyncGenerator[dict, None]:
+        """刷新助手文本：推前端 CHAT（若未流式推送）+ 存库 LLM_TEXT_FINAL。
+        persist=False 时仅推送前端不落库，用于 namespace 切换场景。
+        """
         if self._summarization_suppress:
             self._current_llm_text = ""
             self._chat_streamed = False
@@ -471,10 +636,11 @@ class DeepEventAdapter:
         text = (self._current_llm_text or "").strip()
         if not text:
             return
+        sid = self._current_subagent_id()
         if not self._chat_streamed:
-            yield self._enrich(
+            msg = self._enrich(
                 AgentMessage(
-                    type=MessageType.CHAT,
+                    type=MessageType.SUBAGENT_EVENT if sid else MessageType.CHAT,
                     sender=SenderType.ASSISTANT,
                     session_id=self.session_id,
                     content=text,
@@ -482,22 +648,40 @@ class DeepEventAdapter:
                 ),
                 track_step=False,
             )
-        yield self._enrich(
-            AgentMessage(
-                type=MessageType.LLM_TEXT_FINAL,
-                sender=SenderType.ASSISTANT,
-                session_id=self.session_id,
-                content={"text": text},
-                save=True,
+            if sid:
+                msg["subagent_run_id"] = sid
+                self._wrap_subagent_event(msg, "chat")
+            yield msg
+        # LLM_TEXT_FINAL 仅落库；子 agent 上下文中包装为 SUBAGENT_EVENT
+        # persist=False 时跳过落库（namespace 切换场景）
+        if persist:
+            subevent = "chat"
+            content = {"text": text}
+            if sid:
+                content["subevent_type"] = subevent
+            llm_msg = self._enrich(
+                AgentMessage(
+                    type=MessageType.LLM_TEXT_FINAL if not sid else MessageType.SUBAGENT_EVENT,
+                    sender=SenderType.ASSISTANT,
+                    session_id=self.session_id,
+                    content=content,
+                    save=True,
+                )
             )
-        )
+            if sid:
+                llm_msg["subagent_run_id"] = sid
+                self._wrap_subagent_event(llm_msg, subevent)
+            yield llm_msg
         self._current_llm_text = ""
         self._chat_streamed = False
 
     async def finalize_model_segment(
-        self, *, skip_reasoning: bool = False
+        self, *, skip_reasoning: bool = False, persist: bool = True
     ) -> AsyncGenerator[dict, None]:
-        """离开 model 节点或流结束时：刷 think 缓冲、推理与助手正文（与 Light runner 对齐）。"""
+        """离开 model 节点或流结束时：刷 think 缓冲、推理与助手正文（与 Light runner 对齐）。
+
+        persist=False 时仅推送前端不落库，用于 namespace 切换场景。
+        """
         # 上下文压缩触发后，跳过当前 model 段的 finalize，
         # 防止摘要推理和摘要内容被落库为 REASONING_FINAL / LLM_TEXT_FINAL
         if self._summarization_suppress:
@@ -512,14 +696,14 @@ class DeepEventAdapter:
         if thinking_part:
             self._current_reasoning_text += thinking_part
         if answer_part:
-            async for msg in self._flush_reasoning_if_needed():
+            async for msg in self._flush_reasoning_if_needed(persist=persist):
                 yield msg
             async for msg in self._emit_chat_chunk(answer_part):
                 yield msg
         if not skip_reasoning:
-            async for msg in self._flush_reasoning_if_needed():
+            async for msg in self._flush_reasoning_if_needed(persist=persist):
                 yield msg
-        async for msg in self.flush_assistant_text():
+        async for msg in self.flush_assistant_text(persist=persist):
             yield msg
 
     def _enrich(self, msg: AgentMessage, *, track_step: bool = True) -> dict:
@@ -664,16 +848,40 @@ class DeepEventAdapter:
                 track_step=False,
             )
 
+    def _pre_activate_namespace(self, namespace: tuple) -> None:
+        """在 namespace 首次出现时预激活，确保 SUBAGENT_START 先于内容推送。"""
+        tool_call_id = _extract_tool_call_id_from_ns(namespace)
+        if not tool_call_id:
+            return
+        self._emit_subagent_start_if_needed(tool_call_id)
+
     async def adapt_astream_chunk(
-        self, mode: str, chunk: Any
+        self, mode: str, chunk: Any, *, namespace: tuple = ()
     ) -> AsyncGenerator[dict, None]:
         """处理 astream 的 messages / updates 模式（含 HITL 中断）。"""
         if mode == "updates":
             async for msg in self._adapt_updates_chunk(chunk):
                 yield msg
         elif mode == "messages":
+            self._active_namespace = namespace  # 暂存 namespace 供下游推断子 agent 归属
+            # 预激活：确保 SUBAGENT_START 在内容（reasoning/chat）之前推送
+            self._pre_activate_namespace(namespace)
+            for msg in self._drain_pending_activations():
+                yield msg
             async for msg in self._adapt_messages_chunk(chunk):
                 yield msg
+            self._active_namespace = ()
+        # 排空延迟发射的 SUBAGENT_START 消息
+        for msg in self._drain_pending_activations():
+            yield msg
+
+    def _drain_pending_activations(self) -> list[dict]:
+        """排空 _activate_pregel 产生的延迟 SUBAGENT_START 消息。"""
+        msgs = getattr(self, "_pending_activate_msgs", None)
+        if not msgs:
+            return []
+        self._pending_activate_msgs = []
+        return msgs
 
     async def _adapt_updates_chunk(self, chunk: Any) -> AsyncGenerator[dict, None]:
         if not isinstance(chunk, dict):
@@ -775,38 +983,81 @@ class DeepEventAdapter:
 
         node = metadata.get("langgraph_node", "unknown")
 
-        # 诊断日志：记录每次进入 _adapt_messages_chunk 的基本信息
-        # from config import get_logger
-        # _dbg = get_logger(__name__)
-        # has_content = bool(getattr(message_chunk, "content", None))
-        # has_tcc = bool(getattr(message_chunk, "tool_call_chunks", None))
-        # has_tc = bool(getattr(message_chunk, "tool_calls", None))
-        # if has_tcc or has_tc:  # 只记录与工具调用相关的chunk
-        #     tcc_info = ""
-        #     if has_tcc:
-        #         tcc_lens = [len(tc.get("args") or "") for tc in message_chunk.tool_call_chunks]
-        #         tcc_info = f"tcc={len(message_chunk.tool_call_chunks)}, args_lens={tcc_lens}"
-        #     tc_info = ""
-        #     if has_tc:
-        #         tc_info = f"tc={len(message_chunk.tool_calls)}"
-        #     _dbg.info(
-        #         f"[TOOL_ARGS_STREAM] node={node}, content={has_content}, "
-        #         f"last_node={self._last_node}, {tcc_info} {tc_info}"
-        #     )
-
         # 离开 model 节点时：先刷推理/回复，再 emit 缓存的 tool_call start
+        # 切回对应的 namespace，防止并发子 agent 导致的归属错误
         if self._last_node == "model" and node != "model":
-            async for msg in self.finalize_model_segment():
-                yield msg
-            async for msg in self._emit_pending_tool_starts():
-                yield msg
+            saved_ns = getattr(self, "_active_namespace", ())
+            if self._last_model_namespace:
+                self._active_namespace = self._last_model_namespace
+            try:
+                async for msg in self.finalize_model_segment():
+                    yield msg
+                async for msg in self._emit_pending_tool_starts():
+                    yield msg
+            finally:
+                self._active_namespace = saved_ns
 
         if node == "model":
+            current_ns = getattr(self, "_active_namespace", ()) or ()
+            # 检测 namespace 变化（子 agent 切换）：发射旧 namespace 的待处理
+            # tool_calls，然后备份整个状态（含文本缓冲区和 _pending_tool_calls），
+            # 再恢复新 namespace 的状态。不在此时 flush 文本 — 文本在各自
+            # namespace 中持续累积，仅在 model→tools 转换或 tools 事件时落库。
+            if (self._last_node == "model"
+                    and self._last_model_namespace
+                    and self._last_model_namespace != current_ns):
+                saved_ns = self._active_namespace
+                self._active_namespace = self._last_model_namespace
+                try:
+                    # 发射旧 namespace 的待处理 tool_calls（归属到正确的子 agent）
+                    async for msg in self._emit_pending_tool_starts():
+                        yield msg
+                finally:
+                    self._active_namespace = saved_ns
+                # 保存旧 namespace 的 accumulator + 文本缓冲区 + pending_tool_calls
+                old_ns = self._last_model_namespace
+                self._ns_accumulator_backup[old_ns] = {
+                    "accumulated": dict(self._tool_call_accumulator._accumulated),
+                    "streamed_args": dict(self._streamed_tool_args),
+                    "progress_emitted": set(self._tool_progress_emitted),
+                    "reasoning_text": self._current_reasoning_text,
+                    "llm_text": self._current_llm_text,
+                    "chat_streamed": self._chat_streamed,
+                    "reasoning_notified": self._reasoning_notified,
+                    "reasoning_segment_flushed": self._reasoning_segment_flushed,
+                    "pending_tool_calls": list(self._pending_tool_calls),
+                    "pending_tool_inputs": dict(self._pending_tool_inputs),
+                }
+                self._pending_tool_calls.clear()
+                self._pending_tool_inputs.clear()
+                if current_ns in self._ns_accumulator_backup:
+                    state = self._ns_accumulator_backup.pop(current_ns)
+                    self._tool_call_accumulator._accumulated = state["accumulated"]
+                    self._streamed_tool_args = state["streamed_args"]
+                    self._tool_progress_emitted = state["progress_emitted"]
+                    self._current_reasoning_text = state.get("reasoning_text", "")
+                    self._current_llm_text = state.get("llm_text", "")
+                    self._chat_streamed = state.get("chat_streamed", False)
+                    self._reasoning_notified = state.get("reasoning_notified", False)
+                    self._reasoning_segment_flushed = state.get("reasoning_segment_flushed", False)
+                    self._pending_tool_calls = state.get("pending_tool_calls", [])
+                    self._pending_tool_inputs = state.get("pending_tool_inputs", {})
+                else:
+                    self._tool_call_accumulator._accumulated.clear()
+                    self._streamed_tool_args.clear()
+                    self._tool_progress_emitted.clear()
+                    self._current_reasoning_text = ""
+                    self._current_llm_text = ""
+                    self._chat_streamed = False
+                    self._reasoning_notified = False
+                    self._reasoning_segment_flushed = False
+                    self._pending_tool_calls.clear()
+                    self._pending_tool_inputs.clear()
+            self._last_model_namespace = current_ns
             if self._last_node != "model":
                 self._reasoning_notified = False
                 self._reasoning_segment_flushed = False
                 self._think_parser.reset()
-                # 进入新的 model 段，清除压缩抑制标志（正常输出不受影响）
                 self._summarization_suppress = False
 
             # 优先处理 reasoning_content 字段（CoT 模型）；有则禁用 think 标签解析
@@ -836,8 +1087,10 @@ class DeepEventAdapter:
             if hasattr(message_chunk, "tool_call_chunks") and message_chunk.tool_call_chunks:
                 self._tool_call_accumulator.accumulate_chunks(message_chunk.tool_call_chunks)
                 # 流式输出工具参数增量（write_file/edit_file 的大文本字段）
-                async for msg in self._emit_tool_args_stream():
-                    yield msg
+                # 子 agent 上下文跳过 — 只推送 start + result，不推送 tool_args_stream
+                if not self._current_subagent_id():
+                    async for msg in self._emit_tool_args_stream():
+                        yield msg
 
             tool_calls = getattr(message_chunk, "tool_calls", None) or []
             if tool_calls:
@@ -897,9 +1150,13 @@ class DeepEventAdapter:
         if tool_name not in _TASK_TOOLS and tool_input:
             self._pending_tool_inputs[tool_call_id] = tool_input
         msg_type = _tool_message_type(tool_name, True)
+        _original_msg_type = msg_type  # 保存原始类型，子 agent 包装时用作 subevent_type
 
         subagent_run_id = None
         if tool_name in _TASK_TOOLS:
+            # 生成 UUID 作为 subagent_run_id，存入 _active_subagents 建立
+            # tool_call_id → UUID 的映射。namespace 中提取 tool_call_id 后
+            # 通过此映射获取 UUID，100% 精准。
             subagent_run_id = self._active_subagents.get(tool_call_id)
             if not subagent_run_id:
                 subagent_run_id = str(uuid.uuid4())
@@ -910,6 +1167,19 @@ class DeepEventAdapter:
                 "subagent_run_id": subagent_run_id,
                 "parent_tool_call_id": tool_call_id,
             })
+            # 将 UUID 排入 FIFO 队列，供 _emit_subagent_start_if_needed 在
+            # namespace UUID 与 LLM tool_call_id 不匹配时按派发顺序恢复 args
+            self._unmatched_subagent_uuids.append(subagent_run_id)
+            # task 工具不在此发射 SUBAGENT_START — 延迟到首次 pregel 事件
+            # 直接 return，跳过下方的消息发射
+            return
+        elif self._subagent_stack:
+            # 子 agent 内部发出的工具调用（非 task），用 namespace 映射获取正确的 subagent_run_id
+            # 不能用 _subagent_stack[-1]：并发子 agent 时栈顶不一定是当前执行的子 agent
+            subagent_run_id = self._current_subagent_id()
+            if not subagent_run_id:
+                subagent_run_id = self._subagent_stack[-1].get("subagent_run_id")
+            msg_type = MessageType.SUBAGENT_EVENT
 
         content = base_content(
             run_id=self.run_id,
@@ -919,7 +1189,7 @@ class DeepEventAdapter:
             args=tool_input,
             subagent_run_id=subagent_run_id,
         )
-        yield self._enrich(
+        msg = self._enrich(
             AgentMessage(
                 type=msg_type,
                 sender=SenderType.SYSTEM,
@@ -928,6 +1198,10 @@ class DeepEventAdapter:
                 save=True,
             )
         )
+        if subagent_run_id and msg_type == MessageType.SUBAGENT_EVENT:
+            msg["subagent_run_id"] = subagent_run_id
+            self._wrap_subagent_event(msg, _original_msg_type.value)
+        yield msg
         await self._link_resumed_tool_call(tool_name, tool_input, tool_call_id)
 
         # 工具调用正式发出后，清理对应的流式 args 追踪状态
@@ -973,7 +1247,10 @@ class DeepEventAdapter:
         1. 内容尚未到达 → 如果工具名已知且有关键参数可提取，发送进度通知
            (delta="" + key_params)，让前端展示"正在生成 xxx..."
         2. 内容开始到达 → 逐 chunk 推送 delta 增量
+
+        在子 agent 上下文中自动包装为 SUBAGENT_EVENT。
         """
+        sid = self._current_subagent_id()
         for index, state in self._tool_call_accumulator.peek_all().items():
             name = state.get("name")
             if not name or name not in _STREAMABLE_TOOLS:
@@ -987,29 +1264,37 @@ class DeepEventAdapter:
             tool_call_id = state.get("id") or None
             current_content = extract_streaming_json_field(args_str, field_name)
             prev_content = self._streamed_tool_args.get(index, "")
+            msg_type = MessageType.SUBAGENT_EVENT if sid else MessageType.TOOL_ARGS_STREAM
 
             # 阶段 1：内容未开始 → 尝试发送进度通知
             if len(current_content) <= len(prev_content):
                 if index not in self._tool_progress_emitted:
                     key_params = _extract_tool_key_params(name, args_str)
                     self._tool_progress_emitted.add(index)
-                    yield self._enrich(
+                    content = {
+                        "tool_name": name,
+                        "tool_call_id": tool_call_id,
+                        "tool_call_index": index,
+                        "field_name": field_name,
+                        "delta": "",
+                        "key_params": key_params,
+                    }
+                    if sid:
+                        content["subagent_run_id"] = sid
+                    ts_msg = self._enrich(
                         AgentMessage(
-                            type=MessageType.TOOL_ARGS_STREAM,
+                            type=msg_type,
                             sender=SenderType.SYSTEM,
                             session_id=self.session_id,
-                            content={
-                                "tool_name": name,
-                                "tool_call_id": tool_call_id,
-                                "tool_call_index": index,
-                                "field_name": field_name,
-                                "delta": "",
-                                "key_params": key_params,
-                            },
+                            content=content,
                             save=False,
                         ),
                         track_step=False,
                     )
+                    if sid:
+                        ts_msg["subagent_run_id"] = sid
+                        self._wrap_subagent_event(ts_msg, "tool_args_stream")
+                    yield ts_msg
                 continue
 
             # 阶段 2：内容已到达 → 推送增量
@@ -1017,22 +1302,29 @@ class DeepEventAdapter:
             self._streamed_tool_args[index] = current_content
 
             if delta:
-                yield self._enrich(
+                content = {
+                    "tool_name": name,
+                    "tool_call_id": tool_call_id,
+                    "tool_call_index": index,
+                    "field_name": field_name,
+                    "delta": delta,
+                }
+                if sid:
+                    content["subagent_run_id"] = sid
+                msg = self._enrich(
                     AgentMessage(
-                        type=MessageType.TOOL_ARGS_STREAM,
+                        type=msg_type,
                         sender=SenderType.SYSTEM,
                         session_id=self.session_id,
-                        content={
-                            "tool_name": name,
-                            "tool_call_id": tool_call_id,
-                            "tool_call_index": index,
-                            "field_name": field_name,
-                            "delta": delta,
-                        },
+                        content=content,
                         save=False,
                     ),
                     track_step=False,
                 )
+                if sid:
+                    msg["subagent_run_id"] = sid
+                    self._wrap_subagent_event(msg, "tool_args_stream")
+                yield msg
 
     def _merge_accumulated_tool_calls(self) -> None:
         """将流式 tool_call_chunks 合并进 pending 列表。
@@ -1063,6 +1355,17 @@ class DeepEventAdapter:
             tc_id = entry["id"]
             if tc_id:
                 self._pending_tool_inputs[tc_id] = args_raw
+                # 同步填充 _pending_subagent_inputs，确保流式 chunk 场景下
+                # _emit_subagent_start_if_needed 的 tool_call_id 回退查找也能命中
+                if tool_name == "task" or is_task_tool_call(entry):
+                    # 尝试解析 args JSON 字符串为 dict（流式场景下可能不完整）
+                    parsed_args = args_raw
+                    if isinstance(args_raw, str):
+                        try:
+                            parsed_args = json.loads(args_raw) if args_raw.strip() else {}
+                        except json.JSONDecodeError:
+                            parsed_args = {"_raw": args_raw}
+                    self._pending_subagent_inputs[tc_id] = parsed_args if isinstance(parsed_args, dict) else {"_raw": str(parsed_args)}
             existing_ids = {
                 item.get("id") for item in self._pending_tool_calls if isinstance(item, dict)
             }
@@ -1137,9 +1440,20 @@ class DeepEventAdapter:
         ref_id = fields.get("ref_id")
         truncated = fields.get("truncated", False)
 
-        msg_type = _tool_message_type(resolved_name, False)
         fallback_args = self._pending_subagent_inputs.pop(tool_call_id, {})
+        # 优先从 _active_subagents 查找（主 agent 的 task tool_call_id），
+        # 若未命中且 _subagent_stack 非空，说明当前在子 agent 内部执行，
+        # 用 namespace 映射获取正确的 subagent_run_id
         subagent_run_id = self._active_subagents.get(tool_call_id)
+        if not subagent_run_id and self._subagent_stack:
+            subagent_run_id = self._current_subagent_id()
+            if not subagent_run_id:
+                subagent_run_id = self._subagent_stack[-1].get("subagent_run_id")
+        # 子 agent 内部的工具消息应标为 subagent_event 而非裸 fs_operation
+        msg_type = _tool_message_type(resolved_name, False)
+        _original_result_type = msg_type  # 保存原始类型，用作 subevent_type
+        if subagent_run_id and resolved_name not in _TASK_TOOLS:
+            msg_type = MessageType.SUBAGENT_EVENT
 
         if resolved_name in _TASK_TOOLS:
             async for start_msg in self._ensure_subagent_start(
@@ -1152,6 +1466,14 @@ class DeepEventAdapter:
             stored_args = self._active_subagent_inputs.pop(subagent_run_id, fallback_args)
         else:
             tool_input = _strip_runtime(self._pending_tool_inputs.pop(tool_call_id, {}))
+            # _merge_accumulated_tool_calls 可能透传原始 JSON 字符串
+            if isinstance(tool_input, str):
+                try:
+                    tool_input = json.loads(tool_input) if tool_input.strip() else {}
+                except json.JSONDecodeError:
+                    tool_input = {"_raw": tool_input}
+            if not isinstance(tool_input, dict):
+                tool_input = {}
             resolved_name = self._resolve_tool_name(tool_call_id, resolved_name, tool_input)
             async for start_msg in self._ensure_tool_start(
                 tool_call_id, resolved_name, tool_input
@@ -1179,7 +1501,7 @@ class DeepEventAdapter:
             self._pending_subagent_inputs.pop(tool_call_id, None)
             self._pop_subagent_stack(subagent_run_id)
 
-        yield self._enrich(
+        result_msg = self._enrich(
             AgentMessage(
                 type=msg_type,
                 sender=SenderType.SYSTEM,
@@ -1188,6 +1510,10 @@ class DeepEventAdapter:
                 save=True,
             )
         )
+        if subagent_run_id and msg_type == MessageType.SUBAGENT_EVENT:
+            result_msg["subagent_run_id"] = subagent_run_id
+            self._wrap_subagent_event(result_msg, _original_result_type.value)
+        yield result_msg
         if tool_call_id:
             self._persisted_tool_results.add(tool_call_id)
         self._record_conversation_file(
@@ -1227,16 +1553,29 @@ class DeepEventAdapter:
             return
 
         in_subagent = self._is_subagent_namespace(namespace)
-        ctx = self._active_subagent_context() if in_subagent else None
-        if in_subagent and not ctx:
-            if self._subagent_stack:
-                ctx = self._subagent_stack[-1]
-            elif self._active_subagents:
-                parent_id = list(self._active_subagents.keys())[-1]
-                ctx = {
-                    "subagent_run_id": self._active_subagents[parent_id],
-                    "parent_tool_call_id": parent_id,
-                }
+        # 设置 _active_namespace，使 _current_subagent_id() 能通过 namespace 映射
+        # 正确解析并发子 agent 的归属
+        saved_ns = getattr(self, "_active_namespace", ())
+        self._active_namespace = namespace
+        ctx = None
+        try:
+            if in_subagent:
+                sid = self._current_subagent_id()
+                if sid:
+                    ctx = {
+                        "subagent_run_id": sid,
+                        "parent_tool_call_id": None,  # tools 模式下无 tool_call_id
+                    }
+                if not ctx and self._subagent_stack:
+                    ctx = self._subagent_stack[-1]
+                if not ctx and self._active_subagents:
+                    parent_id = list(self._active_subagents.keys())[-1]
+                    ctx = {
+                        "subagent_run_id": self._active_subagents[parent_id],
+                        "parent_tool_call_id": parent_id,
+                    }
+        finally:
+            self._active_namespace = saved_ns
 
         if event == "tool-started":
             tool_input = payload.get("input") or {}
@@ -1254,6 +1593,11 @@ class DeepEventAdapter:
                 self._emitted_tool_names[tool_call_id] = tool_name
 
             if in_subagent and ctx:
+                # 防止重复发射：messages 模式的 _ensure_tool_start 可能已
+                # 发射过同一 tool_call_id 的启动事件
+                if tool_call_id in self._emitted_tool_starts:
+                    return
+                self._emitted_tool_starts.add(tool_call_id)
                 async for msg in self._emit_subagent_tool_event(
                     tool_name=tool_name,
                     tool_call_id=tool_call_id,
@@ -1320,6 +1664,13 @@ class DeepEventAdapter:
         parent_tool_call_id: Optional[str],
         result_text: str = "",
     ) -> AsyncGenerator[dict, None]:
+        # _pending_tool_inputs 可能存原始 JSON 字符串，统一转 dict
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except json.JSONDecodeError:
+                args = {}
+        args = args or {}
         fields = _tool_result_fields(result_text) if phase == "result" else {}
         content = base_content(
             run_id=self.run_id,

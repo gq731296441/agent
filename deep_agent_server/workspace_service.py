@@ -180,7 +180,7 @@ def list_files(
 
 def resolve_virtual_path(user_id: str, virtual_path: str) -> Tuple[Path, str, Optional[str], str]:
     """
-    解析虚拟路径 workspace/{sid}/file 或 skills/foo/SKILL.md。
+    解析虚拟路径 workspace/{sid}/file 或 skills/{skill_dir}/...。
     返回 (absolute_path, rel_path_for_index, session_id, file_kind)
     """
     uid = validate_user_id(user_id)

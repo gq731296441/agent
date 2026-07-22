@@ -274,9 +274,26 @@ def resolve_skill_bind_host_path(
     sandbox 路径。若 sandbox 路径在虚机上为空而 agent 路径有文件，则 fallback bind agent 路径。
 
     若传入 agent_id，优先检查 .agents/{agent_id}/skills/{skill_id} 下的文件。
+
+    内置技能优先从 skill-repo/ 绑定（只读，所有用户共享）。
     """
+    from deep_agent_server.skills.selector import BUILTIN_SKILL_IDS
+
     sid = (skill_id or "").strip().strip("/\\")
     if not sid or ".." in sid or "/" in sid or "\\" in sid:
+        return None
+
+    # 内置技能：直接从 skill-repo 绑定（只读，不经过用户目录）
+    if sid in BUILTIN_SKILL_IDS:
+        from config.config import app_config as _cfg
+        repo_root = _cfg.get_skill_repo_root()
+        builtin_path = Path(repo_root) / sid
+        if _skill_tree_has_files(builtin_path):
+            logger.info(f"[Workspace] skill docker bind (builtin): {builtin_path}")
+            return builtin_path.resolve()
+        logger.warning(
+            f"[Workspace] builtin skill 源目录不可用, skill={sid} path={builtin_path}"
+        )
         return None
 
     # 订阅智能体：优先使用 agent 专属 skills 目录

@@ -558,9 +558,9 @@ async def fetch_history_by_session(
         async with pool.acquire() as conn:
             return await conn.fetch(
                 """
-                SELECT id, sender, type, content, tool_call_id, 
+                SELECT id, sender, type, content, tool_call_id,
                        conversation_id, group_id, step_index, created_at, context_epoch,
-                       run_id
+                       run_id, subagent_run_id
                 FROM chat_history
                 WHERE session_id = $1
                 ORDER BY created_at DESC

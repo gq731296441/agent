@@ -1,10 +1,10 @@
 ---
 name: frontend-design
-description: Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one. Helps with aesthetic direction, typography, and making choices that don't read as templated defaults.
-version: 1.1.0
+description: 用于构建全新 UI 或重塑现有界面时，提供独特的、有意图的视觉设计指导。涉及美学方向、字体排印、以及如何做出不落俗套的设计决策。当你需要生成 HTML 文件、报告、或制作任何网页时，应使用此技能。
+version: 1.1.1
 author: platform
 tags: ["网页设计"]
-triggers: ["网页", "html", "网站", "可交互的网页", "设计", "精美"]
+triggers: ["HTML报告", "html", "网站", "可交互的网页", "网页设计", "精美网页"]
 ---
 
 # Frontend Design

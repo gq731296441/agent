@@ -414,6 +414,16 @@ class AgentManager:
                 msg_type = message.get("type")
                 if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
                     continue
+                if msg_type == MessageType.REASONING_FINAL or msg_type == MessageType.REASONING_FINAL.value:
+                    continue
+                # 子智能体的 REASONING_FINAL 存库为 subagent_event（确保按
+                # subagent_run_id 分组），但 WS 推送时按 subevent_type 过滤，
+                # 避免完整推理文本重复推送到前端
+                if (msg_type == MessageType.SUBAGENT_EVENT or msg_type == MessageType.SUBAGENT_EVENT.value):
+                    content = message.get("content") or {}
+                    subevent_type = content.get("subevent_type", "") if isinstance(content, dict) else ""
+                    if subevent_type == "reasoning_final":
+                        continue
 
                 if (
                     self.is_deep_runtime

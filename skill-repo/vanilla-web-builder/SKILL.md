@@ -1,7 +1,7 @@
 ---
 name: vanilla-web-builder
-description: 结合专业视觉设计规范，使用原生 HTML、CSS 和 JavaScript 分步骤构建高质量、美观且功能完备的网页。采用多文件项目结构（HTML/CSS/JS 分离），适用于追求独特视觉身份、轻量级性能和原生交互的专业前端开发场景。
-version: 1.2.0
+description: 需要生成HTML文件时请使用本技能，结合专业视觉设计规范，使用原生 HTML、CSS 和 JavaScript 分步骤构建高质量、美观且功能完备的HTML网页和HTML报告。采用多文件项目结构（HTML/CSS/JS 分离），适用于追求独特视觉身份、轻量级性能和原生交互的专业前端开发场景。
+version: 1.2.1
 author: platform
 tags: ["网页设计"]
 triggers: ["可交互网页", "网页", "网站", "html", "HTML报告"]

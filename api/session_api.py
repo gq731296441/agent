@@ -64,6 +64,7 @@ class HistoryItem(BaseModel):
     step_index: int = Field(default=0, description="步骤序号")
     create_time: str = Field(..., description="创建时间")
     context_epoch: int = Field(default=1, description="上下文 epoch")
+    subagent_run_id: str | None = Field(default=None, description="子智能体运行 ID")
 
 
 class SessionRunMetricsItem(BaseModel):
@@ -148,6 +149,7 @@ async def get_session_history(
                 step_index=r.get("step_index", 0) or 0,
                 create_time=_format_local_time(r["created_at"]),
                 context_epoch=int(r.get("context_epoch") or 1),
+                subagent_run_id=str(r["subagent_run_id"]) if r.get("subagent_run_id") else None,
             )
             for r in history
         ]

@@ -105,6 +105,7 @@ class DockerSandboxBackend(CompositeBackend):
         skills_root: Optional[Path] = None,
         agent_skills_root: Optional[Path] = None,
         agent_id: Optional[str] = None,
+        selected_skill_ids: Optional[list[str]] = None,
     ):
         self.user_id = user_id
         self.container_id = container_id
@@ -114,6 +115,7 @@ class DockerSandboxBackend(CompositeBackend):
         routes = build_filesystem_routes(
             user_id, session_id, store=store, skills_root=skills_root,
             agent_skills_root=agent_skills_root,
+            selected_skill_ids=selected_skill_ids,
         )
         super().__init__(
             default=self._exec_backend,
@@ -149,11 +151,13 @@ class DockerSandboxBackend(CompositeBackend):
     def ls(self, path: str) -> LsResult:
         if path == "/":
             return self._list_virtual_roots()
+        # 委托 CompositeBackend.ls 处理路由匹配和路径前缀重映射（_remap_file_info_path）。
+        # SkillsMiddleware 依赖重映射后的完整路径（如 /skills/builtin/{id}/SKILL.md）
+        # 来构建 download_files 参数，直接调用 inner backend 会丢失路由前缀。
         resolved = self._resolve_fs_backend(path)
         if resolved is None:
             return LsResult(entries=[], error=f"Unsupported path for ls: {path}")
-        backend, stripped = resolved
-        return self._coerce_ls_result(backend.ls(stripped))
+        return super().ls(path)
 
     async def als(self, path: str) -> LsResult:
         if path == "/":
@@ -161,8 +165,7 @@ class DockerSandboxBackend(CompositeBackend):
         resolved = self._resolve_fs_backend(path)
         if resolved is None:
             return LsResult(entries=[], error=f"Unsupported path for ls: {path}")
-        backend, stripped = resolved
-        return self._coerce_ls_result(await backend.als(stripped))
+        return await super().als(path)
 
     def grep(
         self,
