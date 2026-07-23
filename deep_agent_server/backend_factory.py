@@ -20,7 +20,7 @@ from deepagents.middleware.filesystem import FilesystemPermission
 
 from config.config import app_config
 from deep_agent_server.quota_backend import QuotaFilesystemBackend
-from deep_agent_server.workspace import get_skills_dir, get_workspace_dir
+from deep_agent_server.workspace import get_skills_dir, get_uploads_dir, get_workspace_dir
 
 
 # ── Skill 过滤 Backend ───────────────────────────────────────────────────────
@@ -133,6 +133,7 @@ def build_filesystem_routes(
         )
 
     workspace_root = str(get_workspace_dir(user_id, session_id))
+    uploads_root = str(get_uploads_dir(user_id))
 
     routes = {
         "/skills/": skill_backend,
@@ -142,6 +143,12 @@ def build_filesystem_routes(
             session_id=session_id,
             file_kind="workspace",
             route_prefix="workspace",
+        ),
+        "/uploads/": QuotaFilesystemBackend(
+            FilesystemBackend(root_dir=uploads_root, virtual_mode=True),
+            user_id=user_id,
+            file_kind="upload",
+            route_prefix="uploads",
         ),
     }
     if store is not None:
@@ -268,6 +275,17 @@ def build_permissions() -> list:
         FilesystemPermission(
             operations=["write", "edit"],
             paths=["/skills/**"],
+            mode="deny",
+        ),
+        # ── Uploads：只读 ──
+        FilesystemPermission(
+            operations=["read"],
+            paths=["/uploads/", "/uploads/**"],
+            mode="allow",
+        ),
+        FilesystemPermission(
+            operations=["write", "edit"],
+            paths=["/uploads/**"],
             mode="deny",
         ),
         # ── 敏感文件禁止 ──

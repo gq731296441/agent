@@ -378,6 +378,16 @@ def get_uploads_dir(user_id: str) -> Path:
     return get_user_root(user_id) / "uploads"
 
 
+def get_session_uploads_dir(user_id: str, session_id: str) -> Path:
+    """会话级上传目录：{user_id}/workspace/{session_id}/uploads/"""
+    return get_workspace_dir(user_id, session_id) / "uploads"
+
+
+def get_vm_skill_repo_dir() -> Path:
+    """返回 VM skill 仓库根路径（非用户目录，不计入配额）。"""
+    return Path(app_config.get_vm_skill_repo_root())
+
+
 def get_artifacts_dir(user_id: str) -> Path:
     return get_user_root(user_id) / "artifacts"
 

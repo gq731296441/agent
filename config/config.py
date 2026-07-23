@@ -240,15 +240,31 @@ class BaseConfig(BaseSettings):
     # ==================== Skill 市场 / 仓库 ====================
     SKILL_REPO_ROOT: Optional[str] = Field(
         default=None,
-        description="平台 Skill 只读源目录；默认项目根 skill-repo/",
+        description="平台 Skill 只读源目录（内置 skill）；默认项目根 skill-repo/",
+    )
+    SKILL_REPO_VM_ROOT: Optional[str] = Field(
+        default=None,
+        description="VM 上 Skill 仓库根路径（可读写，存储用户上传和迁移的 skill）；默认 {WORKSPACE_ROOT}/.skill-repo/",
     )
     SKILL_CATALOG_AUTO_SYNC: bool = Field(
         default=True,
-        description="应用启动时从 skill-repo 同步 skill_catalog 表",
+        description="应用启动时从 VM skill-repo 同步 skill_catalog 表",
     )
     SKILL_INTERNAL_TOKEN: Optional[str] = Field(
         default="agent-cmtool",
         description="管理接口 /internal/skills/* 鉴权 Token（X-Internal-Token）",
+    )
+    SKILL_UPLOAD_MAX_BYTES: int = Field(
+        default=52428800,
+        description="Skill ZIP 上传最大字节数（50MB）",
+    )
+    SKILL_UPLOAD_MAX_FILES: int = Field(
+        default=500,
+        description="Skill ZIP 内文件数上限",
+    )
+    FILE_UPLOAD_MAX_BYTES: int = Field(
+        default=52428800,
+        description="普通文件上传最大字节数（50MB）",
     )
 
     def is_tool_spill_enabled(self) -> bool:
@@ -273,12 +289,18 @@ class BaseConfig(BaseSettings):
         return root
 
     def get_skill_repo_root(self) -> str:
-        """返回平台 Skill 只读源目录。"""
+        """返回平台内置 Skill 只读源目录（仅内置 skill）。"""
         from pathlib import Path
 
         if self.SKILL_REPO_ROOT and str(self.SKILL_REPO_ROOT).strip():
             return str(self.SKILL_REPO_ROOT).strip().rstrip("/\\")
         return str(Path(__file__).resolve().parent.parent / "skill-repo")
+
+    def get_vm_skill_repo_root(self) -> str:
+        """返回 VM Skill 仓库路径（可读写，存储用户上传和迁移的 skill）。"""
+        if self.SKILL_REPO_VM_ROOT and str(self.SKILL_REPO_VM_ROOT).strip():
+            return str(self.SKILL_REPO_VM_ROOT).strip().rstrip("/\\")
+        return self.get_workspace_root() + "/.skill-repo"
 
     def get_sandbox_idle_ttl(self):
         """空闲沙箱 TTL；SANDBOX_IDLE_TTL_HOURS 若设置则覆盖 minutes（兼容旧 env）。"""

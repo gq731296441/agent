@@ -127,15 +127,28 @@ async def run_agent(
     else:
         # 用户消息
         content_str = input_data.get("content", "")
-        stream_input = {"messages": [HumanMessage(content=content_str)]}
+        attachments = input_data.get("attachments") or []
 
-        # yield 用户消息（需要存储）— group 0 表示用户输入
+        # LLM 看到的消息：用户问题 + 附件元数据（仅当前轮，不跨轮累积）
+        llm_content = content_str
+        if attachments and user_id_meta:
+            from deep_agent_server.attachment_service import build_attachment_message
+            ctx = build_attachment_message(user_id_meta, attachments)
+            if ctx:
+                llm_content = llm_content + "\n\n" + ctx
+
+        stream_input = {"messages": [HumanMessage(content=llm_content)]}
+
+        # yield 用户消息（需要存储）— 前端展示用，携带附件路径
         if content_str:
+            user_content: dict = {"text": content_str}
+            if attachments:
+                user_content["attachments"] = attachments
             yield _enrich(AgentMessage(
                 type=MessageType.CHAT,
                 sender=SenderType.USER,
                 session_id=session_id,
-                content={"text": content_str},
+                content=user_content,
                 save=True
             ).to_dict())
 
@@ -687,6 +700,8 @@ async def run_agent_ainvoke(
         return msg_dict
 
     # ==================== 构建输入 ====================
+    metadata = config.get("metadata", {}) or {}
+    user_id_meta = metadata.get("user_id", "")
     command = input_data.get("command")
     content_str = ""
     user_msg_marker = None  # 用于在 final state 中定位本轮的起点
@@ -695,7 +710,16 @@ async def run_agent_ainvoke(
         stream_input = command
     else:
         content_str = input_data.get("content", "")
-        stream_input = {"messages": [HumanMessage(content=content_str)]}
+        attachments = input_data.get("attachments") or []
+
+        llm_content = content_str
+        if attachments and user_id_meta:
+            from deep_agent_server.attachment_service import build_attachment_message
+            ctx = build_attachment_message(user_id_meta, attachments)
+            if ctx:
+                llm_content = llm_content + "\n\n" + ctx
+
+        stream_input = {"messages": [HumanMessage(content=llm_content)]}
         user_msg_marker = content_str
 
     # ==================== 执行 ainvoke ====================

@@ -13,16 +13,18 @@
 from typing import List
 
 
-def get_builtin_tools(user_id: str, user_token: str) -> List:
+def get_builtin_tools(user_id: str, user_token: str, session_id: str = "") -> List:
     """返回当前会话的所有内置工具实例。
 
-    每次会话创建时调用，通过闭包将 user_id/user_token 注入工具实例。
-    后续新增内置工具在此注册。
+    每次会话创建时调用，通过闭包将 user_id/user_token/session_id 注入工具实例。
+    session_id 用于 read_image 等工具解析会话级工作区路径。
     """
     from builtin_tools.user_info import create_get_employee_info
     from builtin_tools.online_search import create_online_search
+    from builtin_tools.image_reader import create_read_image
 
     return [
         create_get_employee_info(user_id=user_id, user_token=user_token),
         create_online_search(user_id=user_id, user_token=user_token),
+        create_read_image(user_id=user_id, user_token=user_token, session_id=session_id),
     ]

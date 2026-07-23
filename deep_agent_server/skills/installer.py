@@ -22,13 +22,26 @@ class SkillInstallError(Exception):
 
 
 def get_repo_skill_dir(skill_id: str) -> Path:
+    """获取 skill 源目录路径。
+
+    优先从 VM .skill-repo/ 查找（用户上传 + 迁移的 skill），
+    若不存在则回退到项目 skill-repo/（仅内置 skill）。
+    """
     sid = (skill_id or "").strip().strip("/\\")
     if not sid or ".." in sid or "/" in sid or "\\" in sid:
         raise SkillInstallError(f"非法 skill_id: {skill_id}", 400)
-    path = Path(app_config.get_skill_repo_root()) / sid
-    if not path.is_dir() or not (path / "SKILL.md").is_file():
-        raise SkillInstallError(f"Skill 源目录不存在: {sid}", 404)
-    return path
+
+    # 优先 VM repo
+    vm_path = Path(app_config.get_vm_skill_repo_root()) / sid
+    if vm_path.is_dir() and (vm_path / "SKILL.md").is_file():
+        return vm_path
+
+    # 回退项目 repo（内置 skill）
+    project_path = Path(app_config.get_skill_repo_root()) / sid
+    if project_path.is_dir() and (project_path / "SKILL.md").is_file():
+        return project_path
+
+    raise SkillInstallError(f"Skill 源目录不存在: {sid}", 404)
 
 
 def _copy_skill_tree(src: Path, dest: Path) -> None:

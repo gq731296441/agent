@@ -70,8 +70,12 @@ def scan_skill_repo(repo_root: str | Path | None = None) -> List[SkillCatalogEnt
 
 
 async def sync_catalog_from_repo(repo_root: str | Path | None = None) -> dict:
-    """扫描 repo 并 upsert skill_catalog；缺失目录标记 archived。"""
-    entries = scan_skill_repo(repo_root)
+    """扫描 repo 并 upsert skill_catalog；缺失目录标记 archived。
+
+    默认从 VM .skill-repo/ 扫描（非内置 skill）。
+    """
+    root = repo_root or app_config.get_vm_skill_repo_root()
+    entries = scan_skill_repo(root)
     if not entries:
         logger.warning(
             "[SkillSync] 扫描结果为空，跳过同步 —— "
@@ -94,6 +98,13 @@ async def sync_catalog_from_repo(repo_root: str | Path | None = None) -> dict:
         )
     deleted = await deep_storage.delete_missing_skills(present_ids)
     logger.info(
-        f"[SkillSync] synced={len(entries)} deleted={deleted} repo={repo_root or app_config.get_skill_repo_root()}"
+        f"[SkillSync] synced={len(entries)} deleted={deleted} repo={root}"
     )
     return {"synced": len(entries), "deleted": deleted, "skill_ids": present_ids}
+
+
+async def sync_catalog_from_vm_repo() -> dict:
+    """从 VM .skill-repo/ 同步到 catalog（上传后增量同步时用）。"""
+    from deep_agent_server.skills.vm_repo import sync_catalog_from_vm_repo as _vm_sync
+
+    return await _vm_sync()

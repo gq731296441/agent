@@ -249,19 +249,23 @@ async def run_deep_agent(
     # 存库用户提问（与 Light agent_runner 一致）
     if not input_data.get("command"):
         question = (input_data.get("content") or "").strip()
+        attachments = input_data.get("attachments") or []
         if question:
+            user_content: dict = {"text": question}
+            if attachments:
+                user_content["attachments"] = attachments
             yield adapter._enrich(
                 AgentMessage(
                     type=MessageType.CHAT,
                     sender=SenderType.USER,
                     session_id=session_id,
-                    content={"text": question},
+                    content=user_content,
                     save=True,
                 ),
                 track_step=False,
             )
 
-    stream_input = _build_input(input_data)
+    stream_input = _build_input(input_data, user_id=user_id)
     if not input_data.get("command"):
         question = (input_data.get("content") or "").strip()
         if question:
@@ -460,11 +464,23 @@ async def run_deep_agent(
                 return
 
 
-def _build_input(input_data: dict):
-    """将 ask / resume_hitl 等输入统一转为 LangGraph 可消费的 stream_input。"""
+def _build_input(input_data: dict, user_id: str = ""):
+    """将 ask / resume_hitl 等输入统一转为 LangGraph 可消费的 stream_input。
+
+    若有附件，将其元数据追加到 HumanMessage.content 末尾（仅 LLM 可见，
+    不推送到前端）。附件信息仅存在于当前轮消息中，不会跨轮累积。
+    """
     if input_data.get("command"):
         return input_data["command"]
     content = input_data.get("content") or ""
+    attachments = input_data.get("attachments") or []
+
+    if attachments and user_id:
+        from deep_agent_server.attachment_service import build_attachment_message
+        ctx = build_attachment_message(user_id, attachments)
+        if ctx:
+            content = content + "\n\n" + ctx
+
     if input_data.get("type") == ActionType.ASK.value or not input_data.get("command"):
         return {"messages": [HumanMessage(content=content)]}
     return input_data

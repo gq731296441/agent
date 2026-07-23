@@ -41,3 +41,37 @@ async def set_catalog_status(
     if not ok:
         return ApiResponse.error(msg="Skill 不存在", code=404)
     return ApiResponse.success(msg="状态已更新")
+
+
+# ── VM 迁移 ──
+
+
+@router.post("/migrate-vm", response_model=ApiResponse)
+async def migrate_to_vm_repo(x_internal_token: str | None = Header(default=None)):
+    """首次部署/手动触发：将项目 skill-repo/ 非内置 skill 迁移到 VM .skill-repo/。"""
+    _verify_internal_token(x_internal_token)
+    from deep_agent_server.skills.vm_repo import migrate_non_builtin_skills
+
+    result = await migrate_non_builtin_skills()
+    return ApiResponse.success(data=result, msg="迁移完成")
+
+
+# ── 管理员初始化 ──
+
+
+class BootstrapAdminBody(BaseModel):
+    user_id: str
+
+
+@router.post("/admin/bootstrap", response_model=ApiResponse)
+async def bootstrap_admin(
+    body: BootstrapAdminBody,
+    x_internal_token: str | None = Header(default=None),
+):
+    """初始化首位超级管理员（仅当 admin_users 表为空时有效）。"""
+    _verify_internal_token(x_internal_token)
+    existing = await deep_storage.list_admins()
+    if existing:
+        return ApiResponse.error(msg="管理员已存在，请通过 /admin/admins 接口添加", code=400)
+    await deep_storage.add_admin(body.user_id, created_by="system", role="super_admin")
+    return ApiResponse.success(msg=f"首位超级管理员已添加: {body.user_id}")

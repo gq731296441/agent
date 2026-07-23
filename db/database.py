@@ -326,6 +326,11 @@ class DatabaseManager:
             "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS install_count BIGINT NOT NULL DEFAULT 0",
             "ALTER TABLE user_agent_skill_bindings ADD COLUMN IF NOT EXISTS market_skill_id TEXT",
             "ALTER TABLE user_agent_mcp_bindings ADD COLUMN IF NOT EXISTS snapshot_mcp_name TEXT",
+            # Skill VM 仓库改造：新增 creator 和来源标识
+            "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS creator_user_id TEXT DEFAULT ''",
+            "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS skill_type TEXT NOT NULL DEFAULT 'platform'",
+            "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS source_path TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS file_size_bytes BIGINT DEFAULT 0",
         ]
         for col_sql in alter_columns:
             try:
@@ -533,6 +538,32 @@ class DatabaseManager:
             ON skill_catalog USING GIN (tags);
             CREATE INDEX IF NOT EXISTS idx_skill_catalog_status
             ON skill_catalog (status);
+
+            CREATE TABLE IF NOT EXISTS admin_users (
+                user_id     TEXT PRIMARY KEY,
+                role        TEXT NOT NULL DEFAULT 'admin',
+                created_by  TEXT DEFAULT '',
+                created_at  TIMESTAMP WITH TIME ZONE DEFAULT now()
+            );
+
+            CREATE TABLE IF NOT EXISTS pending_skill_actions (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                skill_id        TEXT NOT NULL,
+                action_type     TEXT NOT NULL,
+                requested_by    TEXT NOT NULL,
+                old_version     TEXT,
+                new_version     TEXT,
+                detail          JSONB DEFAULT '{}',
+                status          TEXT NOT NULL DEFAULT 'pending',
+                reviewed_by     TEXT,
+                review_comment  TEXT DEFAULT '',
+                created_at      TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                reviewed_at     TIMESTAMP WITH TIME ZONE
+            );
+            CREATE INDEX IF NOT EXISTS idx_pending_actions_status
+            ON pending_skill_actions(status, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_pending_actions_skill
+            ON pending_skill_actions(skill_id);
 
             CREATE TABLE IF NOT EXISTS deep_workspace_files (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

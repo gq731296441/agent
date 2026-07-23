@@ -115,12 +115,16 @@ async def get_user_sessions(
     user_id: str,
     agent_kind: str = None,
 ) -> List[Dict[str, Any]]:
-    """获取指定用户的有效会话列表。可选按 agent_kind 过滤。"""
+    """获取指定用户的有效会话列表。可选按 agent_kind 过滤。
+
+只返回已有聊天记录的会话（排除空会话，如仅预创建但未发消息的会话）。
+"""
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
+        empty_filter = "AND EXISTS (SELECT 1 FROM chat_history ch WHERE ch.session_id = s.session_id)"
         if agent_kind:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT s.session_id, s.session_name, s.last_active_at, s.created_at,
                        s.updated_at, s.agent_id, s.agent_kind, s.context_epoch,
                        s.subscription_frozen, a.name AS agent_name, a.is_deleted AS agent_deleted,
@@ -132,6 +136,7 @@ async def get_user_sessions(
                 LEFT JOIN user_agent_subscriptions sub
                     ON sub.user_id = s.user_id AND sub.agent_id = s.agent_id
                 WHERE s.user_id = $1 AND s.is_deleted = FALSE AND s.agent_kind = $2
+                      {empty_filter}
                 ORDER BY s.last_active_at DESC
                 """,
                 user_id,
@@ -139,11 +144,12 @@ async def get_user_sessions(
             )
         else:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT session_id, session_name, last_active_at, created_at, updated_at,
                        agent_id, agent_kind, context_epoch, subscription_frozen
                 FROM user_sessions
                 WHERE user_id = $1 AND is_deleted = FALSE
+                      {empty_filter}
                 ORDER BY last_active_at DESC
                 """,
                 user_id,
@@ -255,6 +261,33 @@ async def is_session_owner(user_id: str, session_id: str) -> bool:
         except Exception as e:
             logger.error(f"Error checking session owner: {e}")
             return False
+
+
+async def find_empty_session(user_id: str) -> str | None:
+    """查找用户最近的一个空会话（无聊天记录且未删除的默认会话）。
+
+    用于 pre-ensure 逻辑：用户打开页面时，若已有空会话则复用，
+    避免每次刷新都创建新会话。文件保留不丢失，直到用户发消息产生聊天记录。
+    """
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT s.session_id
+            FROM user_sessions s
+            WHERE s.user_id = $1
+              AND s.is_deleted = FALSE
+              AND (s.agent_kind = 'default' OR s.agent_kind IS NULL)
+              AND NOT EXISTS (
+                  SELECT 1 FROM chat_history ch
+                  WHERE ch.session_id = s.session_id
+              )
+            ORDER BY s.created_at DESC
+            LIMIT 1
+            """,
+            user_id,
+        )
+        return str(row["session_id"]) if row else None
 
 
 async def validate_session_access(

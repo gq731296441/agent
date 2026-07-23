@@ -18,8 +18,11 @@ from config.config import app_config
 from deep_agent_server.session.readiness import SessionReadinessService
 
 # 公共模块导入
+from config import get_logger
 from common.enums import EndReason, ActionType, MessageType, SenderType
 from common.schemas import AgentMessage
+
+logger = get_logger(__name__)
 
 AGENT_TIMEOUT = 300  # 非流式请求超时（秒）
 
@@ -608,7 +611,23 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
 
     session_title = ""
     resolved_agent_id = None
-    if is_new_session:
+
+    # 首条消息判定：新会话 OR 之前预创建但未发过消息的空会话
+    is_first_message = is_new_session
+    if not is_first_message:
+        from db.storage import count_total_by_session
+        from uuid import UUID as _UUID
+        try:
+            cnt = await count_total_by_session(_UUID(session_id))
+            is_first_message = (cnt == 0)
+            logger.info(
+                f"[Session] session={session_id} is_new=False, "
+                f"chat_history_count={cnt}, is_first_message={is_first_message}"
+            )
+        except Exception:
+            pass
+
+    if is_first_message:
         try:
             # 立即使用兜底标题，不阻塞等待 LLM
             from utils.session_utils import _build_fallback_session_title
@@ -680,8 +699,12 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
                     json_data = json.dumps(message, ensure_ascii=False)
                     yield f"data: {json_data}\n\n"
 
-                # 延迟标题生成：首轮正常完成后生成并推送
-                if is_new_session:
+                # 延迟标题生成：首轮正常完成后生成并推送（新会话或之前空会话的首条消息）
+                if is_first_message:
+                    logger.info(
+                        f"[Session] 开始延迟标题生成 session={session_id} "
+                        f"is_new={is_new_session} is_first={is_first_message}"
+                    )
                     from utils.session_utils import deferred_generate_and_update_title
                     new_title = await deferred_generate_and_update_title(
                         session_id=session_id,
@@ -762,8 +785,8 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
         "result": result,
     }
 
-    # 新会话后台延迟生成标题（非流式路径，不阻塞响应）
-    if is_new_session:
+    # 首条消息后台延迟生成标题（非流式路径，不阻塞响应）
+    if is_first_message:
         from utils.session_utils import deferred_generate_and_update_title
         asyncio.create_task(
             deferred_generate_and_update_title(

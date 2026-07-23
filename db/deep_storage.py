@@ -2250,3 +2250,255 @@ async def get_deep_overview_stats(
         "audit_events_count": audit_events_count or 0,
         "token_usage_aggregate": {},
     }
+
+
+# ==================== 管理员表 ====================
+
+
+async def is_admin(user_id: str) -> bool:
+    """检查用户是否为 Skill 管理员。"""
+    if not user_id:
+        return False
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM admin_users WHERE user_id = $1", user_id
+        )
+        return row is not None
+
+
+async def list_admins() -> List[Dict[str, Any]]:
+    """列出所有管理员。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT user_id, role, created_by, created_at FROM admin_users ORDER BY created_at"
+        )
+        return [dict(r) for r in rows]
+
+
+async def add_admin(user_id: str, created_by: str = "", role: str = "admin") -> None:
+    """添加管理员。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO admin_users (user_id, role, created_by)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (user_id) DO UPDATE SET role = EXCLUDED.role""",
+            user_id, role, created_by,
+        )
+
+
+async def remove_admin(user_id: str) -> bool:
+    """移除管理员。返回是否实际删除。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM admin_users WHERE user_id = $1", user_id
+        )
+        return result != "DELETE 0"
+
+
+# ==================== 审批队列 ====================
+
+
+async def create_pending_action(
+    skill_id: str,
+    action_type: str,
+    requested_by: str,
+    *,
+    old_version: str = None,
+    new_version: str = None,
+    detail: dict = None,
+) -> str:
+    """创建待审批操作记录，返回 action_id。"""
+    action_id = str(uuid4())
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO pending_skill_actions
+               (id, skill_id, action_type, requested_by, old_version, new_version, detail)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)""",
+            _uuid(action_id), skill_id, action_type, requested_by,
+            old_version, new_version, json.dumps(detail or {}),
+        )
+        return action_id
+
+
+async def list_pending_actions(
+    *,
+    page: int = 1,
+    page_size: int = 20,
+    status: str = "pending",
+) -> tuple:
+    """分页查询待审批操作列表。"""
+    page = max(1, page)
+    page_size = max(1, min(page_size, 100))
+    offset = (page - 1) * page_size
+
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        total = await conn.fetchval(
+            "SELECT COUNT(*) FROM pending_skill_actions WHERE status = $1", status
+        )
+        rows = await conn.fetch(
+            """SELECT p.*, c.name AS skill_name
+               FROM pending_skill_actions p
+               LEFT JOIN skill_catalog c ON c.skill_id = p.skill_id
+               WHERE p.status = $1
+               ORDER BY p.created_at DESC
+               LIMIT $2 OFFSET $3""",
+            status, page_size, offset,
+        )
+        items = []
+        for r in rows:
+            d = dict(r)
+            if d.get("created_at"):
+                d["created_at"] = d["created_at"].isoformat()
+            if d.get("reviewed_at"):
+                d["reviewed_at"] = d["reviewed_at"].isoformat()
+            if d.get("detail") and isinstance(d["detail"], str):
+                try:
+                    d["detail"] = json.loads(d["detail"])
+                except (json.JSONDecodeError, TypeError):
+                    d["detail"] = {}
+            items.append(d)
+        return items, int(total or 0)
+
+
+async def get_pending_action(action_id: str) -> Optional[Dict[str, Any]]:
+    """查询单条审批记录。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM pending_skill_actions WHERE id = $1", action_id
+        )
+        return dict(row) if row else None
+
+
+async def list_reviews_for_skill(skill_id: str) -> List[Dict[str, Any]]:
+    """查询某个 skill 的所有审批记录。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM pending_skill_actions
+               WHERE skill_id = $1 ORDER BY created_at DESC""",
+            skill_id,
+        )
+        return [dict(r) for r in rows]
+
+
+async def approve_action(action_id: str, reviewed_by: str) -> bool:
+    """审批通过一个待审批操作。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """UPDATE pending_skill_actions
+               SET status = 'approved', reviewed_by = $2, reviewed_at = CURRENT_TIMESTAMP
+               WHERE id = $1 AND status = 'pending'""",
+            action_id, reviewed_by,
+        )
+        return result == "UPDATE 1"
+
+
+async def reject_action(action_id: str, reviewed_by: str, comment: str = "") -> bool:
+    """审批拒绝一个待审批操作。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """UPDATE pending_skill_actions
+               SET status = 'rejected', reviewed_by = $2, review_comment = $3,
+                   reviewed_at = CURRENT_TIMESTAMP
+               WHERE id = $1 AND status = 'pending'""",
+            action_id, reviewed_by, comment,
+        )
+        return result == "UPDATE 1"
+
+
+# ==================== Skill Catalog 扩展 ====================
+
+
+async def upsert_skill_catalog_with_owner(
+    skill_id: str,
+    name: str,
+    description: str,
+    version: str,
+    tags: List[str],
+    author: str,
+    repo_rel_path: str,
+    *,
+    creator_user_id: str = "",
+    skill_type: str = "platform",
+    source_path: str = "",
+    file_size_bytes: int = 0,
+    status: str = "published",
+) -> None:
+    """扩展版 upsert：支持 creator_user_id、skill_type、source_path、file_size_bytes。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO skill_catalog (
+                skill_id, name, description, version, tags, author, status,
+                repo_rel_path, creator_user_id, skill_type, source_path, file_size_bytes
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (skill_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                description = EXCLUDED.description,
+                version = EXCLUDED.version,
+                tags = EXCLUDED.tags,
+                author = EXCLUDED.author,
+                repo_rel_path = EXCLUDED.repo_rel_path,
+                status = CASE
+                    WHEN skill_catalog.status = 'archived' AND EXCLUDED.status = 'published'
+                    THEN 'published'
+                    WHEN skill_catalog.status = 'draft' AND EXCLUDED.status = 'draft'
+                    THEN 'draft'
+                    ELSE EXCLUDED.status
+                END,
+                creator_user_id = CASE
+                    WHEN skill_catalog.creator_user_id = '' AND EXCLUDED.creator_user_id != ''
+                    THEN EXCLUDED.creator_user_id
+                    ELSE skill_catalog.creator_user_id
+                END,
+                skill_type = EXCLUDED.skill_type,
+                source_path = EXCLUDED.source_path,
+                file_size_bytes = EXCLUDED.file_size_bytes,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            skill_id, name, description or "", version or "1.0.0",
+            tags or [], author or "", status,
+            repo_rel_path, creator_user_id, skill_type, source_path, file_size_bytes,
+        )
+
+
+async def list_skills_by_creator(creator_user_id: str) -> List[Dict[str, Any]]:
+    """列出某个用户创建的所有 skill（不含内置 skill）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM skill_catalog
+               WHERE creator_user_id = $1
+               ORDER BY updated_at DESC""",
+            creator_user_id,
+        )
+        items = []
+        for r in rows:
+            d = dict(r)
+            if d.get("created_at"):
+                d["created_at"] = d["created_at"].isoformat()
+            if d.get("updated_at"):
+                d["updated_at"] = d["updated_at"].isoformat()
+            d["tags"] = list(d.get("tags") or [])
+            items.append(d)
+        return items
+
+
+async def delete_skill_catalog_full(skill_id: str) -> bool:
+    """物理删除 catalog 记录（管理员审批删除时调用）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM skill_catalog WHERE skill_id = $1", skill_id
+        )
+        return result == "DELETE 1"

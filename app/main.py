@@ -37,6 +37,7 @@ from db.database import db_manager
 from api import session_api, agent_api, mcp_api, search_api, stats_api
 from api import agent_run_api, artifact_api, user_agent_api, skill_api, skill_internal_api, workspace_api, sandbox_api
 from api import user_llm_api, subscription_agent_api, user_memory_api, logs_api
+from api import admin_api, skill_upload_api, upload_api
 from api.search_api import process_agent_stream
 from deep_agent_server.session.readiness import SessionReadinessService
 from config import setup_logging, get_logger, app_config
@@ -148,11 +149,18 @@ async def lifespan(app: FastAPI):
 
         if app_config.SKILL_CATALOG_AUTO_SYNC:
             try:
+                # 第一步：将项目 skill-repo/ 非内置 skill 迁移到 VM .skill-repo/
+                from deep_agent_server.skills.vm_repo import migrate_non_builtin_skills
+
+                migration_result = await migrate_non_builtin_skills()
+                logger.info(f"【SkillCatalog】VM 迁移: {migration_result}")
+
+                # 第二步：从 VM .skill-repo/ 同步 catalog
                 from deep_agent_server.skills.catalog_sync import sync_catalog_from_repo
 
-                repo_root = app_config.get_skill_repo_root()
-                logger.info(f"【SkillCatalog】开始同步, repo_root={repo_root}")
-                sync_result = await sync_catalog_from_repo()
+                vm_root = app_config.get_vm_skill_repo_root()
+                logger.info(f"【SkillCatalog】开始同步, vm_root={vm_root}")
+                sync_result = await sync_catalog_from_repo(repo_root=vm_root)
                 logger.info(f"【SkillCatalog】启动同步: {sync_result}")
             except Exception as e:
                 logger.warning(f"【SkillCatalog】启动同步失败: {e}")
@@ -367,8 +375,11 @@ app.include_router(user_llm_api.router)
 app.include_router(subscription_agent_api.router)
 app.include_router(skill_api.router)
 app.include_router(skill_internal_api.router)
+app.include_router(skill_upload_api.router)
+app.include_router(admin_api.router)
 app.include_router(logs_api.router)
 app.include_router(workspace_api.router)
+app.include_router(upload_api.router)
 app.include_router(sandbox_api.router)
 
 STATIC_DIR = ROOT_DIR / "static"
@@ -470,7 +481,7 @@ async def ws_endpoint(websocket: WebSocket):
         payload: dict,
         *,
         allow_if_missing: bool = False,
-        _is_new_session: bool = False,
+        _is_first_message: bool = False,
         _user_first_question: str = "",
     ):
         """
@@ -508,7 +519,7 @@ async def ws_endpoint(websocket: WebSocket):
                     # 立即清理 _stream_tasks，避免下一条消息到达时误判旧任务仍在运行
                     _stream_tasks.pop(session_id, None)
                     # 收到 END 消息时立即启动标题生成（与收尾清理并行）
-                    if _is_new_session and end_reason in ("completed", "stop", "error"):
+                    if _is_first_message and end_reason in ("completed", "stop", "error"):
                         reply_text = "\n".join(_reply_parts) if _reply_parts else None
                         asyncio.create_task(
                             _deferred_title_update(
@@ -527,7 +538,7 @@ async def ws_endpoint(websocket: WebSocket):
         finally:
             _stream_tasks.pop(session_id, None)
             # 兜底：如果 END 消息未被检测到（如中断/异常），仍尝试生成标题
-            if _is_new_session and not end_reason:
+            if _is_first_message and not end_reason:
                 reply_text = "\n".join(_reply_parts) if _reply_parts else None
                 asyncio.create_task(
                     _deferred_title_update(
@@ -588,9 +599,23 @@ async def ws_endpoint(websocket: WebSocket):
             # 绑定 session_id 到当前 ws（支持多对一）
             manager.bind_session(websocket, session_id)
 
-            if is_new_session:
+            # 判断是否为首条消息：新会话 或 预创建但无聊天记录的空会话
+            is_first_message = is_new_session
+            if not is_first_message:
+                from db.storage import count_total_by_session
+                from uuid import UUID as _UUID
                 try:
-                    # 立即使用兜底标题，不阻塞等待 LLM
+                    cnt = await count_total_by_session(_UUID(session_id))
+                    is_first_message = (cnt == 0)
+                    logger.info(
+                        f"[Session] WS session={session_id} is_new=False, "
+                        f"chat_history_count={cnt}, is_first_message={is_first_message}"
+                    )
+                except Exception:
+                    pass
+
+            if is_first_message:
+                try:
                     from utils.session_utils import _build_fallback_session_title
                     session_title = _build_fallback_session_title(session_id)
                     resolved_agent_id = await setup_new_session(
@@ -600,18 +625,19 @@ async def ws_endpoint(websocket: WebSocket):
                         agent_id=agent_id,
                         agent_kind=resolved_agent_kind,
                     )
-                    # 发送 session_allocated 消息（兜底标题，后续延迟更新）
-                    await manager.send(
-                        AgentMessage.session_allocated(
-                            session_id=session_id,
-                            content={
-                                "session_id": session_id,
-                                "session_title": session_title,
-                                "agent_id": resolved_agent_id,
-                            }
-                        ).to_frontend_dict(),
-                        session_id
-                    )
+                    # session_allocated 仅真正新建时推送，预创建复用时不推送
+                    if is_new_session:
+                        await manager.send(
+                            AgentMessage.session_allocated(
+                                session_id=session_id,
+                                content={
+                                    "session_id": session_id,
+                                    "session_title": session_title,
+                                    "agent_id": resolved_agent_id,
+                                }
+                            ).to_frontend_dict(),
+                            session_id,
+                        )
 
                     capabilities = msg.get("capabilities", {})
                     mcp_list = capabilities.get("mcp", [])
@@ -633,7 +659,7 @@ async def ws_endpoint(websocket: WebSocket):
                             t = asyncio.create_task(
                                 _run_agent_stream(
                                     _sid, act, uid, tok, pl,
-                                    _is_new_session=True,
+                                    _is_first_message=True,
                                     _user_first_question=question,
                                 )
                             )
@@ -681,9 +707,10 @@ async def ws_endpoint(websocket: WebSocket):
             # ==================== 处理消息 ====================
             action = msg.get('action', ActionType.ASK.value)
 
-            # 新会话：等待预热完成。on_ready → flush_pending 已处理排队消息，
+            # 首批消息（新会话或预创建空会话）：等待预热完成。
+            # on_ready → flush_pending 已处理排队消息，
             # 若其已启动 _run_agent_stream 则跳过，避免重复处理。
-            if is_new_session:
+            if is_first_message:
                 ready = await SessionReadinessService.wait_until_ready(session_id)
                 if not ready:
                     logger.warning(
@@ -721,7 +748,7 @@ async def ws_endpoint(websocket: WebSocket):
                     user_token,
                     msg,
                     allow_if_missing=is_new_session,
-                    _is_new_session=is_new_session,
+                    _is_first_message=is_first_message,
                     _user_first_question=question,
                 )
             )

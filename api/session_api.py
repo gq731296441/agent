@@ -6,7 +6,11 @@ from db import storage, deep_storage
 from uuid import UUID
 from common.schemas import ApiResponse, ListApiResponse
 from config import get_logger
-from utils.session_utils import validate_session_access, SESSION_ACCESS_DENIED_MSG
+from utils.session_utils import (
+    get_or_create_session,
+    validate_session_access,
+    SESSION_ACCESS_DENIED_MSG,
+)
 from utils.subscription_guard import validate_ask_session
 from deep_agent_server.workspace import remove_session_workspace
 import json
@@ -259,6 +263,62 @@ async def ensure_subscription_session(
         return ApiResponse.error(msg=str(e), code=400)
     except Exception as e:
         logger.error(f"[Session API] ensure subscription session failed: {e}")
+        return ApiResponse.error(msg=f"创建会话失败: {e}", code=500)
+
+
+@router.post("/ensure", response_model=ApiResponse)
+async def ensure_session(user_id: str = Query(..., description="用户ID")):
+    """进入聊天页时调用：获取或复用空会话。
+
+    优先复用已有空会话（无聊天记录），文件不丢失。
+    若无空会话则创建并写入数据库，后续调用可正确复用。
+    """
+    try:
+        existing = await storage.find_empty_session(user_id)
+        if existing:
+            return ApiResponse.success(
+                data={"session_id": existing, "is_new": False},
+                msg="复用已有会话",
+            )
+
+        # 创建新会话并持久化到 user_sessions 表（否则 find_empty_session 查不到）
+        session_id, _ = await get_or_create_session(None)
+        session_title = f"新会话 {session_id[-8:]}"
+        await storage.upsert_user_session(
+            user_id=user_id,
+            session_id=session_id,
+            session_name=session_title,
+            agent_id=None,
+            agent_kind="default",
+        )
+        return ApiResponse.success(
+            data={"session_id": session_id, "is_new": True},
+            msg="已创建新会话",
+        )
+    except Exception as e:
+        logger.error(f"[Session API] ensure session failed: {e}")
+        return ApiResponse.error(msg=f"创建会话失败: {e}", code=500)
+
+
+@router.post("/create", response_model=ApiResponse)
+async def create_session(user_id: str = Query(..., description="用户ID")):
+    """用户点击"新建会话"时调用：始终创建全新会话，不复用。"""
+    try:
+        session_id, _ = await get_or_create_session(None)
+        session_title = f"新会话 {session_id[-8:]}"
+        await storage.upsert_user_session(
+            user_id=user_id,
+            session_id=session_id,
+            session_name=session_title,
+            agent_id=None,
+            agent_kind="default",
+        )
+        return ApiResponse.success(
+            data={"session_id": session_id, "is_new": True},
+            msg="已创建新会话",
+        )
+    except Exception as e:
+        logger.error(f"[Session API] create session failed: {e}")
         return ApiResponse.error(msg=f"创建会话失败: {e}", code=500)
 
 

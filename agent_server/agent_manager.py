@@ -174,7 +174,7 @@ class AgentManager:
 
             # 合并内置工具（无需 MCP 配置，始终可用）
             from builtin_tools import get_builtin_tools
-            builtin_tools = get_builtin_tools(user_id=user_id, user_token=user_token)
+            builtin_tools = get_builtin_tools(user_id=user_id, user_token=user_token, session_id=session_id)
             all_tools = builtin_tools + mcp_tools  # 内置工具排前面
 
             logger.info(f"[AgentManager] 正在创建新 Agent 实例, session_id: {session_id}")
