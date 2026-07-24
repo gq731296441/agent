@@ -263,8 +263,12 @@ class BaseConfig(BaseSettings):
         description="Skill ZIP 内文件数上限",
     )
     FILE_UPLOAD_MAX_BYTES: int = Field(
-        default=52428800,
-        description="普通文件上传最大字节数（50MB）",
+        default=10485760,
+        description="普通文件上传最大字节数（10MB）",
+    )
+    FILE_UPLOAD_CHUNK_SIZE: int = Field(
+        default=1048576,
+        description="分片上传每片大小（1MB）",
     )
 
     def is_tool_spill_enabled(self) -> bool:
