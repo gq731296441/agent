@@ -1,10 +1,14 @@
 """用户文件上传服务：上传到会话级或用户级 uploads/，含配额检查 + 分片上传。"""
 
+import asyncio
+import logging
 import shutil
 from pathlib import Path
 from uuid import uuid4
 
 from config.config import app_config
+
+logger = logging.getLogger(__name__)
 from deep_agent_server.quota_service import (
     check_additional_bytes,
     refresh_workspace_usage,
@@ -91,6 +95,9 @@ async def save_upload_file(
     dest.write_bytes(file_data)
 
     await refresh_workspace_usage(uid)
+
+    # 触发后端异步解析（fire-and-forget）
+    _trigger_post_upload_parse(uid, dest, f"{path_prefix}/{dest.name}")
 
     return {
         "path": f"{path_prefix}/{dest.name}",
@@ -263,6 +270,9 @@ async def complete_chunked_upload(user_id: str, upload_id: str) -> dict:
 
     await refresh_workspace_usage(uid)
 
+    # 触发后端异步解析（fire-and-forget）
+    _trigger_post_upload_parse(uid, dest, f"{path_prefix}/{dest.name}")
+
     return {
         "path": f"{path_prefix}/{dest.name}",
         "size_bytes": actual_size,
@@ -276,3 +286,99 @@ async def abort_chunked_upload(user_id: str, upload_id: str) -> None:
     temp_dir = _get_chunk_temp_dir(uid, upload_id)
     if temp_dir.is_dir():
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# ── 上传后异步解析 ──────────────────────────────────────────────────
+
+
+def _trigger_post_upload_parse(
+    user_id: str, file_path: Path, virtual_path: str,
+) -> None:
+    """上传完成后触发后端异步解析（fire-and-forget）。
+
+    解析失败不影响上传结果，仅记录日志。
+    Layer 0（未知格式）和 Layer 4（WPS/旧格式）会被跳过。
+    """
+    if not app_config.FILE_PARSE_ENABLED:
+        return
+
+    from deep_agent_server.file_parser import detect_format
+
+    layer = detect_format(file_path)
+    if layer == 0 or layer == 4:
+        return  # 未知格式或 WPS/旧版，跳过
+
+    asyncio.ensure_future(_post_upload_parse(user_id, file_path, virtual_path))
+
+
+async def _post_upload_parse(
+    user_id: str, file_path: Path, virtual_path: str,
+) -> None:
+    """异步解析单个文件，写缓存，推送状态到前端。"""
+    from deep_agent_server.file_parser import detect_format, parse_file_async
+    from deep_agent_server.file_parse_notify import notify_file_parse_status
+
+    filename = file_path.name
+    layer = detect_format(file_path)
+    format_label = {1: "text", 2: "office", 3: "image", 4: "wps"}.get(layer, "unknown")
+
+    # 推送"解析中"
+    await notify_file_parse_status(
+        user_id,
+        {
+            "path": virtual_path,
+            "status": "parsing",
+            "filename": filename,
+            "format": format_label,
+            "layer": layer,
+        },
+    )
+
+    try:
+        result = await parse_file_async(file_path, user_id=user_id)
+        if result.error:
+            logger.warning(
+                "[FileParser] %s 解析失败: %s", filename, result.error,
+            )
+            await notify_file_parse_status(
+                user_id,
+                {
+                    "path": virtual_path,
+                    "status": "failed",
+                    "filename": filename,
+                    "format": format_label,
+                    "layer": layer,
+                    "error": result.error,
+                },
+            )
+        else:
+            logger.info(
+                "[FileParser] %s layer=%d format=%s chars=%d truncated=%s",
+                filename, result.layer, result.format,
+                len(result.content), result.truncated,
+            )
+            await notify_file_parse_status(
+                user_id,
+                {
+                    "path": virtual_path,
+                    "status": "completed",
+                    "filename": filename,
+                    "format": result.format,
+                    "layer": result.layer,
+                    "chars": len(result.content),
+                    "truncated": result.truncated,
+                },
+            )
+    except Exception as e:
+        logger.error("[FileParser] %s 解析异常: %s", filename, e)
+        await notify_file_parse_status(
+            user_id,
+            {
+                "path": virtual_path,
+                "status": "failed",
+                "filename": filename,
+                "format": format_label,
+                "layer": layer,
+                "error": str(e),
+            },
+        )

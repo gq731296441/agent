@@ -155,6 +155,34 @@ class WebsocketConnectionManager:
         for ws in list(self.user_to_ws.get(uid, ())):
             await self.send_sandbox_status(ws, uid)
 
+    # ── 文件解析状态推送 ──────────────────────────────────────────
+
+    async def send_file_parse_status(
+        self, ws: WebSocket, user_id: str, payload: dict,
+    ) -> bool:
+        """推送文件解析状态到单个 WebSocket 连接。"""
+        return await self.send_to_ws(
+            ws,
+            {
+                "type": "file_parse_status",
+                "user_id": user_id,
+                "content": payload,
+            },
+        )
+
+    async def broadcast_file_parse_status(
+        self, user_id: str, payload: dict,
+    ) -> None:
+        """向该用户所有 WebSocket 连接推送文件解析状态。
+
+        payload 来自 file_parse_notify.notify_file_parse_status()。
+        """
+        uid = (user_id or "").strip()
+        if not uid:
+            return
+        for ws in list(self.user_to_ws.get(uid, ())):
+            await self.send_file_parse_status(ws, uid, payload)
+
     def disconnect(self, ws: WebSocket) -> Set[str]:
         """
         断开连接或移除 session 映射

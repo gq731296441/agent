@@ -61,7 +61,7 @@ def create_online_search(user_id: str, user_token: str = ""):  # noqa: ARG001
     async def online_search(query: str, deep_thinking: bool = False) -> str:
         """联网搜索工具：搜索互联网上的实时信息。
 
-        当需要获取本地知识库中没有的实时信息时使用此工具，
+        当需要获取实时信息时使用此工具
         例如天气、新闻、股价、最新资讯等任何需要联网查询的内容。
 
         使用场景：

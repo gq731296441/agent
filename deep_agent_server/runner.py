@@ -265,7 +265,7 @@ async def run_deep_agent(
                 track_step=False,
             )
 
-    stream_input = _build_input(input_data, user_id=user_id)
+    stream_input = await _build_input(input_data, user_id=user_id)
     if not input_data.get("command"):
         question = (input_data.get("content") or "").strip()
         if question:
@@ -464,7 +464,7 @@ async def run_deep_agent(
                 return
 
 
-def _build_input(input_data: dict, user_id: str = ""):
+async def _build_input(input_data: dict, user_id: str = ""):
     """将 ask / resume_hitl 等输入统一转为 LangGraph 可消费的 stream_input。
 
     若有附件，将其元数据追加到 HumanMessage.content 末尾（仅 LLM 可见，
@@ -477,7 +477,7 @@ def _build_input(input_data: dict, user_id: str = ""):
 
     if attachments and user_id:
         from deep_agent_server.attachment_service import build_attachment_message
-        ctx = build_attachment_message(user_id, attachments)
+        ctx = await build_attachment_message(user_id, attachments)
         if ctx:
             content = content + "\n\n" + ctx
 

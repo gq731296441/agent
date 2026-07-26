@@ -215,6 +215,11 @@ async def lifespan(app: FastAPI):
         )
 
         set_sandbox_status_notifier(manager.broadcast_sandbox_status)
+
+        from deep_agent_server.file_parse_notify import set_file_parse_notifier
+        set_file_parse_notifier(manager.broadcast_file_parse_status)
+        logger.info("【FileParser】已注册 WS 推送回调")
+
         if app_config.HITL_ENABLED:
             set_hitl_ws_notifier(manager.send)
             await start_hitl_sweeper(kv_store)
@@ -259,6 +264,9 @@ async def lifespan(app: FastAPI):
 
             set_sandbox_status_notifier(None)
             set_hitl_ws_notifier(None)
+
+            from deep_agent_server.file_parse_notify import set_file_parse_notifier
+            set_file_parse_notifier(None)
         except Exception:
             pass
         try:

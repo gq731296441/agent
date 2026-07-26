@@ -40,3 +40,9 @@ json-repair>=0.58
 pyyaml>=6.0
 openai>=2.9
 tokenizers>=0.21
+
+# 后端文件解析（markitdown + 分层兜底）
+# [all] 包含全部格式转换器：docx(mammoth) pptx(python-pptx) xlsx(openpyxl) xls(xlrd) pdf(pdfplumber) 等
+markitdown[all]>=0.1.0
+python-magic>=0.4.27
+charset-normalizer>=3.3.0

@@ -271,6 +271,32 @@ class BaseConfig(BaseSettings):
         description="分片上传每片大小（1MB）",
     )
 
+    # ==================== 文件解析配置 ====================
+    FILE_PARSE_ENABLED: bool = Field(
+        default=True,
+        description="是否启用后端文件解析（上传后自动解析 Office/PDF/文本/图片）",
+    )
+    FILE_PARSE_MAX_CHARS: int = Field(
+        default=30720,
+        description="文件解析最大字符数（30KB），超出后截断",
+    )
+    FILE_PARSE_TRUNCATE_HEAD: int = Field(
+        default=10240,
+        description="截断时保留开头字符数（10KB）",
+    )
+    FILE_PARSE_TRUNCATE_TAIL: int = Field(
+        default=5120,
+        description="截断时保留结尾字符数（5KB）",
+    )
+    FILE_PARSE_TIMEOUT: int = Field(
+        default=30,
+        description="文件解析超时秒数（Layer 1/2 纯文本与 Office 解析超时）",
+    )
+    FILE_PARSE_IMAGE_TIMEOUT: int = Field(
+        default=120,
+        description="图片 Vision API 解析超时秒数",
+    )
+
     def is_tool_spill_enabled(self) -> bool:
         """TOOL_SPILL_ENABLED 优先；兼容旧 ARTIFACT_AUTO_STORE_ENABLED。"""
         if self.TOOL_SPILL_ENABLED:

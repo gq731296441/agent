@@ -133,7 +133,7 @@ async def run_agent(
         llm_content = content_str
         if attachments and user_id_meta:
             from deep_agent_server.attachment_service import build_attachment_message
-            ctx = build_attachment_message(user_id_meta, attachments)
+            ctx = await build_attachment_message(user_id_meta, attachments)
             if ctx:
                 llm_content = llm_content + "\n\n" + ctx
 
@@ -715,7 +715,7 @@ async def run_agent_ainvoke(
         llm_content = content_str
         if attachments and user_id_meta:
             from deep_agent_server.attachment_service import build_attachment_message
-            ctx = build_attachment_message(user_id_meta, attachments)
+            ctx = await build_attachment_message(user_id_meta, attachments)
             if ctx:
                 llm_content = llm_content + "\n\n" + ctx
 

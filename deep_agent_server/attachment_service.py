@@ -1,39 +1,33 @@
-"""附件服务：将用户上传的文件列表转为 Agent 可消费的 SystemMessage。
+"""附件服务：将用户上传的文件列表转为 Agent 可消费的消息内容。
 
-策略：不将文件内容直接注入到用户消息中（用户可能上传大文件，超出上下文限制）。
-改为在 SystemMessage 中列出附件文件路径和元数据，让 Agent 主动使用工具读取：
+策略：
+  上传后后端已异步解析文件，解析结果缓存为 {file}.parsed.txt。
+  build_attachment_message 优先读取缓存，直接注入解析后的文本内容。
+  Agent 无需再调 execute / read_file / read_image 读取附件内容。
 
-  - 文本/二进制文件 → 使用 read_file 工具
-  - 图片文件 → 使用 read_image 工具
-
-SystemMessage 不会推送到前端，用户看不到这些提示信息。
+降级策略：
+  - 缓存不存在（解析未完成/失败/未知格式）：注入工具提示
+  - Layer 4（WPS/旧格式）：提示用户转换格式
+  - 图片未解析：提示使用 read_image
+  - Office/PDF 未解析：提示使用 execute（兼容沙箱降级）
 """
 
 import logging
 from pathlib import Path
 
+from config.config import app_config
 from deep_agent_server.workspace import get_uploads_dir, get_workspace_dir
 
 logger = logging.getLogger(__name__)
 
-# 常见图片扩展名（使用 read_image 工具）
+# 常见图片扩展名
 IMAGE_EXTENSIONS: set[str] = {
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico", ".tiff", ".tif", ".svg",
 }
 
-# Office/二进制文档扩展名（无法直接用 read_file，需 execute 终端命令转换）
-# 仅列出沙箱中实际已安装对应库的格式
-OFFICE_EXTENSIONS: dict[str, str] = {
-    ".docx": "python3 -c \"from docx import Document; doc=Document('{path}'); [print(p.text) for p in doc.paragraphs]\"",
-    ".pptx": "python3 -c \"from pptx import Presentation; prs=Presentation('{path}'); [print(slide.shapes.title.text if slide.shapes.title else '') or [print(shape.text) for shape in slide.shapes if shape.has_text_frame] for slide in prs.slides]\"",
-    ".xlsx": "python3 -c \"import openpyxl; wb=openpyxl.load_workbook('{path}'); [print(f'Sheet: {s}') or [print(row) for row in wb[s].values] for s in wb.sheetnames]\"",
-    ".xls":  "python3 -c \"import pandas; df=pandas.read_excel('{path}'); print(df.to_string())\"",
-    ".pdf":  "python3 -c \"import PyPDF2; r=PyPDF2.PdfReader('{path}'); [print(p.extract_text()) for p in r.pages]\"",
-}
-
-# 依赖 libreoffice 的格式（沙箱默认未安装，提示用户转换）
+# WPS/旧版 Office/邮件格式（沙箱未安装 libreoffice，无法解析）
 LIBREOFFICE_EXTENSIONS: set[str] = {
-    ".wps", ".dps", ".et", ".doc", ".odt", ".ods", ".odp",
+    ".wps", ".dps", ".et", ".doc", ".ppt", ".msg", ".eml",
 }
 
 # 最多列出的附件数
@@ -94,13 +88,40 @@ def _is_image(filename: str) -> bool:
     return Path(filename).suffix.lower() in IMAGE_EXTENSIONS
 
 
-def build_attachment_message(user_id: str, attachments: list | None) -> str | None:
-    """构建附件列表提示文本，作为 SystemMessage 注入到消息流。
+def _is_libreoffice_format(filename: str) -> bool:
+    return Path(filename).suffix.lower() in LIBREOFFICE_EXTENSIONS
+
+
+def _get_format_label(suffix: str) -> str:
+    """返回人类可读的格式标签。"""
+    labels = {
+        ".txt": "纯文本", ".md": "Markdown", ".csv": "CSV表格",
+        ".json": "JSON", ".xml": "XML", ".yaml": "YAML",
+        ".yml": "YAML", ".html": "HTML", ".htm": "HTML",
+        ".log": "日志", ".py": "Python", ".js": "JavaScript",
+        ".ts": "TypeScript", ".sql": "SQL", ".cfg": "配置文件",
+        ".ini": "配置文件", ".toml": "TOML", ".env": "环境变量",
+        ".rst": "reStructuredText", ".tex": "LaTeX",
+        ".docx": "Word文档", ".pptx": "PPT演示", ".xlsx": "Excel表格",
+        ".xls": "Excel表格(旧)", ".pdf": "PDF文档",
+        ".epub": "电子书", ".rtf": "RTF文档",
+        ".odt": "OpenDocument文本", ".ods": "OpenDocument表格",
+        ".odp": "OpenDocument演示",
+        ".jpg": "图片", ".jpeg": "图片", ".png": "图片",
+        ".gif": "图片", ".bmp": "图片", ".webp": "图片",
+        ".svg": "图片", ".ico": "图片", ".tiff": "图片",
+    }
+    return labels.get(suffix.lower(), "文件")
+
+
+async def build_attachment_message(user_id: str, attachments: list | None) -> str | None:
+    """构建附件上下文文本，注入到 HumanMessage。
+
+    优先读取后端解析缓存 {file}.parsed.txt，直接注入文本内容。
+    缓存未命中时对 Layer 1/2 文件按需触发解析（不阻塞消息处理），
+    Layer 3/4 降级为工具提示。
 
     返回 None 表示无需注入（无附件或无有效文件）。
-
-    返回的文本告诉 Agent 用户上传了哪些文件、文件大小、以及应该使用什么工具读取。
-    此内容会以 SystemMessage 形式注入，不推送到前端。
     """
     if not attachments:
         return None
@@ -108,6 +129,7 @@ def build_attachment_message(user_id: str, attachments: list | None) -> str | No
     lines: list[str] = []
     count = 0
     total_bytes = 0
+    has_parsed_content = False
 
     for vpath in attachments:
         if count >= MAX_ATTACHMENTS:
@@ -134,44 +156,140 @@ def build_attachment_message(user_id: str, attachments: list | None) -> str | No
             continue
 
         total_bytes += file_size
-
         suffix = disk_path.suffix.lower()
 
-        if _is_image(filename):
-            tool = "read_image"
-            hint = ""
-        elif suffix in OFFICE_EXTENSIONS:
-            tool = "execute"
-            hint = OFFICE_EXTENSIONS[suffix].replace("{path}", f"/{vpath}")
-        elif suffix in LIBREOFFICE_EXTENSIONS:
-            tool = "read_file"
-            hint = (
-                f"WPS/旧版 Office 格式，沙箱默认未安装 libreoffice。"
-                f"请告知用户将此文件转换为标准格式后重新上传"
-                f"（.wps→.docx, .dps→.pptx, .et→.xlsx, .doc→.docx, .odt→.docx 等）"
-            )
-        else:
-            tool = "read_file"
-            hint = ""
+        # ── 优先：尝试读取后端解析缓存 ──
+        parsed_content = _read_parsed_cache(disk_path)
 
-        agent_path = _to_agent_path(str(vpath))
-        line = f"- `{agent_path}` — {filename}, {_format_size(file_size)}, 使用 `{tool}`"
-        if hint and tool == "execute":
-            line += f"\n  示例命令: `{hint}`"
-        elif hint:
-            line += f"\n  ⚠️ {hint}"
-        lines.append(line)
+        if parsed_content is not None:
+            # 缓存命中 → 直接注入解析内容
+            format_label = _get_format_label(suffix)
+            lines.append(
+                f"\n--- {filename} ({format_label}, {_format_size(file_size)}) ---\n"
+                f"{parsed_content}"
+            )
+            has_parsed_content = True
+
+        else:
+            # 缓存未命中 → 按需触发解析（Layer 1/2）或降级为工具提示
+            layer = _detect_file_layer(suffix)
+
+            if layer in (1, 2):
+                # Layer 1/2: 按需同步解析，避免 Agent 走沙箱兜底
+                parsed_content = await _parse_on_demand(disk_path, user_id, layer)
+                if parsed_content is not None:
+                    format_label = _get_format_label(suffix)
+                    lines.append(
+                        f"\n--- {filename} ({format_label}, {_format_size(file_size)}) ---\n"
+                        f"{parsed_content}"
+                    )
+                    has_parsed_content = True
+                    count += 1
+                    continue
+
+            # 走到这里说明按需解析也失败了 → 降级
+            if _is_libreoffice_format(filename):
+                # Layer 4: WPS/旧格式，无法解析
+                lib_hints = {
+                    ".wps": "WPS 文字文档，请转换为 .docx 后重新上传",
+                    ".dps": "WPS 演示文档，请转换为 .pptx 后重新上传",
+                    ".et":  "WPS 表格文档，请转换为 .xlsx 后重新上传",
+                    ".doc": "旧版 Word 文档，请转换为 .docx 后重新上传",
+                    ".ppt": "旧版 PPT 文档，请转换为 .pptx 后重新上传",
+                    ".msg": "Outlook 邮件格式，请导出为 .txt 或 .pdf 后重新上传",
+                    ".eml": "邮件格式，请另存为 .txt 后重新上传",
+                }
+                hint = lib_hints.get(suffix, f"暂不支持 {suffix} 格式的自动解析")
+                agent_path = _to_agent_path(str(vpath))
+                lines.append(f"- `{agent_path}` — {filename}, ⚠️ {hint}")
+
+            elif _is_image(filename):
+                # 图片未解析（Vision API 太慢，不阻塞等待）→ 提示使用 read_image
+                agent_path = _to_agent_path(str(vpath))
+                lines.append(
+                    f"- `{agent_path}` — {filename}, {_format_size(file_size)}, "
+                    f"图片尚未解析，可使用 `read_image` 工具查看"
+                )
+
+            else:
+                # 其他格式未解析 → 提示使用 read_file
+                agent_path = _to_agent_path(str(vpath))
+                lines.append(
+                    f"- `{agent_path}` — {filename}, {_format_size(file_size)}, "
+                    f"可使用 `read_file` 工具读取内容"
+                )
 
         count += 1
 
     if not lines:
         return None
 
-    header = (
-        f"用户上传了 {count} 个附件文件（共 {_format_size(total_bytes)}）。"
-        f"请根据用户的问题判断需要读取哪些文件，使用对应工具获取内容后再回答。"
-    )
+    # 根据是否有解析内容使用不同的引导语
+    if has_parsed_content:
+        header = (
+            f"用户上传了 {count} 个附件文件（共 {_format_size(total_bytes)}），"
+            f"文件内容已自动解析如下。"
+            f"请优先基于以下解析内容回答用户的问题，"
+            f"仅当需要查看被截断的完整内容时才使用工具读取原文件。"
+        )
+    else:
+        header = (
+            f"用户上传了 {count} 个附件文件（共 {_format_size(total_bytes)}）。"
+            f"请根据用户的问题判断需要读取哪些文件，使用对应工具获取内容后再回答。"
+        )
+
     return header + "\n" + "\n".join(lines)
+
+
+def _read_parsed_cache(file_path: Path) -> str | None:
+    """读取后端解析缓存（如果启用且缓存有效）。
+
+    Returns:
+        解析后的文本内容，或 None（缓存不存在/过期/解析功能关闭）。
+    """
+    if not app_config.FILE_PARSE_ENABLED:
+        return None
+
+    from deep_agent_server.file_parser import read_cached_content
+
+    return read_cached_content(file_path)
+
+
+def _detect_file_layer(suffix: str) -> int:
+    """通过扩展名判断文件层级（1-4），避免重复导入 file_parser 的开销。"""
+    from deep_agent_server.file_parser import (
+        LAYER_1_EXTENSIONS,
+        LAYER_2_EXTENSIONS,
+        LAYER_3_EXTENSIONS,
+        LAYER_4_EXTENSIONS,
+    )
+    if suffix in LAYER_1_EXTENSIONS:
+        return 1
+    if suffix in LAYER_2_EXTENSIONS:
+        return 2
+    if suffix in LAYER_3_EXTENSIONS:
+        return 3
+    if suffix in LAYER_4_EXTENSIONS:
+        return 4
+    return 0
+
+
+async def _parse_on_demand(file_path: Path, user_id: str, layer: int) -> str | None:
+    """对 Layer 1/2 文件按需触发解析（缓存未命中时）。
+
+    Layer 1 (纯文本): run_in_executor 解析，毫秒级
+    Layer 2 (Office): run_in_executor 解析，1~3 秒
+    解析成功写缓存，后续消息直接命中。
+
+    Returns:
+        解析后的文本内容，失败时返回 None。
+    """
+    from deep_agent_server.file_parser import parse_file_async
+
+    result = await parse_file_async(file_path, user_id=user_id)
+    if result.content and not result.error:
+        return result.content
+    return None
 
 
 def _format_size(size_bytes: int) -> str:
