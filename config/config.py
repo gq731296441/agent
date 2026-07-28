@@ -93,6 +93,12 @@ class BaseConfig(BaseSettings):
     # ==================== 其他配置 ====================
     ALLOWED_HOSTS: list = Field(default_factory=lambda: ["localhost"], description="允许的主机列表")
 
+    # Agent 对外的公开访问地址（用于构建分享链接等）
+    AGENTA_PUBLIC_BASE_URL: str = Field(
+        default="https://aip.zte.com.cn/trial/cmtool/api/agenta",
+        description="Agenta 服务对外的公开根 URL，用于构建 HTML 分享链接等",
+    )
+
     # ==================== 连接池与限流 ====================
     DB_POOL_MIN: int = Field(default=5, description="asyncpg 连接池最小连接数")
     DB_POOL_MAX: int = Field(default=20, description="asyncpg 连接池最大连接数")
@@ -402,6 +408,7 @@ class ProductionConfig(BaseConfig):
     """生产环境配置"""
     DEBUG: bool = False
     ENVIRONMENT: str = "production"
+    AGENTA_PUBLIC_BASE_URL: str = "https://aip.zte.com.cn/cmtool/api/agenta"
     MCP_TOOLS_API_URL: str = "https://aip.zte.com.cn/cmtool/api/v1/component/mcp/mine"
     MCP_ALL_TOOLS_API_URL: str = "https://aip.zte.com.cn/cmtool/api/v1/component/mcp/all"
     MCP_USE_MOCK: bool = False

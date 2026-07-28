@@ -356,6 +356,10 @@ class DeepAgentWrapper:
         self.mcp_tools = mcp_tools or []
         # 同 session 内 skill/MCP 变更标记，runner 用于清状态 + 通知 agent
         self.config_changes = config_changes or {}
+        # HTML 分享链接缓存：virtual_path → share_url，跨 run 持久（随 session 缓存生命周期）
+        self.html_share_links: Dict[str, str] = {}
+        # 已推送给 agent 的 virtual_path 集合，防止跨 run 重复注入
+        self._announced_html_shares: set = set()
 
 
 async def create_deep_agent_instance(

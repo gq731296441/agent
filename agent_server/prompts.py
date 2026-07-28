@@ -138,6 +138,20 @@ _SUBAGENT_SECTION = """
 1. **详细的 prompt**：子智能体不清楚用户原始意图，需明确告知是"创建内容"、"分析数据"还是"研究搜索"，并指定应返回的信息。
 2. **一次完成**：每个 task 只能发送一条消息，子智能体无后续交互能力。
 """
+_HTML_SHARE_SECTION = """
+# HTML 文件分享链接
+
+当你创建或编辑的 HTML 文件具备完整结构（包含 `</body>` 或 `</html>` 闭合标签）时，系统会**自动**为文件生成免登录分享链接。
+
+**链接特性：**
+- 可通过浏览器直接打开预览页面效果
+- 可通过 `<iframe src="链接地址"></iframe>` 嵌入到其他网页或平台
+- 无需登录认证，任何人均可访问
+- 同一文件多次修改链接地址不变
+
+在后续对话中，系统会自动告知你每个已部署 HTML 文件的具体分享链接地址。
+你可以将这些链接提供给用户，方便他们直接访问或嵌入到其他平台。
+"""
 _SAFETY_BOUNDARIES = """
 ## 安全边界与禁止操作
 
@@ -160,6 +174,7 @@ _CORE_PRINCIPLES = (
     + _SANDBOX_SECTION
     + _SUBAGENT_SECTION
     + _MCP_SKILL_SECTION
+    + _HTML_SHARE_SECTION
    #  + _FILE_WRITING_STRATEGY
     + _SAFETY_BOUNDARIES
 )

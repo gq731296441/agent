@@ -204,6 +204,7 @@ async def run_deep_agent(
         user_id=user_id,
         agent_id=resolved_agent_id,
         initial_step_index=initial_step_index,
+        agent_wrapper=agent_wrapper,
     )
     # checkpoint 含整 thread 历史 ToolMessage；须按 session 全量去重，
     # 否则 resume 时会把旧 turn 的工具以新 conversation_id 重复落库。
@@ -274,6 +275,39 @@ async def run_deep_agent(
                 store=store,
                 user_id=user_id,
                 query=question,
+            )
+    # ── HTML 分享链接注入 ──
+    wrapper = agent_wrapper
+    if hasattr(wrapper, "html_share_links") and wrapper.html_share_links:
+        announced = getattr(wrapper, "_announced_html_shares", set())
+        new_links = {
+            vp: url
+            for vp, url in wrapper.html_share_links.items()
+            if vp not in announced
+        }
+        if new_links:
+            from langchain_core.messages import HumanMessage
+
+            lines = []
+            for vp, url in new_links.items():
+                filename = vp.split("/")[-1]
+                lines.append(
+                    f"- **{filename}**: `{url}`"
+                    f"（可直接浏览器打开，支持 iframe 嵌入）"
+                )
+            notice = (
+                "📌 **HTML 文件分享链接**\n\n"
+                "以下你生成的 HTML 文件已自动创建免登录分享链接：\n"
+                + "\n".join(lines)
+                + "\n\n你可以将这些链接提供给用户，或在回复中引用这些链接。"
+            )
+            messages = stream_input.get("messages", [])
+            messages.append(HumanMessage(content=notice))
+            stream_input["messages"] = messages
+            wrapper._announced_html_shares = announced.union(new_links.keys())
+            logger.info(
+                f"[DeepRunner] 已注入 HTML 分享链接 session={session_id} "
+                f"count={len(new_links)}"
             )
     timeout_sec = app_config.DEEP_TIMEOUT_SECONDS
     retry_count = 0

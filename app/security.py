@@ -229,7 +229,9 @@ class SecurityMiddleware(BaseHTTPMiddleware):
 
         # 安全响应头
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
+        # HTML 分享页面需要允许被 iframe 嵌入，跳过 X-Frame-Options
+        if "/html-share/" not in request.url.path:
+            response.headers["X-Frame-Options"] = "DENY"
         response.headers["X-RateLimit-Remaining"] = str(remaining)
 
         return response

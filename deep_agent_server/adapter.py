@@ -245,6 +245,7 @@ class DeepEventAdapter:
         group_id: int = 0,
         agent_id: Optional[str] = None,
         initial_step_index: int = 0,
+        agent_wrapper=None,
     ):
         self.session_id = session_id
         self.run_id = run_id
@@ -295,6 +296,9 @@ class DeepEventAdapter:
         # 本轮 conversation 内 write/edit 登记的文件（virtual_path → meta）
         self._conversation_files: Dict[str, dict] = {}
         self._tool_event_inputs: Dict[str, dict] = {}
+        # HTML 分享链接：agent_wrapper 引用 + 本轮新创建的链接
+        self._agent_wrapper = agent_wrapper
+        self._html_share_links: Dict[str, str] = {}
         # 当前 model 段是否已将推理刷为 reasoning_final（避免 CoT 每 chunk 重复刷库）
         self._reasoning_segment_flushed: bool = False
         # 上下文压缩后抑制当前 model 段输出（防止摘要推理和摘要内容泄露到前端/DB）
@@ -1868,6 +1872,7 @@ class DeepEventAdapter:
             "tool_name": effective_tool,
         }
         self._schedule_conversation_file_index(virtual_path)
+        self._schedule_html_share(virtual_path)
 
     def _schedule_conversation_file_index(self, virtual_path: str) -> None:
         import asyncio
@@ -1906,6 +1911,57 @@ class DeepEventAdapter:
             loop.create_task(_run())
         except RuntimeError:
             asyncio.run(_run())
+
+    # ── HTML 分享链接自动创建 ──────────────────────────────────────────────
+
+    def _schedule_html_share(self, virtual_path: str) -> None:
+        """fire-and-forget 入口：检查扩展名后异步创建分享 token。"""
+        ext = (virtual_path or "").rsplit(".", 1)[-1].lower()
+        if ext not in ("html", "htm"):
+            return
+        import asyncio
+        asyncio.ensure_future(self._create_html_share_async(virtual_path))
+
+    async def _create_html_share_async(self, virtual_path: str) -> None:
+        """读磁盘文件，若为完整 HTML（含闭合标签）则创建分享 token 并缓存 URL。"""
+        try:
+            from config import get_logger as _get_logger
+            from config.config import app_config
+            from deep_agent_server.workspace_service import resolve_virtual_path
+            from db.html_share_store import create_share_token as do_create_share_token
+
+            abs_path, _rel_path, _, file_kind = resolve_virtual_path(
+                self.user_id, virtual_path
+            )
+            if file_kind != "workspace" or not abs_path.is_file():
+                return
+
+            # 仅完整 HTML（含闭合标签）才创建分享，避免骨架阶段误触发
+            content = abs_path.read_text(encoding="utf-8", errors="replace")
+            if "</body>" not in content and "</html>" not in content:
+                return
+
+            token = await do_create_share_token(
+                user_id=self.user_id,
+                session_id=self.session_id,
+                file_path=virtual_path,
+                expires_in_hours=None,
+            )
+            public_base = (app_config.AGENTA_PUBLIC_BASE_URL or "").rstrip("/")
+            share_url = f"{public_base}/workspace/html-share/{token}"
+            self._html_share_links[virtual_path] = share_url
+            # 持久到 agent_wrapper，供跨 run 注入
+            if self._agent_wrapper is not None:
+                self._agent_wrapper.html_share_links[virtual_path] = share_url
+
+            _get_logger(__name__).info(
+                f"[HtmlShare] token created path={virtual_path} token={token}"
+            )
+        except Exception as e:
+            from config import get_logger as _get_logger
+            _get_logger(__name__).warning(
+                f"[HtmlShare] create share failed path={virtual_path}: {e}"
+            )
 
     def status_message(self, text: str) -> dict:
         """生成 Deep 运行时状态通知（DEEP_STATUS，不存库）。"""
