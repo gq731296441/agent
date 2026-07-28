@@ -3,10 +3,13 @@
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, HTMLResponse
+from pydantic import BaseModel, Field
 from urllib.parse import quote
 
 from config import get_logger
+from db.html_share_store import create_share_token, get_share_token, touch_share_token
+from deep_agent_server.html_inline import inline_html_references
 from deep_agent_server.workspace_service import (
     delete_file,
     get_quota_detail,
@@ -159,3 +162,76 @@ async def workspace_reconcile(user_id: str = Query(...)):
         return await reconcile_user_workspace(user_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+# ── HTML 分享链接 ─────────────────────────────────────────────
+
+
+class HtmlShareRequest(BaseModel):
+    user_id: str = Field(..., description="用户ID")
+    path: str = Field(..., description="HTML 文件虚拟路径 workspace/{session_id}/...")
+    expires_in_hours: Optional[int] = Field(None, description="过期小时数，None 表示永不过期")
+
+
+@router.post("/html-share")
+async def create_html_share(data: HtmlShareRequest):
+    """创建 HTML 文件的免登录分享链接。
+
+    仅 .html 文件可分享；需校验用户对 session 的访问权限。
+    """
+    vpath = (data.path or "").strip().lstrip("/").replace("\\", "/")
+
+    # 文件类型校验
+    if not vpath.lower().endswith(".html") and not vpath.lower().endswith(".htm"):
+        raise HTTPException(status_code=400, detail="仅支持分享 .html / .htm 文件")
+
+    # 校验 session 访问权限
+    if vpath.startswith("workspace/"):
+        parts = vpath.split("/", 2)
+        if len(parts) >= 2:
+            if not await validate_session_access(data.user_id, parts[1]):
+                raise HTTPException(status_code=403, detail=SESSION_ACCESS_DENIED_MSG)
+    else:
+        raise HTTPException(status_code=400, detail="仅支持 workspace 路径下的文件")
+
+    # 校验文件存在
+    try:
+        read_file_bytes(data.user_id, vpath)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    # 创建 token
+    token = await create_share_token(
+        user_id=data.user_id,
+        session_id=parts[1],
+        file_path=vpath,
+        expires_in_hours=data.expires_in_hours,
+    )
+    return {"ok": True, "token": token}
+
+
+@router.get("/html-share/{token}", response_class=HTMLResponse)
+async def view_html_share(token: str):
+    """通过分享 token 查看内联后的完整 HTML 页面（无需登录）。"""
+    record = await get_share_token(token)
+    if not record:
+        raise HTTPException(status_code=404, detail="分享链接不存在或已过期")
+
+    # 读取并内联 HTML
+    try:
+        html_text = inline_html_references(
+            user_id=record["user_id"],
+            html_virtual_path=record["file_path"],
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="原文件已被删除")
+    except Exception as e:
+        logger.exception(f"[HtmlShare] 内联渲染失败 token={token}: {e}")
+        raise HTTPException(status_code=500, detail="页面渲染失败")
+
+    # 记录访问
+    await touch_share_token(token)
+
+    return HTMLResponse(content=html_text, status_code=200)

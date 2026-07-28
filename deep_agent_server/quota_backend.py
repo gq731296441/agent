@@ -1,12 +1,13 @@
 """带配额检查的 FilesystemBackend 包装。
 
 代理 deepagents FilesystemBackend 的 write/edit 操作，
-写入前校验 WORKSPACE_QUOTA_BYTES，成功后异步刷新 DB 用量统计并登记文件索引。
+写入前校验 WORKSPACE_QUOTA_BYTES 和 HTML footer 来源标识，成功后异步刷新 DB 用量统计并登记文件索引。
 """
 
 import asyncio
 import mimetypes
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -70,6 +71,50 @@ def _check_html_write(file_path: str, content: str) -> Optional[str]:
         )
 
     return None
+
+
+# ── HTML Footer 来源标识（强制）─────────────────────────────────────────────────
+# 所有 agent 生成的 HTML 页面必须包含此 footer（含生成日期），缺一不可
+_FOOTER_MARKER = "智搭 AI助手"
+
+
+def _build_footer_tag() -> str:
+    """动态生成 footer HTML（含当天日期）。"""
+    today = datetime.now().strftime("%Y年%m月%d日")
+    return (
+        f'<footer class="site-footer" style="text-align:center;padding:20px 16px;'
+        f'color:#94a3b8;font-size:13px;border-top:1px solid #e2e8f0;'
+        f'margin-top:48px;line-height:1.8;">\n'
+        f'  <span>由 <strong style="color:#475569;">智搭 AI助手</strong>'
+        f' 生成 · 中兴通讯有线技术部 · {today}</span>\n'
+        f'</footer>'
+    )
+_CLOSING_BODY_RE = re.compile(r'</body>', re.IGNORECASE)
+_CLOSING_HTML_RE = re.compile(r'</html>', re.IGNORECASE)
+
+
+def _ensure_html_footer(content: str) -> tuple[str, bool]:
+    """确保 HTML 内容包含来源标识 footer。
+
+    仅在内容为完整 HTML 文档（含 </body> 或 </html>）且缺失 footer 时追加。
+    如果内容只是 HTML 片段（骨架阶段），则不处理，避免干扰 agent 的分块构建流程。
+
+    返回:
+        (content, appended): 处理后的内容, 是否追加了 footer
+    """
+    if _FOOTER_MARKER in content:
+        return content, False
+    # 仅在文档已闭合（完整 HTML）时才注入 footer
+    if _CLOSING_BODY_RE.search(content):
+        return _CLOSING_BODY_RE.sub(
+            f"\n{_build_footer_tag()}\n</body>", content, count=1,
+        ), True
+    if _CLOSING_HTML_RE.search(content):
+        return _CLOSING_HTML_RE.sub(
+            f"\n{_build_footer_tag()}\n</html>", content, count=1,
+        ), True
+    # 骨架/片段阶段，不注入
+    return content, False
 
 
 def _mime_for_path(path: Path) -> str:
@@ -176,9 +221,15 @@ class QuotaFilesystemBackend:
         html_err = _check_html_write(file_path, content)
         if html_err:
             return WriteResult(error=html_err)
+        # HTML footer 来源标识自动注入（完整文档才注入，骨架/片段跳过）
+        content, footer_appended = _ensure_html_footer(content)
         result = self._inner.write(file_path, content)
         if not result.error:
             self._after_write_success(file_path)
+        if footer_appended:
+            logger.info(
+                f"[HTML Footer] 已自动注入来源标识: {file_path}"
+            )
         return result
 
     def edit(
@@ -202,7 +253,32 @@ class QuotaFilesystemBackend:
         result = self._inner.edit(file_path, old_string, new_string, replace_all)
         if not result.error:
             self._after_write_success(file_path)
+            # edit 完成后检查 HTML footer，若文档已完整且缺失则自动注入
+            self._maybe_inject_footer(file_path)
         return result
+
+    def _maybe_inject_footer(self, file_path: str) -> None:
+        """edit 成功后检查 HTML 文件是否完整且缺少 footer，自动注入。"""
+        ext = Path(file_path).suffix.lower()
+        if ext not in _HTML_EXTENSIONS:
+            return
+        try:
+            read_res = self._inner.read(file_path)
+            if read_res.error or not read_res.file_data:
+                return
+            content = read_res.file_data.content
+            updated, appended = _ensure_html_footer(content)
+            if not appended:
+                return
+            # 重新执行写入（跳过配额检查，因为 bytes 增量很小）
+            self._inner.write(file_path, updated)
+            logger.info(
+                f"[HTML Footer] edit 后自动注入来源标识: {file_path}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[HTML Footer] edit 后 footer 注入失败 {file_path}: {e}"
+            )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
