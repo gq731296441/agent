@@ -304,6 +304,12 @@ def _trigger_post_upload_parse(
 
     from deep_agent_server.file_parser import detect_format
 
+    # skill 文档（pdf/docx/pptx/xlsx）由 Agent 运行时用 skill 处理，
+    # 不需要在上传阶段用 markitdown 预解析，避免浪费 CPU 和磁盘
+    suffix = file_path.suffix.lower()
+    if suffix in {".pdf", ".docx", ".pptx", ".xlsx"}:
+        return
+
     layer = detect_format(file_path)
     if layer == 0 or layer == 4:
         return  # 未知格式或 WPS/旧版，跳过

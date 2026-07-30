@@ -1,15 +1,14 @@
 """附件服务：将用户上传的文件列表转为 Agent 可消费的消息内容。
 
 策略：
-  上传后后端已异步解析文件，解析结果缓存为 {file}.parsed.txt。
-  build_attachment_message 优先读取缓存，直接注入解析后的文本内容。
-  Agent 无需再调 execute / read_file / read_image 读取附件内容。
+  - skill 文档（pdf/docx/pptx/xlsx）：不走 markitdown，引导 Agent 使用对应 skill 处理
+  - 纯文本 (Layer 1)：charset-normalizer 读文本，直接注入
+  - 图片 (Layer 3)：vision_service 描述，直接注入
+  - WPS/旧格式 (Layer 4)：提示用户转换
 
 降级策略：
-  - 缓存不存在（解析未完成/失败/未知格式）：注入工具提示
-  - Layer 4（WPS/旧格式）：提示用户转换格式
   - 图片未解析：提示使用 read_image
-  - Office/PDF 未解析：提示使用 execute（兼容沙箱降级）
+  - WPS/旧格式：提示用户转换格式
 """
 
 import logging
@@ -25,6 +24,11 @@ IMAGE_EXTENSIONS: set[str] = {
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico", ".tiff", ".tif", ".svg",
 }
 
+# 文档 skill 支持的格式 — 不通过 markitdown 解析，由 Agent 使用 skill 自行处理
+SKILL_DOCUMENT_EXTENSIONS: set[str] = {
+    ".pdf", ".docx", ".pptx", ".xlsx",
+}
+
 # WPS/旧版 Office/邮件格式（沙箱未安装 libreoffice，无法解析）
 LIBREOFFICE_EXTENSIONS: set[str] = {
     ".wps", ".dps", ".et", ".doc", ".ppt", ".msg", ".eml",
@@ -32,6 +36,14 @@ LIBREOFFICE_EXTENSIONS: set[str] = {
 
 # 最多列出的附件数
 MAX_ATTACHMENTS: int = 20
+
+# 文档扩展名 → 对应 skill 名称
+SKILL_MAP: dict[str, str] = {
+    ".pdf": "pdf",
+    ".docx": "docx",
+    ".pptx": "pptx",
+    ".xlsx": "xlsx",
+}
 
 
 def resolve_attachment_path(user_id: str, virtual_path: str) -> Path:
@@ -158,74 +170,87 @@ async def build_attachment_message(user_id: str, attachments: list | None) -> st
         total_bytes += file_size
         suffix = disk_path.suffix.lower()
 
-        # ── 优先：尝试读取后端解析缓存 ──
-        parsed_content = _read_parsed_cache(disk_path)
+        # ── Skill 文档（pdf/docx/pptx/xlsx）：不解析，引导 Agent 使用 skill ──
+        if suffix in SKILL_DOCUMENT_EXTENSIONS:
+            skill_name = SKILL_MAP.get(suffix, "read_file")
+            format_label = _get_format_label(suffix)
+            agent_path = _to_agent_path(str(vpath))
+            lines.append(
+                f"用户上传了一个{format_label}文件：`{agent_path}` ({filename}, {_format_size(file_size)})，"
+                f"请使用 **{skill_name} skill** 来读取和处理此文件的内容。"
+            )
+            count += 1
+            continue
 
+        # ── 图片：优先读取缓存，否则提示 ──
+        if _is_image(filename):
+            parsed_content = _read_parsed_cache(disk_path)
+            if parsed_content is not None:
+                lines.append(
+                    f"\n--- {filename} (图片, {_format_size(file_size)}) ---\n"
+                    f"{parsed_content}"
+                )
+                has_parsed_content = True
+            else:
+                agent_path = _to_agent_path(str(vpath))
+                lines.append(
+                    f"- `{agent_path}` — {filename}, {_format_size(file_size)}, "
+                    f"图片尚未解析，可使用 `read_image` 工具查看"
+                )
+            count += 1
+            continue
+
+        # ── WPS/旧格式：提示转换 ──
+        if _is_libreoffice_format(filename):
+            lib_hints = {
+                ".wps": "WPS 文字文档，请转换为 .docx 后重新上传",
+                ".dps": "WPS 演示文档，请转换为 .pptx 后重新上传",
+                ".et":  "WPS 表格文档，请转换为 .xlsx 后重新上传",
+                ".doc": "旧版 Word 文档，请转换为 .docx 后重新上传",
+                ".ppt": "旧版 PPT 文档，请转换为 .pptx 后重新上传",
+                ".msg": "Outlook 邮件格式，请导出为 .txt 或 .pdf 后重新上传",
+                ".eml": "邮件格式，请另存为 .txt 后重新上传",
+            }
+            hint = lib_hints.get(suffix, f"暂不支持 {suffix} 格式的自动解析")
+            agent_path = _to_agent_path(str(vpath))
+            lines.append(f"- `{agent_path}` — {filename}, ⚠️ {hint}")
+            count += 1
+            continue
+
+        # ── 纯文本 / 其他：按需解析 ──
+        parsed_content = _read_parsed_cache(disk_path)
         if parsed_content is not None:
-            # 缓存命中 → 直接注入解析内容
             format_label = _get_format_label(suffix)
             lines.append(
                 f"\n--- {filename} ({format_label}, {_format_size(file_size)}) ---\n"
                 f"{parsed_content}"
             )
             has_parsed_content = True
-
         else:
-            # 缓存未命中 → 按需触发解析（Layer 1/2）或降级为工具提示
-            layer = _detect_file_layer(suffix)
-
-            if layer in (1, 2):
-                # Layer 1/2: 按需同步解析，避免 Agent 走沙箱兜底
-                parsed_content = await _parse_on_demand(disk_path, user_id, layer)
-                if parsed_content is not None:
-                    format_label = _get_format_label(suffix)
-                    lines.append(
-                        f"\n--- {filename} ({format_label}, {_format_size(file_size)}) ---\n"
-                        f"{parsed_content}"
-                    )
-                    has_parsed_content = True
-                    count += 1
-                    continue
-
-            # 走到这里说明按需解析也失败了 → 降级
-            if _is_libreoffice_format(filename):
-                # Layer 4: WPS/旧格式，无法解析
-                lib_hints = {
-                    ".wps": "WPS 文字文档，请转换为 .docx 后重新上传",
-                    ".dps": "WPS 演示文档，请转换为 .pptx 后重新上传",
-                    ".et":  "WPS 表格文档，请转换为 .xlsx 后重新上传",
-                    ".doc": "旧版 Word 文档，请转换为 .docx 后重新上传",
-                    ".ppt": "旧版 PPT 文档，请转换为 .pptx 后重新上传",
-                    ".msg": "Outlook 邮件格式，请导出为 .txt 或 .pdf 后重新上传",
-                    ".eml": "邮件格式，请另存为 .txt 后重新上传",
-                }
-                hint = lib_hints.get(suffix, f"暂不支持 {suffix} 格式的自动解析")
-                agent_path = _to_agent_path(str(vpath))
-                lines.append(f"- `{agent_path}` — {filename}, ⚠️ {hint}")
-
-            elif _is_image(filename):
-                # 图片未解析（Vision API 太慢，不阻塞等待）→ 提示使用 read_image
-                agent_path = _to_agent_path(str(vpath))
-                lines.append(
-                    f"- `{agent_path}` — {filename}, {_format_size(file_size)}, "
-                    f"图片尚未解析，可使用 `read_image` 工具查看"
-                )
-
-            else:
-                # 其他格式未解析 → 提示使用 read_file
-                agent_path = _to_agent_path(str(vpath))
-                lines.append(
-                    f"- `{agent_path}` — {filename}, {_format_size(file_size)}, "
-                    f"可使用 `read_file` 工具读取内容"
-                )
+            agent_path = _to_agent_path(str(vpath))
+            lines.append(
+                f"- `{agent_path}` — {filename}, {_format_size(file_size)}, "
+                f"可使用 `read_file` 工具读取内容"
+            )
 
         count += 1
 
     if not lines:
         return None
 
-    # 根据是否有解析内容使用不同的引导语
-    if has_parsed_content:
+    # 根据附件类型使用不同的引导语
+    has_skill_docs = any(
+        Path(str(a)).suffix.lower() in SKILL_DOCUMENT_EXTENSIONS
+        for a in (attachments or [])
+    )
+    if has_skill_docs and not has_parsed_content:
+        header = (
+            f"用户上传了 {count} 个附件（共 {_format_size(total_bytes)}）。\n"
+            f"对于文档文件（PDF/Word/PPT/Excel），请直接使用对应的 skill 工具来读取内容"
+            f"（如 `python scripts/xxx.py`），不要使用 `read_file` 工具。\n"
+            f"对于其他文件类型，请根据需要使用对应工具获取内容。"
+        )
+    elif has_parsed_content:
         header = (
             f"用户上传了 {count} 个附件文件（共 {_format_size(total_bytes)}），"
             f"文件内容已自动解析如下。"

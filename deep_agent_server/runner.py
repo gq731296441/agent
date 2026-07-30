@@ -629,11 +629,14 @@ async def _stream(
             # tools 事件绕过 _adapt_messages_chunk，model→tools 转换可能未触发。
             # 无论缓冲区是否为空都刷一次：空则 no-op，有内容则落库 + 推送。
             #
-            # 关键：文本由「上一个 model 节点」产生，应使用 _last_model_namespace
-            # 而非当前 tools 事件的 namespace。否则子 agent 推理文本结束时，
-            # 主 agent 的 task tool-finished（namespace=()）会导致 subagent_run_id=null。
+            # namespace 优先级：
+            # - 子 agent 内部的 tools 事件带有非空 namespace（如 ("tools:xxx",)），
+            #   此时应使用 namespace 作为 flush 目标，确保并发子 agent 场景下
+            #   文本归属到正确的 subagent_run_id。
+            # - 主 agent 层面的 tools 事件（如 task tool-finished）namespace 为空，
+            #   此时回退到 _last_model_namespace，防止 subagent_run_id 丢失。
             saved_ns = getattr(adapter, "_active_namespace", ())
-            flush_ns = adapter._last_model_namespace if adapter._last_model_namespace else namespace
+            flush_ns = namespace if namespace else adapter._last_model_namespace
             adapter._active_namespace = flush_ns
             # 预激活 + 排空 SUBAGENT_START，确保其先于 reasoning/chat 推送
             adapter._pre_activate_namespace(flush_ns)

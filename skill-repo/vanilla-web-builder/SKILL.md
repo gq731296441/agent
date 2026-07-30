@@ -1,7 +1,7 @@
 ---
 name: vanilla-web-builder
 description: 需要生成HTML文件、HTML报告、可交互网页时请使用本技能，结合专业视觉设计规范，使用原生 HTML、CSS 和 JavaScript 分步骤构建高质量、美观且功能完备的可交互HTML网页和HTML报告。采用多文件项目结构（HTML/CSS/JS 分离），适用于追求独特视觉身份、轻量级性能和原生交互的专业前端开发场景。
-version: 1.2.2
+version: 1.2.3
 author: platform
 tags: ["网页设计"]
 triggers: ["可交互网页", "网页", "网站", "html", "HTML报告"]
@@ -133,7 +133,7 @@ triggers: ["可交互网页", "网页", "网站", "html", "HTML报告"]
 
 1. 用 `edit_file` 删除所有残留占位符
 2. 用 `read_file` 审核各文件内容
-3. 用 `ls` 确认项目目录结构
+3. 用 `ls` 确认项目目录结构，确保html引用的的css和js文件在同一目录内
 4. 确保不依赖任何外部 CDN 资源
 
 ## 常用模式与技巧
@@ -142,5 +142,5 @@ triggers: ["可交互网页", "网页", "网站", "html", "HTML报告"]
 - **SVG 内联**：使用内联 SVG 代替外部图片图标，保持项目自包含。
 - **Base64 资源**：对于必需的小型图片资源，建议转换为 Base64 内联到 HTML 或 CSS 中。
 - **原生组件化**：使用函数返回 HTML 字符串或 `<template>` 标签实现组件复用。
-- **CSS 艺术**：利用 `clip-path`, `mask`, `backdrop-filter` 等现代原生 CSS 属性创造独特视觉效果。
+- **CSS 艺术**：利用 `clip-path`, `mask`, `backdrop-filter` 等现代原生 CSS 属性创造独特视觉效果。尽量避免使用`linear-gradient(135deg, #667eea 0%, #764ba2 100%);`的渐变背景
 - **路径验证清单**：最终验证时逐一检查 HTML 中的 `<link href>` 和 `<script src>` — 确保是相对路径、指向同目录下存在的文件、不包含 `https://` 或 `http://`。

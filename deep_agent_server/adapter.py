@@ -988,11 +988,14 @@ class DeepEventAdapter:
         node = metadata.get("langgraph_node", "unknown")
 
         # 离开 model 节点时：先刷推理/回复，再 emit 缓存的 tool_call start
-        # 切回对应的 namespace，防止并发子 agent 导致的归属错误
+        # 优先使用当前 chunk 的 namespace（saved_ns），仅在 saved_ns 为空
+        # （主 agent 层面）时回退到 _last_model_namespace。防止并发子 agent
+        # 场景下 _last_model_namespace 已被另一个子 agent 覆盖导致归属错误。
         if self._last_node == "model" and node != "model":
             saved_ns = getattr(self, "_active_namespace", ())
-            if self._last_model_namespace:
-                self._active_namespace = self._last_model_namespace
+            effective_ns = saved_ns if saved_ns else self._last_model_namespace
+            if effective_ns:
+                self._active_namespace = effective_ns
             try:
                 async for msg in self.finalize_model_segment():
                     yield msg

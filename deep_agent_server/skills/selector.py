@@ -17,7 +17,7 @@ from deep_agent_server.workspace import get_skills_dir
 logger = logging.getLogger(__name__)
 
 # 内置默认技能：对所有用户默认可用，不入 catalog，不参与订阅/退订
-BUILTIN_SKILL_IDS = {"vanilla-web-builder", "frontend-design"}
+BUILTIN_SKILL_IDS = {"vanilla-web-builder", "frontend-design", "pdf", "xlsx", "pptx", "docx"}
 
 # 内置技能源目录路径（skill-repo 根目录）
 BUILTIN_SKILL_REPO_ROOT = app_config.get_skill_repo_root()
