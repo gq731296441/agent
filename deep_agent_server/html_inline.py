@@ -150,9 +150,11 @@ def inline_html_references(
 
             if tag_type == 'script':
                 # <script src="x.js"> → <script>content</script>
+                # 注意：必须用 lambda 返回 replacement 字符串，
+                # 否则 re.sub 会对 replacement 中的 \n 等转义序列进行二次解释导致 JS/CSS 内容损坏
                 html_text = re.sub(
                     r'<script\b[^>]*\bsrc\s*=\s*["\']' + re.escape(rel_path) + r'["\'][^>]*>\s*</script\s*>',
-                    '<script>' + dep_content + '</script>',
+                    lambda _m: '<script>' + dep_content + '</script>',
                     html_text,
                     count=1,
                     flags=re.IGNORECASE,
@@ -160,9 +162,11 @@ def inline_html_references(
                 inlined_count += 1
             elif tag_type == 'stylesheet':
                 # <link href="x.css" ...> → <style>content</style>
+                # 注意：必须用 lambda 返回 replacement 字符串，
+                # 否则 re.sub 会对 replacement 中的 \n 等转义序列进行二次解释导致 JS/CSS 内容损坏
                 html_text = re.sub(
                     r'<link\b[^>]*\bhref\s*=\s*["\']' + re.escape(rel_path) + r'["\'][^>]*>',
-                    '<style>' + dep_content + '</style>',
+                    lambda _m: '<style>' + dep_content + '</style>',
                     html_text,
                     count=1,
                     flags=re.IGNORECASE,
