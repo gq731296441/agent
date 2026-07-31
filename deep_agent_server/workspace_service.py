@@ -2,6 +2,7 @@
 
 import mimetypes
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -128,6 +129,204 @@ async def get_quota_detail(user_id: str) -> Dict[str, Any]:
     }
 
 
+def _scan_tree_nodes(
+    base: Path,
+    prefix: str,
+    file_kind: str,
+    sort_by: str = "name",
+    sort_order: str = "asc",
+) -> List[Dict[str, Any]]:
+    """递归扫描目录树，返回文件 + 文件夹混合节点列表（树状结构）。
+
+    每层节点先按类型分组（文件夹在前），再按 sort_by 排序。
+    """
+    if not base.exists() or not base.is_dir():
+        return []
+    nodes: List[Dict[str, Any]] = []
+    try:
+        entries = sorted(base.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+    except OSError:
+        return nodes
+
+    for entry in entries:
+        if _is_user_hidden_filename(entry.name):
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+
+        rel = entry.relative_to(base).as_posix()
+        virtual = f"{prefix}/{rel}" if rel else prefix
+
+        if entry.is_dir():
+            kind = file_kind
+            if file_kind == "workspace" and (
+                rel.startswith(".sandbox/") or "/.sandbox/" in f"/{rel}/"
+            ):
+                kind = "sandbox"
+            if kind in ("workspace", "sandbox") and _is_skill_mirror_path(virtual, rel):
+                continue
+            children = _scan_tree_nodes(entry, virtual, file_kind, sort_by, sort_order)
+            # 递归汇总文件夹统计
+            total_size = sum(c["size_bytes"] for c in children)
+            file_count = sum(1 for c in children if c["type"] == "file")
+            folder_count = sum(1 for c in children if c["type"] == "folder")
+            # mtime 取最新子节点（含自身目录 mtime）
+            child_times = [c["updated_at"] for c in children]
+            child_times.append(
+                datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+            )
+            latest_time = max(child_times)
+            nodes.append({
+                "name": entry.name,
+                "type": "folder",
+                "path": virtual,
+                "size_bytes": total_size,
+                "updated_at": latest_time,
+                "file_count": file_count,
+                "folder_count": folder_count,
+                "children": children,
+                "deletable": kind not in ("skill", "sandbox"),
+            })
+        else:
+            kind = file_kind
+            if file_kind == "workspace" and (
+                rel.startswith(".sandbox/") or "/.sandbox/" in f"/{rel}/"
+            ):
+                kind = "sandbox"
+            if kind in ("workspace", "sandbox") and _is_skill_mirror_path(virtual, rel):
+                continue
+            nodes.append({
+                "name": entry.name,
+                "type": "file",
+                "path": virtual,
+                "size_bytes": stat.st_size,
+                "updated_at": datetime.fromtimestamp(
+                    stat.st_mtime, tz=timezone.utc
+                ).isoformat(),
+                "mime_type": _mime_for_path(entry),
+                "file_kind": kind,
+                "deletable": kind not in ("skill", "sandbox"),
+            })
+
+    # 每层节点排序：文件夹始终在前，再按 sort_by 排序
+    reverse = sort_order == "desc"
+    if sort_by == "size":
+        nodes.sort(
+            key=lambda n: (n["type"] != "folder", n["size_bytes"]),
+            reverse=reverse,
+        )
+    elif sort_by == "time":
+        nodes.sort(
+            key=lambda n: (n["type"] != "folder", n["updated_at"]),
+            reverse=reverse,
+        )
+    else:  # name
+        nodes.sort(
+            key=lambda n: (n["type"] != "folder", n["name"].lower()),
+            reverse=reverse,
+        )
+    return nodes
+
+
+def list_files_tree(
+    user_id: str,
+    *,
+    session_id: str = None,
+    scope: str = "all",
+    sort_by: str = "name",
+    sort_order: str = "asc",
+) -> List[Dict[str, Any]]:
+    """树状结构列出工作区文件（含文件夹节点，递归嵌套 children）。"""
+    uid = validate_user_id(user_id)
+    root = get_user_root(uid)
+    roots: List[Dict[str, Any]] = []
+
+    if scope in ("all", "workspace"):
+        if session_id:
+            base = get_workspace_dir(uid, session_id)
+            prefix = f"workspace/{session_id}"
+            children = _scan_tree_nodes(base, prefix, "workspace", sort_by, sort_order)
+            total_size = sum(c["size_bytes"] for c in children)
+            file_count = sum(1 for c in children if c["type"] == "file")
+            folder_count = sum(1 for c in children if c["type"] == "folder")
+            # 根节点 updated_at 取最新子节点
+            root_time = (
+                max(c["updated_at"] for c in children)
+                if children
+                else datetime.fromtimestamp(0, tz=timezone.utc).isoformat()
+            )
+            roots.append({
+                "name": session_id,
+                "type": "folder",
+                "path": prefix,
+                "size_bytes": total_size,
+                "updated_at": root_time,
+                "file_count": file_count,
+                "folder_count": folder_count,
+                "children": children,
+                "deletable": False,
+            })
+        else:
+            ws_root = root / "workspace"
+            if ws_root.exists():
+                try:
+                    sess_dirs = sorted(
+                        [d for d in ws_root.iterdir() if d.is_dir()],
+                        key=lambda d: d.name.lower(),
+                    )
+                except OSError:
+                    sess_dirs = []
+                for sess_dir in sess_dirs:
+                    sid = sess_dir.name
+                    prefix = f"workspace/{sid}"
+                    children = _scan_tree_nodes(
+                        sess_dir, prefix, "workspace", sort_by, sort_order
+                    )
+                    total_size = sum(c["size_bytes"] for c in children)
+                    file_count = sum(1 for c in children if c["type"] == "file")
+                    folder_count = sum(1 for c in children if c["type"] == "folder")
+                    root_time = (
+                        max(c["updated_at"] for c in children)
+                        if children
+                        else datetime.fromtimestamp(0, tz=timezone.utc).isoformat()
+                    )
+                    roots.append({
+                        "name": sid,
+                        "type": "folder",
+                        "path": prefix,
+                        "size_bytes": total_size,
+                        "updated_at": root_time,
+                        "file_count": file_count,
+                        "folder_count": folder_count,
+                        "children": children,
+                    })
+
+    if scope == "skills":
+        roots.extend(
+            _scan_tree_nodes(get_skills_dir(uid), "skills", "skill", sort_by, sort_order)
+        )
+
+    if scope in ("all", "artifacts"):
+        if not session_id:
+            roots.extend(
+                _scan_tree_nodes(
+                    get_artifacts_dir(uid), "artifacts", "artifact", sort_by, sort_order
+                )
+            )
+
+    if scope in ("all", "uploads"):
+        if not session_id:
+            roots.extend(
+                _scan_tree_nodes(
+                    get_uploads_dir(uid), "uploads", "upload", sort_by, sort_order
+                )
+            )
+
+    return roots
+
+
 def list_files(
     user_id: str,
     *,
@@ -230,7 +429,11 @@ def read_file_bytes(user_id: str, virtual_path: str) -> Tuple[bytes, str]:
     return abs_path.read_bytes(), _mime_for_path(abs_path)
 
 
-async def delete_file(user_id: str, virtual_path: str) -> None:
+async def delete_file(user_id: str, virtual_path: str, *, recursive: bool = False) -> None:
+    """删除工作区文件，或递归删除目录（需传 recursive=true）。
+
+    递归删除目录时会先遍历收集所有子文件，逐一清理 DB 索引，再删除整个目录树。
+    """
     _assert_user_visible_path(virtual_path)
     abs_path, rel_path, session_id, file_kind = resolve_virtual_path(user_id, virtual_path)
     vpath = (virtual_path or "").strip().lstrip("/").replace("\\", "/")
@@ -238,11 +441,36 @@ async def delete_file(user_id: str, virtual_path: str) -> None:
         raise ValueError("Skill 文件不可在此删除，请前往 Skill 管理卸载")
     if "/.sandbox/skills/" in f"/{vpath}/" or vpath.endswith(".sandbox/skills"):
         raise ValueError("Skill 镜像不可删除，请前往 Skill 管理卸载")
-    if abs_path.is_dir():
-        raise ValueError("不支持删除目录，请指定文件")
     if not abs_path.exists():
         raise FileNotFoundError(virtual_path)
-    abs_path.unlink()
+
+    if abs_path.is_dir():
+        if not recursive:
+            raise ValueError("不支持删除目录，请传 recursive=true 进行递归删除")
+        # 先清理子文件 DB 索引
+        index_prefix = (rel_path or "").rstrip("/") + "/"
+        for root, _dirs, files in os.walk(abs_path):
+            for name in files:
+                fp = Path(root) / name
+                try:
+                    child_rel = fp.relative_to(get_workspace_dir(user_id, session_id) if session_id else get_user_root(user_id)).as_posix()
+                except (OSError, ValueError):
+                    continue
+                child_index_rel = child_rel
+                if file_kind != "workspace":
+                    child_index_rel = str(fp.relative_to(abs_path.parent).as_posix())
+                await deep_storage.delete_workspace_file_index(
+                    user_id, child_index_rel,
+                    file_kind=file_kind, session_id=session_id,
+                )
+        shutil.rmtree(abs_path)
+        logger.info(
+            f"[Workspace] 已递归删除目录 user={user_id} "
+            f"virtual={virtual_path} abs={abs_path}"
+        )
+    else:
+        abs_path.unlink()
+
     index_rel = virtual_path.lstrip("/")
     if file_kind == "workspace":
         index_rel = rel_path

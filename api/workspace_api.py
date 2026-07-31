@@ -15,6 +15,7 @@ from deep_agent_server.workspace_service import (
     get_quota_detail,
     list_conversation_workspace_cards,
     list_files,
+    list_files_tree,
     list_session_workspace_cards,
     read_file_bytes,
     reconcile_user_workspace,
@@ -39,9 +40,14 @@ async def workspace_files(
     scope: str = Query("all", description="workspace|skills|artifacts|uploads|all"),
     sort_by: str = Query("name", description="排序字段: name|size|time"),
     sort_order: str = Query("asc", description="排序方向: asc|desc"),
+    format: str = Query("flat", description="返回格式: flat（平铺列表，默认）| tree（树状结构）"),
 ):
     """
     列出工作区文件。
+
+    format=flat（默认）：返回扁平文件列表，见 files 字段。
+    format=tree：返回树状结构（含文件夹节点），见 tree 字段；每层文件夹在前、文件在后，
+                各分组内按 sort_by/sort_order 排序。
 
     注意：列表以磁盘扫描为准（workspace_service.list_files），不读 deep_workspace_files。
     deep_workspace_files 仅作 write/edit 后的索引与 artifact 元数据；若表为空而磁盘有文件属正常，
@@ -55,7 +61,20 @@ async def workspace_files(
         raise HTTPException(status_code=400, detail="sort_by 须为 name / size / time")
     if sort_order not in ("asc", "desc"):
         raise HTTPException(status_code=400, detail="sort_order 须为 asc / desc")
+    tree_mode = format == "tree"
     try:
+        if tree_mode:
+            tree = list_files_tree(
+                user_id, session_id=session_id, scope=scope,
+                sort_by=sort_by, sort_order=sort_order,
+            )
+            return {
+                "user_id": user_id,
+                "session_id": session_id,
+                "scope": scope,
+                "format": "tree",
+                "tree": tree,
+            }
         files = list_files(
             user_id, session_id=session_id, scope=scope,
             sort_by=sort_by, sort_order=sort_order,
@@ -142,13 +161,14 @@ async def workspace_download(
 async def workspace_delete_file(
     user_id: str = Query(...),
     path: str = Query(...),
+    recursive: bool = Query(False, description="递归删除目录（删除文件夹时需传 true）"),
 ):
     try:
         if path.startswith("workspace/"):
             parts = path.strip("/").split("/", 2)
             if len(parts) >= 2 and not await validate_session_access(user_id, parts[1]):
                 raise HTTPException(status_code=403, detail=SESSION_ACCESS_DENIED_MSG)
-        await delete_file(user_id, path)
+        await delete_file(user_id, path, recursive=recursive)
         return {"ok": True, "path": path}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
