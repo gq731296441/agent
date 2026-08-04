@@ -243,7 +243,8 @@ class QuotaFilesystemBackend:
         if not read_res.error and read_res.file_data is not None:
             err = check_edit_delta(
                 self._user_id,
-                current_content=read_res.file_data.content,
+                # FileData 为 TypedDict，按 key 访问（dict 无 .content 属性）
+                current_content=read_res.file_data["content"],
                 old_string=old_string,
                 new_string=new_string,
                 replace_all=replace_all,
@@ -266,7 +267,7 @@ class QuotaFilesystemBackend:
             read_res = self._inner.read(file_path)
             if read_res.error or not read_res.file_data:
                 return
-            content = read_res.file_data.content
+            content = read_res.file_data["content"]
             updated, appended = _ensure_html_footer(content)
             if not appended:
                 return

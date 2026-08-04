@@ -94,10 +94,22 @@ async def setup_new_session(
     if resolved_kind == "subscription" and not resolved_agent_id:
         raise ValueError("订阅会话必须提供 agent_id")
 
+    # 订阅智能体会话标题固定为智能体名称，不随首轮 fallback 标题变化；
+    # 同时可自愈此前被 fallback 标题覆盖的记录
+    upsert_title = session_title
+    if resolved_kind == "subscription":
+        assert resolved_agent_id is not None  # 上面已校验必填
+        try:
+            agent_name = await deep_storage.get_user_agent_name(resolved_agent_id)
+            if agent_name:
+                upsert_title = agent_name
+        except Exception as e:
+            logger.warning(f"【会话】读取订阅智能体名称失败: {e}")
+
     await storage.upsert_user_session(
         user_id=user_id,
         session_id=session_id,
-        session_name=session_title,
+        session_name=upsert_title,
         agent_id=resolved_agent_id if resolved_kind == "subscription" else None,
         agent_kind=resolved_kind,
     )
@@ -212,6 +224,28 @@ async def deferred_generate_and_update_title(
     from db import storage
 
     fallback = _build_fallback_session_title(session_id)
+
+    # 订阅智能体会话标题固定为智能体名称，不做 LLM 生成；
+    # 同时自愈此前被 LLM / fallback 标题覆盖的记录
+    try:
+        meta = await storage.get_session_meta(session_id) or {}
+        if meta.get("agent_kind") == "subscription":
+            agent_name = ""
+            if meta.get("agent_id"):
+                from db import deep_storage
+                agent_name = await deep_storage.get_user_agent_name(meta["agent_id"]) or ""
+            fixed_title = agent_name or (meta.get("session_name") or fallback)
+            if (meta.get("session_name") or "") != fixed_title:
+                await storage.update_session_title(user_id, session_id, fixed_title)
+            logger.info(
+                f"【会话】订阅会话标题固定为智能体名 "
+                f"session={session_id} title={fixed_title}"
+            )
+            return fixed_title
+    except Exception as e:
+        logger.warning(
+            f"【会话】订阅会话标题处理失败，回退常规流程 session={session_id}: {e}"
+        )
 
     try:
         # 1. 获取助手回复：优先使用调用方传入的（已在内存中积累），否则从 DB 查询

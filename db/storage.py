@@ -18,7 +18,7 @@ async def upsert_user_session(
     user_id: str,
     session_id: str,
     session_name: str = "新会话",
-    agent_id: str = None,
+    agent_id: Optional[str] = None,
     agent_kind: str = "default",
     subscription_frozen: bool = False,
 ) -> str:

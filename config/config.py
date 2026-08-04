@@ -227,11 +227,33 @@ class BaseConfig(BaseSettings):
 
     # ==================== Artifact / Tool Spill ====================
     TOOL_SPILL_ENABLED: bool = Field(default=True, description="超长工具结果 spill 到 workspace")
-    TOOL_SPILL_MIN_CHARS: int = Field(default=4000, description="超过此字符数则 spill")
+    # 4000 → 2000：工具结果在上下文中的累积是 token 消耗第一大项（占 ~55%）。
+    # 调低阈值让更多中长结果转摘要 + workspace 引用（模型可 read_file 看全文），
+    # 显著降低历史重读成本，对模型理解影响很小。
+    TOOL_SPILL_MIN_CHARS: int = Field(default=2000, description="超过此字符数则 spill")
     TOOL_SPILL_VIRTUAL_DIR: str = Field(default=".tool-cache", description="workspace 内 spill 子目录")
+
+    # ==================== 工具结果 TTL ====================
+    # 每次模型调用前零成本清理过期/超量的工具结果（替换为占位符），
+    # 释放上下文窗口。已 spill 外置的结果（摘要+路径）不清理。
+    TOOL_RESULT_TTL_ENABLED: bool = Field(default=True, description="是否启用工具结果 TTL 清理")
+    TOOL_RESULT_TTL_GAP_MINUTES: float = Field(default=5.0, description="时间触发:距上次模型调用超过此分钟数则清理旧工具结果")
+    TOOL_RESULT_TTL_COUNT_TRIGGER: int = Field(default=15, description="数量触发:可压缩工具结果超过此数量则清理最旧的")
+    TOOL_RESULT_TTL_KEEP_RECENT: int = Field(default=15, description="无论哪种触发,保留最近 N 个工具结果")
     ARTIFACT_DB_MIRROR_ENABLED: bool = Field(
         default=True,
         description="spill 时双写 deep_workspace_files 兼容旧 API",
+    )
+
+    # ==================== Observability: Langfuse ====================
+    # 自托管 Langfuse (https://langfuse.com) 集成。开启后每次 Deep run 的
+    # LLM 调用 / 工具执行 / 子 Agent 分支以 trace 树形式发送到 Langfuse 展示。
+    LANGFUSE_ENABLED: bool = Field(default=False, description="是否启用 Langfuse 观测（需同时配置密钥与 Host）")
+    LANGFUSE_PUBLIC_KEY: str = Field(default="", description="Langfuse public key (pk-lf-...)")
+    LANGFUSE_SECRET_KEY: str = Field(default="", description="Langfuse secret key (sk-lf-...)")
+    LANGFUSE_HOST: str = Field(
+        default="",
+        description="Langfuse 自托管地址，如 http://localhost:3000；留空且未配置环境变量时回退到 Langfuse 云",
     )
 
     # ==================== User Memory ====================

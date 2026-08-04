@@ -20,8 +20,9 @@ from deep_agent_server.backend_factory import (
 )
 from agent_server.middleware.RateLimitMiddleware import RateLimitMiddleware
 from deep_agent_server.middleware.context_overflow_guard import ContextOverflowGuardMiddleware
+from deep_agent_server.middleware.tool_result_ttl import ToolResultTTLMiddleware
 from deep_agent_server.sandbox import get_sandbox_backend_factory_if_enabled
-# import deep_agent_server.tool_patches  # noqa: F401 — 模块导入即生效：替换 write_file/edit_file 描述为分块版本
+import deep_agent_server.tool_patches  # noqa: F401 — 模块导入即生效：替换 write_file/edit_file 描述为分块版本
 
 
 # ---- 替换 _get_approximate_token_counter 为准确版本 ----
@@ -360,6 +361,10 @@ class DeepAgentWrapper:
         self.html_share_links: Dict[str, str] = {}
         # 已推送给 agent 的 virtual_path 集合，防止跨 run 重复注入
         self._announced_html_shares: set = set()
+        # 分享 token 创建锁：f"{user_id}:{virtual_path}" → asyncio.Lock。
+        # 串行化「查重 + 插入」，防止同路径删除再生成（连续 write_file）时
+        # 并发异步任务各自创建 token 导致同一文件产生多个分享链接
+        self._html_share_locks: dict = {}
 
 
 async def create_deep_agent_instance(
@@ -446,6 +451,35 @@ async def create_deep_agent_instance(
             max_wait_seconds=120.0,
         )
 
+        # ToolResultTTLMiddleware：每次模型调用前零成本清理过期/超量的工具结果
+        # （替换为占位符），释放上下文窗口。已 spill 外置的结果不清理。
+        ttl_mw = None
+        if app_config.TOOL_RESULT_TTL_ENABLED:
+            ttl_mw = ToolResultTTLMiddleware(
+                gap_threshold_minutes=app_config.TOOL_RESULT_TTL_GAP_MINUTES,
+                count_trigger=app_config.TOOL_RESULT_TTL_COUNT_TRIGGER,
+                keep_recent=app_config.TOOL_RESULT_TTL_KEEP_RECENT,
+            )
+        main_middleware = (
+            [overflow_guard, rate_limit_mw, ttl_mw]
+            if ttl_mw is not None
+            else [overflow_guard, rate_limit_mw]
+        )
+
+        # 子 agent 的 middleware 不继承主 agent（deepagents 对 SubAgent spec
+        # 执行 subagent_middleware.extend(spec.get("middleware", []))），
+        # 需要显式注入 TTL 中间件，使子 agent 的工具结果同样被清理。
+        # 仅对 dict 型 SubAgent spec 注入（CompiledSubAgent/AsyncSubAgent 不适用）。
+        if ttl_mw is not None and isinstance(subagents, list):
+            for _spec in subagents:
+                if (
+                    isinstance(_spec, dict)
+                    and "runnable" not in _spec
+                    and "graph_id" not in _spec
+                ):
+                    _existing = list(_spec.get("middleware") or [])
+                    _spec["middleware"] = _existing + [ttl_mw]
+
         agent = create_deep_agent(
             model=model,
             tools=mcp_tools or [],
@@ -457,7 +491,7 @@ async def create_deep_agent_instance(
             subagents=subagents,
             checkpointer=checkpointer,
             store=store,
-            middleware=[overflow_guard, rate_limit_mw],
+            middleware=main_middleware,
         )
         logger.info(
             f"[DeepFactory] Agent 创建成功 session={session_id} "

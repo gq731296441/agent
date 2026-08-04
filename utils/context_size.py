@@ -33,7 +33,7 @@ _DEFAULT_MAX_INPUT_TOKENS = 131072
 
 # 预警阈值
 WARNING_THRESHOLD = 0.70   # 70% 开始预警
-CRITICAL_THRESHOLD = 0.2  # 85% 危险（自动摘要触发点）
+CRITICAL_THRESHOLD = 0.85  # 85% 危险（自动摘要触发点）
 
 
 @dataclass
@@ -245,3 +245,51 @@ def get_context_percentage(
     if max_input_tokens <= 0:
         return 0.0
     return round(token_count / max_input_tokens * 100, 1)
+
+
+def estimate_context_size_from_usage(
+    usage: dict,
+    *,
+    model_name: str = "",
+    max_input_tokens: Optional[int] = None,
+) -> ContextSizeResult:
+    """无编译图时的上下文估算：基于最近一次 LLM 调用的 API 实际输入 token。
+
+    编译图缓存未命中（新会话 / 服务重启后尚未对话）时使用。
+    token_usage.prompt_tokens 是最近一次 LLM 调用送入的完整上下文
+    （全部历史消息 + 系统提示词 + 工具 schema），即当前上下文大小，
+    与 compiled.aget_state() 重建的有效消息计数语义一致。
+
+    Args:
+        usage: 最新一轮 run 的 token_usage（result_summary 解析所得）。
+        model_name: 模型名称，用于推断 max_input_tokens。
+        max_input_tokens: 手动指定最大输入 token 数；None 时从 model_name 推断。
+    """
+    token_count = int((usage or {}).get("prompt_tokens") or 0)
+    if max_input_tokens is None:
+        max_input_tokens = _resolve_max_input_tokens(model_name)
+    percentage = get_context_percentage(token_count, max_input_tokens)
+
+    if percentage >= CRITICAL_THRESHOLD * 100:
+        warning_level = "critical"
+    elif percentage >= WARNING_THRESHOLD * 100:
+        warning_level = "warning"
+    else:
+        warning_level = "normal"
+
+    # 消息数取最近一次调用的消息数（与 token 同源，均为最后一次调用）
+    message_count = 0
+    details_list = (usage or {}).get("call_details") or []
+    if details_list:
+        message_count = int(details_list[-1].get("messages_count") or 0)
+
+    bd = (usage or {}).get("prompt_breakdown") or {}
+    return ContextSizeResult(
+        token_count=token_count,
+        max_input_tokens=max_input_tokens,
+        percentage=percentage,
+        message_count=message_count,
+        warning_level=warning_level,
+        model_name=model_name,
+        details={"source": "latest_run_usage", "breakdown": bd},
+    )

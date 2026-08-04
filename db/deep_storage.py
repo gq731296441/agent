@@ -493,7 +493,7 @@ async def list_agent_runs_for_session(
             """
             SELECT run_id, conversation_id, status,
                    prompt_tokens, completion_tokens, total_tokens,
-                   started_at, finished_at, llm_model
+                   started_at, finished_at, llm_model, result_summary
             FROM agent_runs
             WHERE session_id = $1 AND user_id = $2
             ORDER BY started_at ASC
@@ -507,6 +507,18 @@ async def list_agent_runs_for_session(
         d["run_id"] = str(d["run_id"])
         if d.get("conversation_id"):
             d["conversation_id"] = str(d["conversation_id"])
+        # 解析 result_summary 中的 token_usage（含 prompt_breakdown / call_details），
+        # 供会话级上下文占比聚合使用
+        raw_summary = d.get("result_summary")
+        if isinstance(raw_summary, str):
+            try:
+                raw_summary = json.loads(raw_summary)
+            except (ValueError, TypeError):
+                raw_summary = None
+        usage = (raw_summary or {}).get("token_usage") if isinstance(raw_summary, dict) else None
+        if usage:
+            d["token_usage"] = usage
+        d.pop("result_summary", None)
         started = d.get("started_at")
         finished = d.get("finished_at")
         if started and finished:
@@ -1894,6 +1906,16 @@ def _agent_row_to_dict(row) -> Dict[str, Any]:
     if isinstance(d.get("config"), str):
         d["config"] = json.loads(d["config"])
     return d
+
+
+async def get_user_agent_name(agent_id: str) -> Optional[str]:
+    """查询用户智能体名称（订阅会话标题固定用）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT name FROM user_agents WHERE id = $1",
+            _uuid(agent_id),
+        )
 
 
 async def resolve_agent_for_caller(

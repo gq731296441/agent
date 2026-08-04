@@ -13,6 +13,7 @@ from utils.session_utils import (
 )
 from utils.subscription_guard import validate_ask_session
 from deep_agent_server.workspace import remove_session_workspace
+from deep_agent_server.runner import aggregate_session_token_summary
 import json
 
 logger = get_logger(__name__)
@@ -81,6 +82,44 @@ class SessionRunMetricsItem(BaseModel):
     total_tokens: int = Field(default=0)
     duration_ms: int = Field(default=0)
     llm_model: str = Field(default="")
+    call_count: int = Field(default=0, description="本轮 LLM 调用次数")
+    prompt_breakdown: Dict[str, Any] | None = Field(
+        default=None, description="本轮 prompt 构成（本地估算）: system/user/ai/tool_tokens 等"
+    )
+
+
+class SessionTokenSummaryItem(BaseModel):
+    """整轮会话的 token 汇总（跨 run 聚合，对应 runner._finalize_tokens 日志维度）。"""
+    run_count: int = Field(default=0, description="run 数量")
+    call_count: int = Field(default=0, description="LLM 调用总次数")
+    prompt_tokens: int = Field(default=0, description="API 输入 token 合计")
+    completion_tokens: int = Field(default=0, description="API 输出 token 合计")
+    total_tokens: int = Field(default=0, description="API 总 token 合计")
+    system_tokens: int = Field(default=0, description="系统提示词（本地估算）")
+    user_tokens: int = Field(default=0, description="用户输入（本地估算）")
+    ai_tokens: int = Field(default=0, description="助手历史（本地估算）")
+    tool_tokens: int = Field(default=0, description="工具结果（本地估算）")
+    estimated_total: int = Field(default=0, description="本地估算消息总 token")
+    api_total: int = Field(default=0, description="API 输入 token（与 estimated_total 对比评估估算偏差）")
+    breakdown_ratio: Dict[str, float] = Field(
+        default_factory=dict,
+        description="各分类占估算总 token 的比例（0~1）: system/user/ai/tool_tokens",
+    )
+    peak_call: int = Field(default=0, description="单次调用 prompt 峰值所在的调用序号")
+    peak_prompt_tokens: int = Field(default=0, description="单次调用 prompt token 峰值")
+    peak_messages_count: int = Field(default=0, description="峰值调用时的消息数")
+
+
+class SessionRunMetricsData(BaseModel):
+    """/run-metrics 响应 data：各轮 run 指标 + 整轮会话 token 汇总。"""
+    items: List[SessionRunMetricsItem] = Field(
+        default_factory=list, description="各轮 run 的 token / 耗时指标"
+    )
+    summary: SessionTokenSummaryItem | None = Field(
+        default=None, description="整轮会话 token 汇总（含上下文占比）"
+    )
+
+
 
 
 # ==================== 接口实现 ====================
@@ -164,19 +203,23 @@ async def get_session_history(
         return ListApiResponse.error(msg=f"获取会话历史失败: {str(e)}")
 
 
-@router.get("/run-metrics", response_model=ListApiResponse[SessionRunMetricsItem])
+@router.get("/run-metrics", response_model=ApiResponse[SessionRunMetricsData])
 async def get_session_run_metrics(
     userId: str = Query(..., description="用户ID"),
     session_id: str = Query(..., description="会话ID"),
 ):
-    """获取会话内所有 agent run 的 token / 耗时指标（历史消息展示用）。"""
+    """获取会话内所有 agent run 的 token / 耗时指标（历史消息展示用）。
+
+    data 包含两部分：items（各轮 run 的 token 统计）+ summary（整轮会话的
+    token 汇总与上下文占比），前端切换会话后无需等待 ws 推送即可展示。
+    """
     try:
         target_uuid = UUID(session_id)
     except (ValueError, AttributeError):
-        return ListApiResponse.error(msg=f"无效的会话ID格式: {session_id}")
+        return ApiResponse.error(msg=f"无效的会话ID格式: {session_id}")
 
     if not await validate_session_access(userId, session_id):
-        return ListApiResponse.error(msg=SESSION_ACCESS_DENIED_MSG, code=403)
+        return ApiResponse.error(msg=SESSION_ACCESS_DENIED_MSG, code=403)
 
     try:
         runs = await deep_storage.list_agent_runs_for_session(session_id, userId)
@@ -190,13 +233,19 @@ async def get_session_run_metrics(
                 total_tokens=int(r.get("total_tokens") or 0),
                 duration_ms=int(r.get("duration_ms") or 0),
                 llm_model=r.get("llm_model") or "",
+                call_count=int((r.get("token_usage") or {}).get("call_count") or 0),
+                prompt_breakdown=(r.get("token_usage") or {}).get("prompt_breakdown"),
             )
             for r in runs
         ]
-        return ListApiResponse.success(data=items, msg="成功")
+        summary = SessionTokenSummaryItem(**aggregate_session_token_summary(runs))
+        return ApiResponse.success(
+            data=SessionRunMetricsData(items=items, summary=summary),
+            msg="成功",
+        )
     except Exception as e:
         logger.error(f"[Session API] 获取 run 指标失败: {e}")
-        return ListApiResponse.error(msg=f"获取 run 指标失败: {str(e)}")
+        return ApiResponse.error(msg=f"获取 run 指标失败: {str(e)}")
 
 
 @router.delete("/delete", response_model=ApiResponse)
@@ -484,7 +533,6 @@ async def get_session_context_usage(
     resolved_model_name = model_name
     if not resolved_model_name:
         try:
-            from db import deep_storage
             resolved_model_name = (
                 await deep_storage.get_user_secret(userId, "llm_model") or ""
             )
@@ -520,13 +568,21 @@ async def get_session_context_usage(
                 system_prompt_text=system_prompt_text,
             )
         else:
-            # 缓存未命中（极少见，仅当 AGENT_CACHE_ENABLED=False 时）：
-            # 不做完整 Agent 创建，返回快速估算，避免 MCP HTTP + Agent 编译
-            from utils.context_size import ContextSizeResult
-            limit = max_input_tokens or 262144
-            result = ContextSizeResult(
-                token_count=0, max_input_tokens=limit, percentage=0.0,
-                message_count=0, warning_level="normal", model_name=resolved_model_name,
+            # 缓存未命中（新会话 / 服务重启后尚未对话 / AGENT_CACHE_ENABLED=False）：
+            # 从最新一轮 run 的 token_usage 估算（API 实际输入 token），
+            # 不做完整 Agent 创建，避免 MCP HTTP + Agent 编译
+            from utils.context_size import estimate_context_size_from_usage
+            usage: Dict[str, Any] = {}
+            try:
+                runs = await deep_storage.list_agent_runs_for_session(session_id, userId)
+                if runs:
+                    usage = runs[-1].get("token_usage") or {}
+            except Exception as e:
+                logger.warning(f"[Session API] 读取 run token 数据失败: {e}")
+            result = estimate_context_size_from_usage(
+                usage,
+                model_name=resolved_model_name,
+                max_input_tokens=max_input_tokens,
             )
 
         return ApiResponse.success(data=ContextUsageData(

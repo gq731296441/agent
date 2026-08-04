@@ -37,14 +37,16 @@ def compute_selection_key(
     candidate_dirs: List[str],
     selected_skill_ids: Optional[List[str]],
 ) -> str:
-    """与 agent cache 中 selection 语义对齐的 mount 指纹。"""
+    """与 agent cache 中 selection 语义对齐的 mount 指纹。
+
+    以最终挂载集合（勾选 ∪ 内置技能）为基准，保证 selection_key 与
+    resolve_mounted_skill_ids 一致：内置技能加入挂载后 key 变化，触发
+    容器重建，否则容器永远不会因内置技能变化而重建。
+    """
     pool = resolve_selected_pool_dirs(candidate_dirs, selected_skill_ids)
-    if selected_skill_ids is None:
-        token = ["*"]
-    else:
-        token = sorted(str(s).strip() for s in selected_skill_ids if str(s).strip())
+    mounted = resolve_mounted_skill_ids(candidate_dirs, selected_skill_ids)
     return (
-        hashlib.md5(json.dumps(token).encode()).hexdigest()[:12] + ":"
+        hashlib.md5(json.dumps(sorted(mounted)).encode()).hexdigest()[:12] + ":"
         + hashlib.md5(json.dumps(sorted(pool)).encode()).hexdigest()[:12]
     )
 
@@ -53,13 +55,21 @@ def resolve_mounted_skill_ids(
     candidate_dirs: List[str],
     selected_skill_ids: Optional[List[str]],
 ) -> List[str]:
-    """解析应 bind mount 的 skill 目录名（物理 id）。"""
+    """解析应 bind mount 的 skill 目录名（物理 id）。
+
+    内置技能（BUILTIN_SKILL_IDS）无条件挂载：它们对所有用户默认可用
+    （always_on），脚本（如 docx 的 scripts/office/*.py）需要在沙箱容器内
+    execute 时可直接访问；否则容器内 /mnt/skills 只含用户勾选的技能，
+    内置技能的脚本在容器内不可达。
+    """
+    from deep_agent_server.skills.selector import BUILTIN_SKILL_IDS
+
     effective = effective_selected_skill_ids(candidate_dirs, selected_skill_ids)
     if effective is None:
         return sorted(
             Path(d).name for d in candidate_dirs if Path(d).is_dir()
         )
-    return effective
+    return sorted(set(effective) | set(BUILTIN_SKILL_IDS))
 
 
 async def resolve_mount_selected_skill_ids(

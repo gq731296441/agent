@@ -263,6 +263,47 @@ def sync_skills_to_sandbox_bind_paths(user_id: str, skill_ids: list) -> bool:
     return changed
 
 
+def sync_builtin_skill_to_sandbox_bind_path(user_id: str, skill_id: str) -> bool:
+    """远程 dockerd 时将内置技能从 skill-repo 同步到 SANDBOX_WORKSPACE_ROOT。
+
+    内置技能源在 Agent 进程本机（skill-repo 项目目录），不在 NFS export 上，
+    VM 的 dockerd 无法 stat 该路径 —— 直接 bind 会得到空文件夹。
+    因此远程沙箱下必须显式拷贝到虚机可见的 sandbox skills 目录。
+
+    Returns:
+        True 若执行了拷贝。
+    """
+    from deep_agent_server.skills.selector import BUILTIN_SKILL_IDS
+
+    sid = (skill_id or "").strip().strip("/\\")
+    if not sid or ".." in sid or "/" in sid or "\\" in sid:
+        return False
+    if sid not in BUILTIN_SKILL_IDS:
+        return False
+
+    src = Path(app_config.get_skill_repo_root()) / sid
+    if not _skill_tree_has_files(src):
+        return False
+
+    dst = get_sandbox_skills_dir(user_id) / sid
+    if _skill_tree_has_files(dst):
+        try:
+            if dst.stat().st_mtime >= src.stat().st_mtime:
+                return False
+        except OSError:
+            pass
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(src, dst)
+    logger.info(
+        f"[Workspace] synced builtin skill to sandbox bind path "
+        f"user={user_id} skill={sid} dst={dst}"
+    )
+    return True
+
+
 def resolve_skill_bind_host_path(
     user_id: str, skill_id: str, *, agent_id: Optional[str] = None
 ) -> Optional[Path]:
@@ -288,13 +329,22 @@ def resolve_skill_bind_host_path(
         from config.config import app_config as _cfg
         repo_root = _cfg.get_skill_repo_root()
         builtin_path = Path(repo_root) / sid
-        if _skill_tree_has_files(builtin_path):
-            logger.info(f"[Workspace] skill docker bind (builtin): {builtin_path}")
-            return builtin_path.resolve()
-        logger.warning(
-            f"[Workspace] builtin skill 源目录不可用, skill={sid} path={builtin_path}"
-        )
-        return None
+        if not _skill_tree_has_files(builtin_path):
+            logger.warning(
+                f"[Workspace] builtin skill 源目录不可用, skill={sid} path={builtin_path}"
+            )
+            return None
+        # 远程 dockerd：skill-repo 在 Agent 进程本机，VM 不可见，直接 bind 会得到
+        # 空文件夹。须同步到 SANDBOX_WORKSPACE_ROOT（虚机可见）后 bind sandbox 路径。
+        if (app_config.SANDBOX_DOCKER_HOST or "").strip() and _workspace_roots_differ():
+            sync_builtin_skill_to_sandbox_bind_path(user_id, sid)
+            sandbox_builtin = get_sandbox_skills_dir(user_id) / sid
+            logger.info(
+                f"[Workspace] skill docker bind (builtin sandbox): {sandbox_builtin}"
+            )
+            return sandbox_builtin
+        logger.info(f"[Workspace] skill docker bind (builtin): {builtin_path}")
+        return builtin_path.resolve()
 
     # 订阅智能体：优先使用 agent 专属 skills 目录
     if agent_id:

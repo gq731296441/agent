@@ -10,10 +10,132 @@
 """
 
 import logging
+import threading
+import time
+
+from pydantic import model_validator
 
 from deepagents.middleware import filesystem as _fs_mw
 
 logger = logging.getLogger(__name__)
+
+# ── 补丁 4：write_file/edit_file 参数严格校验（友好错误 + 失败熔断）─
+#
+# 背景：deepseek 等模型流式输出 write_file 的超大 content 参数时经常被截断，
+# 导致工具收到的 args 只有 file_path、缺 content，pydantic 报原始错误
+# ("content Field required [type=missing]")，模型不理解错误含义，
+# 重新生成仍缺 content，循环重试直到 run 超时。
+#
+# 方案：替换 WriteFileSchema/EditFileSchema 为带 model_validator 的严格子类：
+# 1. content 缺失 → 返回 LLM 可理解的友好错误，明确要求补全参数或改用分块策略
+# 2. 同一文件路径连续失败达阈值 → 熔断，禁止再次调用 write_file，
+#    迫使模型切换策略（edit_file/execute/向用户报告），避免死循环直到超时
+# 注：不做 content 长度硬限制（模型按需输出，长度由模型自行决定）
+
+_FAIL_LIMIT = 3                   # 连续失败阈值
+_FAIL_WINDOW_SECONDS = 300        # 计数窗口：窗口内连续失败才累计，窗口外自动重置
+
+_fail_lock = threading.Lock()
+_fail_records: dict = {}          # f"{tool}:{file_path}" -> {"count": int, "first_ts": float}
+
+
+def _register_failure(key: str) -> int:
+    """登记一次校验失败，返回窗口内累计失败次数。"""
+    now = time.time()
+    with _fail_lock:
+        rec = _fail_records.get(key)
+        if rec is None or now - rec["first_ts"] > _FAIL_WINDOW_SECONDS:
+            _fail_records[key] = {"count": 1, "first_ts": now}
+            return 1
+        rec["count"] += 1
+        return rec["count"]
+
+
+def _reset_failure(key: str) -> None:
+    """参数通过校验时重置失败计数。"""
+    with _fail_lock:
+        _fail_records.pop(key, None)
+
+
+def _fail_key(tool_name: str, file_path: str) -> str:
+    return f"{tool_name}:{file_path}"
+
+
+def _build_validation_error(key: str, tool_name: str, file_path: str, detail: str, guidance: str) -> ValueError:
+    count = _register_failure(key)
+    if count >= _FAIL_LIMIT:
+        return ValueError(
+            f"CRITICAL: {tool_name} 已连续失败 {count} 次（参数不完整）。"
+            f"禁止再次调用 {tool_name}！"
+            f"立即改用以下策略之一：\n"
+            f"1. 若目标文件已存在，用 edit_file 分块填充/替换内容；\n"
+            f"2. 用 execute 在沙箱中执行脚本生成文件（如 python 脚本）；\n"
+            f"3. 无法完成时，如实向用户报告失败原因，不要重试 {tool_name}。"
+        )
+    return ValueError(
+        f"Error: {tool_name} 参数无效 —— {detail}\n"
+        f"目标文件: {file_path or '(未提供)'}\n"
+        f"{guidance}"
+    )
+
+
+class _StrictWriteFileSchema(_fs_mw.WriteFileSchema):
+    """WriteFileSchema 严格版：content 缺失/超长时给出可执行的友好错误。"""
+
+    _zte_strict: bool = False  # 幂等标记：apply_patches 已替换过
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_args(cls, data):
+        if isinstance(data, dict):
+            file_path = str(data.get("file_path") or "")
+            key = _fail_key("write_file", file_path)
+            if "content" not in data or data.get("content") is None:
+                raise _build_validation_error(
+                    key, "write_file", file_path,
+                    detail="缺少必填的 content 字段（模型生成参数时 content 被截断或遗漏）。",
+                    guidance=(
+                        "请重新调用，必须同时提供 file_path 和 content。\n"
+                        "若文件内容较大（>4000 字符），不要在 write_file 中输出长文本：\n"
+                        "先 write_file 创建骨架（含 <!-- SLOT_1 --> 占位符），\n"
+                        "再用 edit_file 逐个替换占位符分块填充内容。"
+                    ),
+                )
+            _reset_failure(key)
+        return data
+
+
+class _StrictEditFileSchema(_fs_mw.EditFileSchema):
+    """EditFileSchema 严格版：new_string 缺失/超长时给出可执行的友好错误。"""
+
+    _zte_strict: bool = False  # 幂等标记：apply_patches 已替换过
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_args(cls, data):
+        if isinstance(data, dict):
+            file_path = str(data.get("file_path") or "")
+            key = _fail_key("edit_file", file_path)
+            if "old_string" not in data or data.get("old_string") is None:
+                raise _build_validation_error(
+                    key, "edit_file", file_path,
+                    detail="缺少必填的 old_string 字段（模型生成参数时被截断或遗漏）。",
+                    guidance=(
+                        "请重新调用，必须同时提供 file_path、old_string、new_string。\n"
+                        "old_string 必须与文件中现有内容精确匹配。"
+                    ),
+                )
+            if "new_string" not in data or data.get("new_string") is None:
+                raise _build_validation_error(
+                    key, "edit_file", file_path,
+                    detail="缺少必填的 new_string 字段（模型生成参数时被截断或遗漏）。",
+                    guidance=(
+                        "请重新调用，必须同时提供 file_path、old_string、new_string。\n"
+                        "new_string 保持 ≤1000 字符，分多次 edit_file 填充大段内容。"
+                    ),
+                )
+            _reset_failure(key)
+        return data
 
 # ── 补丁 1：强化 WriteFileSchema.content 的必填提示 ──────────────────────────
 # 原描述 "The text content to write to the file. This parameter is required."
@@ -125,17 +247,27 @@ def apply_patches() -> bool:
     """
     changed = False
 
-    _patch_schema_fields()
+    # _patch_schema_fields()
 
-    if _fs_mw.WRITE_FILE_TOOL_DESCRIPTION != ENHANCED_WRITE_FILE_DESCRIPTION:
-        _fs_mw.WRITE_FILE_TOOL_DESCRIPTION = ENHANCED_WRITE_FILE_DESCRIPTION
-        changed = True
-        logger.info("[ToolPatches] write_file 描述已替换")
+    # if _fs_mw.WRITE_FILE_TOOL_DESCRIPTION != ENHANCED_WRITE_FILE_DESCRIPTION:
+    #     _fs_mw.WRITE_FILE_TOOL_DESCRIPTION = ENHANCED_WRITE_FILE_DESCRIPTION
+    #     changed = True
+    #     logger.info("[ToolPatches] write_file 描述已替换")
 
-    if _fs_mw.EDIT_FILE_TOOL_DESCRIPTION != ENHANCED_EDIT_FILE_DESCRIPTION:
-        _fs_mw.EDIT_FILE_TOOL_DESCRIPTION = ENHANCED_EDIT_FILE_DESCRIPTION
+    # if _fs_mw.EDIT_FILE_TOOL_DESCRIPTION != ENHANCED_EDIT_FILE_DESCRIPTION:
+    #     _fs_mw.EDIT_FILE_TOOL_DESCRIPTION = ENHANCED_EDIT_FILE_DESCRIPTION
+    #     changed = True
+    #     logger.info("[ToolPatches] edit_file 描述已替换")
+
+    # 替换工具 args_schema 为严格校验版（需在 _patch_schema_fields 之后，
+    # 使严格子类继承强化后的字段描述）
+    if getattr(_fs_mw.WriteFileSchema, "_zte_strict", False) is not True:
+        _fs_mw.WriteFileSchema = _StrictWriteFileSchema
+        _fs_mw.EditFileSchema = _StrictEditFileSchema
+        _StrictWriteFileSchema._zte_strict = True
+        _StrictEditFileSchema._zte_strict = True
         changed = True
-        logger.info("[ToolPatches] edit_file 描述已替换")
+        logger.info("[ToolPatches] WriteFileSchema/EditFileSchema 已替换为严格校验版（友好错误+失败熔断）")
 
     return changed
 

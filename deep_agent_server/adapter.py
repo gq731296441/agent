@@ -219,12 +219,20 @@ def _extract_tool_call_id_from_ns(namespace: tuple) -> Optional[str]:
     LangGraph v2 子图流中 namespace="tools:<tool_call_id>",
     其中 tool_call_id 就是主 agent 调用 task() 时的 call_* ID。
     """
+    ids = _extract_tool_call_ids_from_ns(namespace)
+    return ids[0] if ids else None
+
+
+def _extract_tool_call_ids_from_ns(namespace: tuple) -> list:
+    """从 v2 namespace 提取所有 tools: 段的 tool_call_id。
+
+    嵌套子图（subagent 内部工具调用）的 namespace 可能包含多个 tools: 段，
+    如 ("tools:<task_id>", "tools:<inner_tool_call_id>", ...)。
+    返回全部 ID，供上层按序匹配 _active_subagents 映射。
+    """
     if not namespace:
-        return None
-    for seg in namespace:
-        if seg.startswith("tools:"):
-            return seg.split(":", 1)[1]
-    return None
+        return []
+    return [seg.split(":", 1)[1] for seg in namespace if seg.startswith("tools:")]
 
 
 class DeepEventAdapter:
@@ -424,28 +432,53 @@ class DeepEventAdapter:
         """返回当前子 agent 的 UUID。
 
         v2 namespace "tools:<tool_call_id>" → _active_subagents[tool_call_id] → UUID。
-        100% 精准，无需 FIFO 猜测。
+        嵌套子图 namespace 可能含多个 tools: 段（subagent 内部工具调用），
+        依次查找能命中 _active_subagents 映射的 task tool_call_id。
+        未命中时返回 None，由调用方回退到 _subagent_stack —— 绝不现场生成
+        幽灵 UUID。否则 subagent 内部工具调用（write_file 等）的 start/result
+        事件会归属到不同的 subagent_run_id，前端无法将同一子智能体的操作
+        渲染到同一分组。
         """
         ns = getattr(self, "_active_namespace", ()) or ()
         if not ns:
             return None
-        tool_call_id = _extract_tool_call_id_from_ns(ns)
-        if not tool_call_id:
-            return None
-        # 获取或创建 UUID（_emit_single_tool_start 已建立映射）
-        sid = self._active_subagents.get(tool_call_id)
-        if not sid:
-            sid = str(uuid.uuid4())
-            self._active_subagents[tool_call_id] = sid
-        # 延迟发射 SUBAGENT_START（首次见到此 tool_call_id 的 namespace 事件时）
-        self._emit_subagent_start_if_needed(tool_call_id)
-        return sid
+        for tool_call_id in _extract_tool_call_ids_from_ns(ns):
+            sid = self._active_subagents.get(tool_call_id)
+            if sid:
+                return sid
+        return None
+
+    def _current_subagent_id_or_stack(self) -> Optional[str]:
+        """当前子 agent UUID；namespace 无法映射时回退到子 agent 栈顶。
+
+        用于消息归属判断（chat / reasoning / 工具参数流等），保证 subagent
+        上下文中的消息始终归属到真实 subagent_run_id——即使 namespace 只含
+        subagent 内部工具调用的 tool_call_id（无法命中 _active_subagents），
+        也不会丢失归属或产生幽灵 UUID。
+        """
+        sid = self._current_subagent_id()
+        if sid:
+            return sid
+        if self._subagent_stack:
+            return self._subagent_stack[-1].get("subagent_run_id")
+        return None
 
     def _emit_subagent_start_if_needed(self, tool_call_id: str) -> None:
-        """首次见到 tool_call_id 的 namespace 事件时，发射 SUBAGENT_START。"""
+        """首次见到 tool_call_id 的 namespace 事件时，发射 SUBAGENT_START。
+
+        仅处理 task 子 agent 的 namespace 事件；subagent 内部工具调用
+        （write_file/edit_file 等）的 namespace 不在此建立归属，直接跳过，
+        避免为内部工具调用现场生成幽灵 subagent_run_id 并误发 SUBAGENT_START。
+        """
         if not hasattr(self, "_started_subagent_ids"):
             self._started_subagent_ids: set[str] = set()
         if tool_call_id in self._started_subagent_ids:
+            return
+        # 非 task 门：tool_call_id 既无 task 映射、又无待处理 task 输入、
+        # FIFO 队列也无候选时，说明是 subagent 内部工具调用的 namespace
+        if (tool_call_id not in self._active_subagents
+                and tool_call_id not in self._pending_subagent_inputs
+                and not self._unmatched_subagent_uuids):
             return
         self._started_subagent_ids.add(tool_call_id)
 
@@ -527,7 +560,7 @@ class DeepEventAdapter:
             return
         self._current_llm_text += text
         self._chat_streamed = True
-        sid = self._current_subagent_id()
+        sid = self._current_subagent_id_or_stack()
         msg = self._enrich(
             AgentMessage(
                 type=MessageType.SUBAGENT_EVENT if sid else MessageType.CHAT,
@@ -556,7 +589,7 @@ class DeepEventAdapter:
         子 agent 上下文中的 content 会附加 subevent_type 字段，
         便于前端从历史记录加载时区分思考/回复。
         """
-        sid = self._current_subagent_id()
+        sid = self._current_subagent_id_or_stack()
         is_db_only = raw_type in (MessageType.REASONING_FINAL,)
         if is_db_only:
             # REASONING_FINAL：子 agent 上下文中也转为 SUBAGENT_EVENT，
@@ -640,7 +673,7 @@ class DeepEventAdapter:
         text = (self._current_llm_text or "").strip()
         if not text:
             return
-        sid = self._current_subagent_id()
+        sid = self._current_subagent_id_or_stack()
         if not self._chat_streamed:
             msg = self._enrich(
                 AgentMessage(
@@ -999,7 +1032,8 @@ class DeepEventAdapter:
             try:
                 async for msg in self.finalize_model_segment():
                     yield msg
-                async for msg in self._emit_pending_tool_starts():
+                # 离开 model 节点：流式 chunks 已到齐，强制合并（未闭合的包 _raw）
+                async for msg in self._emit_pending_tool_starts(force_merge=True):
                     yield msg
             finally:
                 self._active_namespace = saved_ns
@@ -1016,8 +1050,9 @@ class DeepEventAdapter:
                 saved_ns = self._active_namespace
                 self._active_namespace = self._last_model_namespace
                 try:
-                    # 发射旧 namespace 的待处理 tool_calls（归属到正确的子 agent）
-                    async for msg in self._emit_pending_tool_starts():
+                    # 发射旧 namespace 的待处理 tool_calls（归属到正确的子 agent）；
+                    # 旧 namespace 的流已结束，强制合并
+                    async for msg in self._emit_pending_tool_starts(force_merge=True):
                         yield msg
                 finally:
                     self._active_namespace = saved_ns
@@ -1095,7 +1130,7 @@ class DeepEventAdapter:
                 self._tool_call_accumulator.accumulate_chunks(message_chunk.tool_call_chunks)
                 # 流式输出工具参数增量（write_file/edit_file 的大文本字段）
                 # 子 agent 上下文跳过 — 只推送 start + result，不推送 tool_args_stream
-                if not self._current_subagent_id():
+                if not self._current_subagent_id_or_stack():
                     async for msg in self._emit_tool_args_stream():
                         yield msg
 
@@ -1257,7 +1292,7 @@ class DeepEventAdapter:
 
         在子 agent 上下文中自动包装为 SUBAGENT_EVENT。
         """
-        sid = self._current_subagent_id()
+        sid = self._current_subagent_id_or_stack()
         for index, state in self._tool_call_accumulator.peek_all().items():
             name = state.get("name")
             if not name or name not in _STREAMABLE_TOOLS:
@@ -1333,15 +1368,24 @@ class DeepEventAdapter:
                     self._wrap_subagent_event(msg, "tool_args_stream")
                 yield msg
 
-    def _merge_accumulated_tool_calls(self) -> None:
+    def _merge_accumulated_tool_calls(self, force: bool = False) -> None:
         """将流式 tool_call_chunks 合并进 pending 列表。
 
         直接从 accumulator 读取原始累积数据，不经过 parse_and_clear 的
         JSON 解析，让模型流式参数自然拼接。参数解析由下游 normalize_tool_call
         统一处理（失败时自动包 _raw）。
+
+        force=False（tools 事件先于 messages 完整 chunks 到达时）：
+        JSON 未闭合（解析失败）的条目说明流式 chunks 仍在途中，跳过合并并
+        保留 accumulator，等待后续 chunk 补全后由离开 model 节点时的
+        force=True 合并统一处理。避免把半截参数提前合并/清空，导致前端展示
+        的 args 与 langchain 实际执行的完整参数不一致（表现为 _raw 残缺 JSON）。
+        force=True（离开 model 节点 / namespace 切换，流已结束）：
+        无论 JSON 是否闭合都合并，未闭合的包 _raw 记录事实。
         """
         raw_accumulated = self._tool_call_accumulator._accumulated
-        for idx, tc in raw_accumulated.items():
+        merged_keys: list = []
+        for idx, tc in list(raw_accumulated.items()):
             tool_name = tc.get("name")
             tool_id = tc.get("id")
             args_raw = tc.get("args") or ""
@@ -1353,6 +1397,13 @@ class DeepEventAdapter:
             valid_names = self._tool_call_accumulator._valid_tool_names
             if valid_names and tool_name not in valid_names:
                 continue
+
+            # 非强制模式下跳过未闭合的 JSON（流式 chunks 未到齐），不清空条目
+            if not force and args_raw.strip():
+                try:
+                    json.loads(args_raw)
+                except json.JSONDecodeError:
+                    continue
 
             entry = {
                 "id": tool_id,
@@ -1378,10 +1429,14 @@ class DeepEventAdapter:
             }
             if tc_id not in existing_ids:
                 self._pending_tool_calls.append(entry)
+            merged_keys.append(idx)
 
-        self._tool_call_accumulator._accumulated.clear()
-        self._streamed_tool_args.clear()
-        self._tool_progress_emitted.clear()
+        if merged_keys:
+            # 只清理已合并的条目；未闭合条目保留等待补全
+            for idx in merged_keys:
+                self._tool_call_accumulator._accumulated.pop(idx, None)
+            self._streamed_tool_args.clear()
+            self._tool_progress_emitted.clear()
 
     async def _ensure_tool_start(
         self,
@@ -1408,8 +1463,8 @@ class DeepEventAdapter:
         async for msg in self._emit_single_tool_start(tc, tool_name, resolved_input):
             yield msg
 
-    async def _emit_pending_tool_starts(self) -> AsyncGenerator[dict, None]:
-        self._merge_accumulated_tool_calls()
+    async def _emit_pending_tool_starts(self, force_merge: bool = False) -> AsyncGenerator[dict, None]:
+        self._merge_accumulated_tool_calls(force=force_merge)
         for tc in self._pending_tool_calls:
             tool_name, tool_input = normalize_tool_call(tc)
             async for msg in self._emit_single_tool_start(tc, tool_name, tool_input):
@@ -1926,45 +1981,70 @@ class DeepEventAdapter:
         asyncio.ensure_future(self._create_html_share_async(virtual_path))
 
     async def _create_html_share_async(self, virtual_path: str) -> None:
-        """读磁盘文件，若为完整 HTML（含闭合标签）则创建分享 token 并缓存 URL。"""
+        """读磁盘文件，若为完整 HTML（含闭合标签）则创建分享 token 并缓存 URL。
+
+        同一 (user_id, virtual_path) 的创建通过 wrapper 级异步锁串行化，
+        避免同路径删除再生成（连续 write_file）时并发任务各自创建 token，
+        导致同一文件产生多个分享链接（查重-插入竞态）。
+        """
         try:
+            import asyncio
+
             from config import get_logger as _get_logger
-            from config.config import app_config
-            from deep_agent_server.workspace_service import resolve_virtual_path
-            from db.html_share_store import create_share_token as do_create_share_token
 
-            abs_path, _rel_path, _, file_kind = resolve_virtual_path(
-                self.user_id, virtual_path
-            )
-            if file_kind != "workspace" or not abs_path.is_file():
-                return
+            wrapper = self._agent_wrapper
+            lock_key = f"{self.user_id}:{virtual_path}"
+            if wrapper is not None:
+                lock = wrapper._html_share_locks.setdefault(lock_key, asyncio.Lock())
+                async with lock:
+                    # 锁内先查 wrapper 缓存：同路径已创建过链接则直接复用，
+                    # 跳过 DB 往返（token 指向路径，文件内容更新不影响有效性）
+                    existing_url = wrapper.html_share_links.get(virtual_path)
+                    if existing_url:
+                        self._html_share_links[virtual_path] = existing_url
+                        return
+                    share_url = await self._do_create_html_share(virtual_path)
+            else:
+                share_url = await self._do_create_html_share(virtual_path)
 
-            # 仅完整 HTML（含闭合标签）才创建分享，避免骨架阶段误触发
-            content = abs_path.read_text(encoding="utf-8", errors="replace")
-            if "</body>" not in content and "</html>" not in content:
-                return
-
-            token = await do_create_share_token(
-                user_id=self.user_id,
-                session_id=self.session_id,
-                file_path=virtual_path,
-                expires_in_hours=None,
-            )
-            public_base = (app_config.AGENTA_PUBLIC_BASE_URL or "").rstrip("/")
-            share_url = f"{public_base}/workspace/html-share/{token}"
-            self._html_share_links[virtual_path] = share_url
-            # 持久到 agent_wrapper，供跨 run 注入
-            if self._agent_wrapper is not None:
-                self._agent_wrapper.html_share_links[virtual_path] = share_url
-
-            _get_logger(__name__).info(
-                f"[HtmlShare] token created path={virtual_path} token={token}"
-            )
+            if share_url:
+                self._html_share_links[virtual_path] = share_url
+                if wrapper is not None:
+                    wrapper.html_share_links[virtual_path] = share_url
+                _get_logger(__name__).info(
+                    f"[HtmlShare] token ready path={virtual_path} url={share_url}"
+                )
         except Exception as e:
             from config import get_logger as _get_logger
             _get_logger(__name__).warning(
                 f"[HtmlShare] create share failed path={virtual_path}: {e}"
             )
+
+    async def _do_create_html_share(self, virtual_path: str) -> str:
+        """创建分享 token 并返回 URL；文件不完整或不存在时返回空串。"""
+        from config.config import app_config
+        from deep_agent_server.workspace_service import resolve_virtual_path
+        from db.html_share_store import create_share_token as do_create_share_token
+
+        abs_path, _rel_path, _, file_kind = resolve_virtual_path(
+            self.user_id, virtual_path
+        )
+        if file_kind != "workspace" or not abs_path.is_file():
+            return ""
+
+        # 仅完整 HTML（含闭合标签）才创建分享，避免骨架阶段误触发
+        content = abs_path.read_text(encoding="utf-8", errors="replace")
+        if "</body>" not in content and "</html>" not in content:
+            return ""
+
+        token = await do_create_share_token(
+            user_id=self.user_id,
+            session_id=self.session_id,
+            file_path=virtual_path,
+            expires_in_hours=None,
+        )
+        public_base = (app_config.AGENTA_PUBLIC_BASE_URL or "").rstrip("/")
+        return f"{public_base}/workspace/html-share/{token}"
 
     def status_message(self, text: str) -> dict:
         """生成 Deep 运行时状态通知（DEEP_STATUS，不存库）。"""

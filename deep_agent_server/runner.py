@@ -54,21 +54,93 @@ def build_run_metrics_content(
     token_usage: dict,
     started_at: datetime,
     finished_at: datetime,
+    session_summary: Optional[dict] = None,
 ) -> dict:
-    """构造 run_metrics 消息 content（便于单测）。"""
+    """构造 run_metrics 消息 content（便于单测）。
+
+    session_summary 为整轮会话的 token 汇总（含上下文占比），
+    与 /sessions/run-metrics 接口的 summary 同源同构。
+    """
     duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
-    return {
+    usage = {
+        "prompt_tokens": int(token_usage.get("prompt_tokens") or 0),
+        "completion_tokens": int(token_usage.get("completion_tokens") or 0),
+        "total_tokens": int(token_usage.get("total_tokens") or 0),
+    }
+    # 维度化 token 统计：按消息类型分解的 prompt 构成 + 每次调用明细
+    if token_usage.get("prompt_breakdown"):
+        usage["prompt_breakdown"] = token_usage["prompt_breakdown"]
+    if token_usage.get("call_details"):
+        usage["call_count"] = token_usage.get("call_count", len(token_usage["call_details"]))
+        usage["call_details"] = token_usage["call_details"]
+    content = {
         "run_id": run_id,
         "conversation_id": conversation_id,
         "status": status,
-        "token_usage": {
-            "prompt_tokens": int(token_usage.get("prompt_tokens") or 0),
-            "completion_tokens": int(token_usage.get("completion_tokens") or 0),
-            "total_tokens": int(token_usage.get("total_tokens") or 0),
-        },
+        "token_usage": usage,
         "duration_ms": duration_ms,
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat(),
+    }
+    if session_summary:
+        content["session_summary"] = session_summary
+    return content
+
+
+def aggregate_session_token_summary(runs: list) -> dict:
+    """聚合会话内所有 run 的 token_usage，得到会话级上下文使用情况与占比。
+
+    对应 /sessions/run-metrics 接口 summary 字段（同源同构），维度与
+    _finalize_tokens 日志一致：calls / prompt / completion / total /
+    system / user / ai / tool / estimated_total / peak_*，
+    breakdown_ratio 为各分类占估算总 token 的比例（0~1）。
+    """
+    run_count = call_count = 0
+    prompt = completion = total = 0
+    sys_t = user_t = ai_t = tool_t = est_total = api_total = 0
+    peak_call = peak_prompt = peak_msgs = 0
+    for r in runs or []:
+        usage = r.get("token_usage") or {}
+        prompt += int(usage.get("prompt_tokens") or 0)
+        completion += int(usage.get("completion_tokens") or 0)
+        total += int(usage.get("total_tokens") or 0)
+        call_count += int(usage.get("call_count") or 0)
+        bd = usage.get("prompt_breakdown") or {}
+        sys_t += int(bd.get("system_tokens") or 0)
+        user_t += int(bd.get("user_tokens") or 0)
+        ai_t += int(bd.get("ai_tokens") or 0)
+        tool_t += int(bd.get("tool_tokens") or 0)
+        est_total += int(bd.get("estimated_total") or 0)
+        api_total += int(bd.get("api_total") or 0)
+        for d in usage.get("call_details") or []:
+            p = int(d.get("prompt_tokens") or 0)
+            if p > peak_prompt:
+                peak_prompt = p
+                peak_call = int(d.get("call") or 0)
+                peak_msgs = int(d.get("messages_count") or 0)
+        run_count += 1
+    denom = est_total or 1
+    return {
+        "run_count": run_count,
+        "call_count": call_count,
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "system_tokens": sys_t,
+        "user_tokens": user_t,
+        "ai_tokens": ai_t,
+        "tool_tokens": tool_t,
+        "estimated_total": est_total,
+        "api_total": api_total,
+        "breakdown_ratio": {
+            "system_tokens": round(sys_t / denom, 4),
+            "user_tokens": round(user_t / denom, 4),
+            "ai_tokens": round(ai_t / denom, 4),
+            "tool_tokens": round(tool_t / denom, 4),
+        },
+        "peak_call": peak_call,
+        "peak_prompt_tokens": peak_prompt,
+        "peak_messages_count": peak_msgs,
     }
 
 
@@ -292,12 +364,13 @@ async def run_deep_agent(
             for vp, url in new_links.items():
                 filename = vp.split("/")[-1]
                 lines.append(
-                    f"- **{filename}**: `{url}`"
+                    f"- **{filename}**（路径 `{vp}`）: `{url}`"
                     f"（可直接浏览器打开，支持 iframe 嵌入）"
                 )
             notice = (
-                "📌 **HTML 文件分享链接**\n\n"
-                "以下你生成的 HTML 文件已自动创建免登录分享链接：\n"
+                "📌 **HTML 文件分享链接（会话历史中生成）**\n\n"
+                "以下链接为本会话此前生成的 HTML 文件自动创建的免登录分享链接。\n"
+                "如与当前问题相关，可在回复中引用这些链接；如无关请忽略：\n"
                 + "\n".join(lines)
                 + "\n\n你可以将这些链接提供给用户，或在回复中引用这些链接。"
             )
@@ -313,6 +386,14 @@ async def run_deep_agent(
     retry_count = 0
     max_retries = 2
     run_config, token_acc = attach_token_callback(config)
+    # ── Langfuse 观测（可选）：凭据同步 + 挂载 CallbackHandler ──
+    from deep_agent_server.langfuse_integration import (
+        attach_langfuse_handler,
+        ensure_langfuse_env,
+    )
+
+    ensure_langfuse_env()
+    run_config = attach_langfuse_handler(run_config)
 
     # ── 检测同 session 内 skill/MCP 变更，清过期状态 + 通知 agent ──
     config_changes = getattr(agent_wrapper, "config_changes", None) or {}
@@ -358,6 +439,46 @@ async def run_deep_agent(
             total_tokens=usage.get("total_tokens"),
             llm_model=model_name,
         )
+        # 会话级 token 汇总（整轮会话上下文占比），与 /sessions/run-metrics summary 同源
+        session_summary = None
+        try:
+            session_runs = await deep_storage.list_agent_runs_for_session(session_id, user_id)
+            session_summary = aggregate_session_token_summary(session_runs)
+            # 补充当前上下文占比：本轮 API 实际输入 token（最近一次 LLM 调用
+            # 送入的完整上下文）与模型窗口上限的比值
+            from utils.context_size import _resolve_max_input_tokens, get_context_percentage
+            max_input = _resolve_max_input_tokens(model_name or "")
+            session_summary["max_input_tokens"] = max_input
+            session_summary["percentage"] = get_context_percentage(
+                int(usage.get("prompt_tokens") or 0), max_input
+            )
+        except Exception:
+            logger.warning(
+                f"[DeepRunner] 聚合会话 token 汇总失败 run={run_id}", exc_info=True
+            )
+        # 维度化 token 日志：按消息类型输出 prompt 构成，便于定位上下文消耗来源
+        breakdown = usage.get("prompt_breakdown") or {}
+        if breakdown:
+            top_details = usage.get("call_details") or []
+            max_call = ""
+            if top_details:
+                peak = max(top_details, key=lambda d: d.get("prompt_tokens") or 0)
+                max_call = (
+                    f" peak_call={peak.get('call')} "
+                    f"peak_prompt={peak.get('prompt_tokens')} "
+                    f"peak_messages={peak.get('messages_count')}"
+                )
+            logger.info(
+                f"[TokenUsage] run={run_id} status={status} "
+                f"calls={usage.get('call_count')} "
+                f"prompt={usage.get('prompt_tokens')} completion={usage.get('completion_tokens')} "
+                f"total={usage.get('total_tokens')} "
+                f"system={breakdown.get('system_tokens')} "
+                f"user={breakdown.get('user_tokens')} "
+                f"ai={breakdown.get('ai_tokens')} tool={breakdown.get('tool_tokens')} "
+                f"estimated_total={breakdown.get('estimated_total')}"
+                f"{max_call}"
+            )
         if status != "interrupted":
             await finish_turn(store, session_id)
         return build_run_metrics_content(
@@ -367,6 +488,7 @@ async def run_deep_agent(
             token_usage=usage,
             started_at=run_started_at,
             finished_at=finished_at,
+            session_summary=session_summary,
         )
 
     def _yield_run_metrics(metrics: dict):
@@ -657,6 +779,9 @@ async def _stream(
 
             # _emit_pending_tool_starts 在 finally 之后执行，使用 saved_ns
             # 而非 flush_ns。工具归属到当前上下文，而非上一个 model 节点。
+            # 非强制合并：tools 事件可能先于 messages 完整 chunks 到达，
+            # 未闭合的 args 跳过合并、保留 accumulator，等离开 model 节点时
+            # force 合并补全（避免展示与 langchain 实际执行参数不一致）。
             async for msg in adapter._emit_pending_tool_starts():
                 async for out in _yield_adapter_messages(
                     msg, adapter, compiled, config, agent_wrapper, store

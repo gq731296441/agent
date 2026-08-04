@@ -599,6 +599,11 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
     resolved_agent_kind = "default"
     if client_session_id:
         session_id, is_new_session = await get_or_create_session(client_session_id)
+        # 预创建订阅会话后对话：session_id 与 agent_id 同时传入时
+        # 以 agent_id 为准标记为订阅会话，避免 setup_new_session 把
+        # agent_kind 覆盖回 "default"
+        if agent_id:
+            resolved_agent_kind = "subscription"
     elif agent_id:
         from db import deep_storage as _ds
 
