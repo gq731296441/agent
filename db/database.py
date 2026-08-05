@@ -684,7 +684,7 @@ class DatabaseManager:
 
             CREATE TABLE IF NOT EXISTS user_resource_quotas (
                 user_id TEXT PRIMARY KEY,
-                workspace_bytes_limit BIGINT DEFAULT 104857600,
+                workspace_bytes_limit BIGINT DEFAULT 524288000,
                 workspace_bytes_used BIGINT DEFAULT 0,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT now()
             );
@@ -844,7 +844,7 @@ class DatabaseManager:
             await conn.execute(
                 """
                 ALTER TABLE user_resource_quotas
-                ALTER COLUMN workspace_bytes_limit SET DEFAULT 104857600
+                ALTER COLUMN workspace_bytes_limit SET DEFAULT 524288000
                 """
             )
         except Exception:

@@ -148,7 +148,7 @@ class BaseConfig(BaseSettings):
         description="为 true 时 subagent 结束写 trace artifact",
     )
     CONTENT_SUMMARY_MAX_CHARS: int = Field(default=1000, description="消息/工具结果摘要最大字符数")
-    WORKSPACE_QUOTA_BYTES: int = Field(default=104857600, description="每用户工作区配额（100MB，含 skills）")
+    WORKSPACE_QUOTA_BYTES: int = Field(default=524288000, description="每用户工作区配额（500MB，含 skills）")
     SANDBOX_ENABLED: bool = Field(default=True, description="是否启用 Docker 沙箱 execute")
     SANDBOX_MEMORY_LIMIT: str = Field(default="512m", description="Docker 沙箱内存限制")
     SANDBOX_PIDS_LIMIT: int = Field(default=512, description="Docker 沙箱 pids 限制（0=不限制），默认512防止 fork 炸弹")
