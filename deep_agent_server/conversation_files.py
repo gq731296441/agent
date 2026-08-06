@@ -5,7 +5,7 @@ from __future__ import annotations
 import mimetypes
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import get_logger
 
@@ -122,10 +122,12 @@ def resolve_write_tool_name(tool_name: str, args: Optional[dict]) -> Optional[st
 
 
 def resolve_execute_output_tool(args: Optional[dict], _result_text: str = "") -> Optional[str]:
-    """从 execute 命令中解析显式输出的文档类文件，返回 'execute' 或 None。
+    """判定 execute 是否进入文档文件登记流程，返回 'execute' 或 None。
 
-    只收集命令明确指定的输出文件（重定向 / -o 参数），
-    排除批量操作（解压/下载/cp/git 等）。
+    排除批量操作（解压/下载/cp/git 等）后全面放行——终端生成文档的形态太多
+    （脚本参数、--convert-to、脚本内部写文件且命令/结果都不含扩展名等），
+    无法靠命令/结果文本可靠识别；具体输出文件由后续路径解析
+    （重定向/-o → 结果文本路径 → 磁盘最近写入兜底）精确判定。
     """
     command = (args or {}).get("command") or ""
     if not command:
@@ -143,22 +145,7 @@ def resolve_execute_output_tool(args: Optional[dict], _result_text: str = "") ->
         if pattern in command.lower():
             return None
 
-    # 提取重定向输出: > file.html 或 >> file.html
-    redirect = re.search(r'>>?\s*([^\s;|&"\']+\.\w+)', command)
-    if redirect:
-        candidate = redirect.group(1).strip().strip('"\'')
-    else:
-        # 提取 -o/--output: -o output.xlsx
-        output = re.search(r'(?:-o|--output)\s+([^\s;|&"\']+\.\w+)', command)
-        if output:
-            candidate = output.group(1).strip().strip('"\'')
-        else:
-            return None
-
-    ext = candidate.rsplit(".", 1)[-1].lower() if "." in candidate else ""
-    if ext in _CARD_EXTS:
-        return "execute"
-    return None
+    return "execute"
 
 
 def _extract_execute_output_path(args: dict) -> Optional[str]:
@@ -242,6 +229,9 @@ def resolve_agent_file_path(
             agent_path = wp
     if not agent_path and is_write:
         agent_path = extract_path_from_result(result_text) or ""
+    if not agent_path and is_execute:
+        # execute：命令未显式输出时，从结果文本提取 /workspace/... 路径
+        agent_path = extract_path_from_result(result_text) or ""
     if not agent_path or not is_card_eligible_agent_path(agent_path):
         return None
     return agent_path
@@ -250,6 +240,61 @@ def resolve_agent_file_path(
 def _mime_for_name(name: str) -> str:
     guessed, _ = mimetypes.guess_type(name)
     return guessed or "application/octet-stream"
+
+
+def find_recent_document_files(
+    user_id: str,
+    session_id: str,
+    *,
+    since_ts: Optional[float] = None,
+) -> List[str]:
+    """execute 兜底：扫描会话工作区时间窗口内写入的全部文档文件。
+
+    返回 agent_path（/workspace/...）列表（mtime 降序）或空列表。
+    排除内部路径（点开头目录）与图片。
+
+    窗口下界：
+    - since_ts（本轮 run 开始时刻，推荐）：下界 = since_ts - CLOCK_SKEW_TOLERANCE——
+      上一轮生成的文件 mtime 必然早于本轮 run 开始，天然排除跨轮次误收；
+      时钟容忍余量覆盖远程沙箱（NFS）跨主机时钟偏差（NTP 同步后偏差微秒级）
+    - 未传 since_ts：下界 = now - CLOCK_SKEW_TOLERANCE（兼容旧调用）
+
+    返回全部而非单个：同一 execute 可能同时生成多个文档
+    （如一个脚本同时写 xlsx + docx），只取最新会漏登记。
+    """
+    import os
+    import time
+
+    from deep_agent_server.workspace import get_workspace_dir
+    from deep_agent_server.workspace_service import CLOCK_SKEW_TOLERANCE
+
+    root = get_workspace_dir(user_id, session_id)
+    if not root.is_dir():
+        return []
+    if since_ts is not None:
+        cutoff = since_ts - CLOCK_SKEW_TOLERANCE
+    else:
+        cutoff = time.time() - CLOCK_SKEW_TOLERANCE
+    found: List[Tuple[float, str]] = []
+    # os.walk 单次遍历 + 后缀白名单过滤（execute 高频调用，避免 rglob("*") 全量收集）
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for name in filenames:
+            if "." not in name:
+                continue
+            if name.rsplit(".", 1)[-1].lower() not in _CARD_EXTS:
+                continue
+            path = Path(dirpath) / name
+            try:
+                mtime = path.stat().st_mtime
+                if mtime < cutoff:
+                    continue
+            except OSError:
+                continue
+            rel = path.relative_to(root).as_posix()
+            found.append((mtime, f"/workspace/{rel}"))
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [agent_path for _, agent_path in found]
 
 
 def file_exists(user_id: str, virtual_path: str) -> bool:

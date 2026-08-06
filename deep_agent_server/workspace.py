@@ -22,6 +22,9 @@ logger = get_logger(__name__)
 _USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_@.+~-]+$")
 _AGENT_ID_PATTERN = re.compile(r"^[a-fA-F0-9-]+$")
 
+# HTML 分享快照目录名（分享功能保留字，用户工作区内的该目录不占配额、不在文件列表展示）
+HTML_SHARE_SNAPSHOT_DIR = ".html-share-assets"
+
 
 def validate_user_id(user_id: str) -> str:
     """校验 user_id 格式，防止路径穿越（user_id 作为目录名）。"""
@@ -324,7 +327,49 @@ def resolve_skill_bind_host_path(
     if not sid or ".." in sid or "/" in sid or "\\" in sid:
         return None
 
-    # 内置技能：直接从 skill-repo 绑定（只读，不经过用户目录）
+    # 订阅智能体：文件工具（/skills/ 路由到 agent_skills_root）与容器 bind
+    # 统一走 .agents/{agent_id}/skills/（同源目录），内置技能也不例外——
+    # 内置技能在订阅会话中已由 _ensure_builtin_skill_in_user_dir_for_agent
+    # 安装到 .agents 侧，此处必须跳过 skill-repo 分支，否则 bind 与文件工具
+    # 会落到不同目录（skill-repo / 用户目录），造成沙箱与 /skills/ 不一致。
+    if agent_id:
+        agent_skill = get_agent_skills_dir(agent_id) / sid
+        sandbox_agent_skill = get_sandbox_agent_skills_dir(agent_id) / sid
+
+        # 远程 dockerd：直接信任 NFS 对齐，返回 SANDBOX 路径
+        # （Agent 进程 stat 不到 VM 上的 SANDBOX 路径，但 NFS 保证数据一致）
+        if (app_config.SANDBOX_DOCKER_HOST or "").strip() and _workspace_roots_differ():
+            _sync_agent_skill_to_sandbox(agent_id, sid)
+            # 同源拓扑（虚机 agent-test ↔ Agent 机 agent 同一 NFS 数据）下
+            # 以 Agent 侧 .agents 是否有内容为据：缺失时跳过 bind，
+            # 与文件工具（同样读不到）保持一致
+            if not _skill_tree_has_files(agent_skill):
+                logger.warning(
+                    f"[Workspace] agent skill 目录不存在或为空，跳过 bind: "
+                    f"agent={agent_id} skill={sid} path={agent_skill}"
+                )
+                return None
+            logger.info(
+                f"[Workspace] skill docker bind (agent sandbox remote): {sandbox_agent_skill}"
+            )
+            return sandbox_agent_skill
+
+        if _skill_tree_has_files(agent_skill):
+            logger.info(f"[Workspace] skill docker bind (agent): {agent_skill}")
+            return agent_skill.resolve()
+        if _skill_tree_has_files(sandbox_agent_skill):
+            logger.info(f"[Workspace] skill docker bind (agent sandbox): {sandbox_agent_skill}")
+            return sandbox_agent_skill.resolve()
+
+        # .agents 侧缺失：与文件工具保持一致（文件工具同样读不到该技能），
+        # 不 fallback 用户目录，避免沙箱可用而 /skills/ 为空的不一致
+        logger.warning(
+            f"[Workspace] agent skill 目录不存在或为空，跳过 bind: "
+            f"agent={agent_id} skill={sid} path={agent_skill}"
+        )
+        return None
+
+    # 内置技能（default 智能体）：直接从 skill-repo 绑定（只读，不经过用户目录）
     if sid in BUILTIN_SKILL_IDS:
         from config.config import app_config as _cfg
         repo_root = _cfg.get_skill_repo_root()
@@ -346,30 +391,30 @@ def resolve_skill_bind_host_path(
         logger.info(f"[Workspace] skill docker bind (builtin): {builtin_path}")
         return builtin_path.resolve()
 
-    # 订阅智能体：优先使用 agent 专属 skills 目录
-    if agent_id:
-        agent_skill = get_agent_skills_dir(agent_id) / sid
-        sandbox_agent_skill = get_sandbox_agent_skills_dir(agent_id) / sid
+    ws_skill = get_skills_dir(user_id) / sid
+    sandbox_skill = get_sandbox_skills_dir(user_id) / sid
 
-        # 远程 dockerd：直接信任 NFS 对齐，返回 SANDBOX 路径
-        # （Agent 进程 stat 不到 VM 上的 SANDBOX 路径，但 NFS 保证数据一致）
-        if (app_config.SANDBOX_DOCKER_HOST or "").strip() and _workspace_roots_differ():
-            _sync_agent_skill_to_sandbox(agent_id, sid)
+    # 双向一致性自愈：SANDBOX 侧有文件而 WORKSPACE 侧为空（卸载残留 / NFS
+    # 漂移等导致的两侧不一致）时，反向同步回 WORKSPACE，使 /skills/（文件工具）
+    # 与 /mnt/skills/（容器 bind）保持一致；远程 dockerd 下不可达则跳过。
+    if _workspace_roots_differ() and _skill_tree_has_files(sandbox_skill) \
+            and not _skill_tree_has_files(ws_skill):
+        try:
+            if ws_skill.exists():
+                shutil.rmtree(ws_skill, ignore_errors=True)
+            ws_skill.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(sandbox_skill, ws_skill)
             logger.info(
-                f"[Workspace] skill docker bind (agent sandbox remote): {sandbox_agent_skill}"
+                f"[Workspace] synced skill back from sandbox bind path "
+                f"user={user_id} skill={sid} dst={ws_skill}"
             )
-            return sandbox_agent_skill
-
-        if _skill_tree_has_files(agent_skill):
-            logger.info(f"[Workspace] skill docker bind (agent): {agent_skill}")
-            return agent_skill.resolve()
-        if _skill_tree_has_files(sandbox_agent_skill):
-            logger.info(f"[Workspace] skill docker bind (agent sandbox): {sandbox_agent_skill}")
-            return sandbox_agent_skill.resolve()
+        except OSError:
+            logger.warning(
+                f"[Workspace] sandbox skill 不可达，跳过反向同步: "
+                f"user={user_id} skill={sid}"
+            )
 
     sync_skill_to_sandbox_bind_path(user_id, sid)
-
-    sandbox_skill = get_sandbox_skills_dir(user_id) / sid
 
     # 远程 dockerd 时 Agent 进程 stat 不到虚机上的 SANDBOX 路径，
     # 直接信任 NFS 对齐，优先使用 SANDBOX 路径作为 Docker bind mount 源
@@ -501,7 +546,10 @@ def dir_size_bytes(path: Path) -> int:
     total = 0
     if not path.exists():
         return 0
-    for root, _dirs, files in os.walk(path):
+    for root, dirs, files in os.walk(path):
+        # HTML 分享快照目录不占用户配额（含任一层级同名目录；该目录名为分享功能保留字，
+        # 与 .sandbox 同级取舍——用户自建同名目录同样豁免，见 html_share_snapshot 模块注释）
+        dirs[:] = [d for d in dirs if d != HTML_SHARE_SNAPSHOT_DIR]
         for name in files:
             try:
                 total += (Path(root) / name).stat().st_size
@@ -518,7 +566,12 @@ def remove_session_workspace(user_id: str, session_id: str) -> None:
 
 
 def remove_skill_installation(user_id: str, skill_id: str) -> None:
-    """卸载 skill：删除用户级目录 {user}/skills/{id}/。"""
+    """卸载 skill：删除用户级目录 {user}/skills/{id}/（WORKSPACE 与 SANDBOX 双侧）。
+
+    只删单侧会导致 /skills/（文件工具）与 /mnt/skills/（容器 bind）不一致：
+    卸载后 SANDBOX 侧残留目录会被 resolve_skill_bind_host_path 探测到并继续
+    bind，造成沙箱内技能仍可用、宿主机侧已空的假象。
+    """
     uid = validate_user_id(user_id)
     sid = (skill_id or "").strip().strip("/\\")
     if not sid or ".." in sid or "/" in sid or "\\" in sid:
@@ -528,6 +581,18 @@ def remove_skill_installation(user_id: str, skill_id: str) -> None:
     if user_skill.exists():
         shutil.rmtree(user_skill, ignore_errors=True)
         logger.info(f"[Workspace] 已删除用户 skill 目录 {user_skill}")
+
+    # SANDBOX 侧（远程 dockerd 时 Agent 进程可能不可达，best effort）
+    try:
+        sandbox_skill = get_sandbox_skills_dir(uid) / sid
+        if _workspace_roots_differ() and sandbox_skill.exists():
+            shutil.rmtree(sandbox_skill, ignore_errors=True)
+            logger.info(f"[Workspace] 已删除 sandbox skill 目录 {sandbox_skill}")
+    except OSError:
+        logger.warning(
+            f"[Workspace] sandbox skill 目录不可达，跳过删除: "
+            f"user={uid} skill={sid}"
+        )
 
 
 def remove_user_workspace(user_id: str) -> None:

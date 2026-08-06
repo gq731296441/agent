@@ -42,26 +42,44 @@ class SkillFilterBackend:
         self._allowed_ids = allowed_ids
 
     def _is_allowed(self, file_path: str) -> bool:
-        """检查路径是否属于白名单内的 skill 目录。"""
+        """检查路径是否属于白名单内的 skill 目录。
+
+        注意：CompositeBackend 路由转发时已剥离前缀（/skills/ 路由），
+        子 backend 收到的路径形如 /{skill_id}/SKILL.md，skill_id 是首段；
+        兼容旧版 /installed/{skill_id}/... 结构。
+        """
         if self._allowed_ids is None:
             return True
-        # file_path 格式: /skills/installed/{skill_id}/SKILL.md 或 /skills/installed/{skill_id}
         parts = Path(file_path.lstrip("/")).parts
-        # 跳过第一个 segment ("skills")，检查第二个 ("installed")，第三个是 skill_id
-        if len(parts) >= 3:
-            return parts[2] in self._allowed_ids
-        # 根路径或 skills/installed/ 本身总是允许
-        return True
+        if not parts:
+            return True
+        skill_id = parts[1] if len(parts) >= 2 and parts[0] == "installed" else parts[0]
+        return skill_id in self._allowed_ids
+
+    def _is_skill_root_level(self, path: str) -> bool:
+        """判断 ls 路径是否为技能根层级（需按白名单过滤技能目录）。
+
+        CompositeBackend 剥离路由前缀后传入：根层级为 "/"；
+        兼容直连时的 "/skills/"（虚拟路由前缀）。更深的技能内部路径
+        （/skills/{skill_id}/...）不参与过滤，否则技能内文件/子目录
+        会被 is_dir+白名单 条件误过滤导致 ls 返回空。
+        """
+        rel = path.strip("/")
+        return rel == "" or rel == "skills"
 
     def ls(self, path: str) -> LsResult:
-        return self._filter_entries(self._inner.ls(path))
+        return self._filter_entries(self._inner.ls(path), path)
 
     async def als(self, path: str) -> LsResult:
-        return self._filter_entries(await self._inner.als(path))
+        return self._filter_entries(await self._inner.als(path), path)
 
-    def _filter_entries(self, result: Any) -> LsResult:
-        """对 ls/als 结果按 _allowed_ids 过滤：仅保留白名单内的目录条目。"""
-        if self._allowed_ids is None:
+    def _filter_entries(self, result: Any, path: str) -> LsResult:
+        """对 ls/als 结果按 _allowed_ids 过滤：仅技能根层级保留白名单目录。
+
+        技能内部（子目录/文件）原样返回，避免 ls /skills/{skill_id}/ 被
+        is_dir + 白名单条件误过滤成空列表。
+        """
+        if self._allowed_ids is None or not self._is_skill_root_level(path):
             return result if isinstance(result, LsResult) else LsResult(entries=result)
         entries = result.entries if isinstance(result, LsResult) else result
         if entries:
@@ -111,10 +129,14 @@ def build_filesystem_routes(
 
     from deep_agent_server.skills.selector import BUILTIN_SKILL_IDS
 
-    # 合并可见 skill：内置技能 + 用户勾选技能
-    allowed = set(BUILTIN_SKILL_IDS)
-    if selected_skill_ids:
-        allowed.update(selected_skill_ids)
+    # 合并可见 skill：内置技能 + 用户勾选技能。
+    # selected_skill_ids=None（未指定勾选）时不过滤，显示全部候选技能——
+    # 与沙箱挂载语义一致（ensure_session_skill_mount 对 None 挂载全部候选），
+    # 避免 /skills/ 与 /mnt/skills/ 可见技能不一致。
+    if selected_skill_ids is None:
+        allowed = None
+    else:
+        allowed = set(BUILTIN_SKILL_IDS) | set(selected_skill_ids)
 
     if agent_skills_root is not None:
         skill_backend = SkillFilterBackend(

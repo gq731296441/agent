@@ -1,0 +1,265 @@
+"""HTML 分享快照：创建分享时将 HTML 引用的本地图片复制到会话工作区快照目录。
+
+快照使分享链接与技能生命周期解耦：用户卸载 skill / 订阅智能体删除 skill 后，
+已生成的分享链接图片仍可加载（快照文件在工作区，不受技能目录变化影响）。
+
+快照目录: workspace/{sid}/.html-share-assets/{token}/
+  - index.html        改写引用后的 HTML 快照（引用指向快照内的图片副本）
+  - {md5(src)[:16]}.{ext}  图片副本（md5 命名防冲突、防路径穿越）
+"""
+
+import hashlib
+import mimetypes
+import re
+from typing import Callable, List, Optional, Tuple
+from urllib.parse import quote
+
+from config import get_logger
+from deep_agent_server.html_inline import (
+    _extract_asset_refs,
+    _extract_local_refs,
+    _iter_css_urls,
+    _resolve_local_vpath,
+    _rewrite_asset_refs,
+    _rewrite_css_urls,
+    _script_tag_is_module,
+)
+from deep_agent_server.workspace import HTML_SHARE_SNAPSHOT_DIR
+
+logger = get_logger(__name__)
+
+# 别名（workspace_api 与既有测试从本模块引用）
+SNAPSHOT_DIR_NAME = HTML_SHARE_SNAPSHOT_DIR
+SNAPSHOT_INDEX_NAME = "index.html"
+
+MAX_SNAPSHOT_ASSETS = 50        # 单次分享快照文件数上限
+MAX_SNAPSHOT_BYTES = 30 * 1024 * 1024  # 单次分享快照总字节上限
+MAX_ESM_IMPORT_DEPTH = 3        # module 脚本 import 依赖递归深度上限
+
+# ESM 静态 import/export from 与动态 import() 的相对路径提取
+_ESM_IMPORT_RE = re.compile(
+    r"""(?:import|export)\s+(?:[^'";]*?\s+from\s+)?['"]([^'"]+)['"]"""
+    r"""|import\(\s*['"]([^'"]+)['"]\s*\)""",
+    re.MULTILINE,
+)
+
+
+def snapshot_root_vpath(session_id: str, token: str) -> str:
+    """快照目录虚拟路径：workspace/{sid}/.html-share-assets/{token}"""
+    return f"workspace/{session_id}/{SNAPSHOT_DIR_NAME}/{token}"
+
+
+def _asset_dst_name(src_vpath: str) -> str:
+    """快照文件命名：md5(原虚拟路径)[:16] + 原扩展名。"""
+    digest = hashlib.md5(src_vpath.encode("utf-8")).hexdigest()[:16]
+    name = src_vpath.rsplit("/", 1)[-1]
+    ext = ""
+    if "." in name:
+        candidate = name.rsplit(".", 1)[-1].lower()
+        if candidate and len(candidate) <= 6:
+            ext = "." + candidate
+    if not ext:
+        guessed = mimetypes.guess_type(src_vpath)[0]
+        ext = mimetypes.guess_extension(guessed or "") or ""
+    return f"{digest}{ext}"
+
+
+def build_html_share_snapshot(
+    html_text: str,
+    dir_vpath: str,
+    session_id: str,
+    snapshot_root: str,
+    read_source: Callable[[str], Optional[bytes]],
+) -> Tuple[str, List[Tuple[str, str, bytes]]]:
+    """构建分享快照：解析图片引用 → 生成改写后 HTML 与待复制文件清单。
+
+    Args:
+        html_text: 原始 HTML 内容
+        dir_vpath: HTML 所在虚拟目录（相对引用基准）
+        session_id: 会话 ID
+        snapshot_root: 快照目录虚拟路径（snapshot_root_vpath 的返回值）
+        read_source: 读取源资源字节（不存在/越界返回 None），调用方注入
+
+    Returns:
+        (改写后 HTML, [(src_vpath, dst_vpath, bytes), ...])
+        改写后 HTML 中图片引用指向快照绝对虚拟路径（/workspace/{sid}/.html-share-assets/{token}/...）。
+        超限/读取失败的引用保留原样（对应图片在分享页 404，其余不受影响）。
+    """
+    src_vpaths = _extract_asset_refs(html_text, dir_vpath, session_id)
+    mapping: dict = {}
+    copies: List[Tuple[str, str, bytes]] = []
+    total_bytes = 0
+
+    def add_copy(src: str, data: bytes) -> Optional[str]:
+        """登记一个快照副本，返回快照绝对虚拟路径（超限返回 None）。"""
+        nonlocal total_bytes
+        if src in mapping:
+            return mapping[src]
+        if len(copies) >= MAX_SNAPSHOT_ASSETS:
+            logger.warning(
+                f"[HtmlShareSnapshot] 快照文件数超限 ({MAX_SNAPSHOT_ASSETS})，跳过: {src}"
+            )
+            return None
+        if total_bytes + len(data) > MAX_SNAPSHOT_BYTES:
+            logger.warning(
+                f"[HtmlShareSnapshot] 快照字节数超限 ({MAX_SNAPSHOT_BYTES})，跳过: {src}"
+            )
+            return None
+        dst = f"{snapshot_root}/{_asset_dst_name(src)}"
+        mapping[src] = dst
+        copies.append((src, dst, data))
+        total_bytes += len(data)
+        return dst
+
+    # 1. HTML 级图片资源
+    for src in src_vpaths:
+        data = read_source(src)
+        if data is not None:
+            add_copy(src, data)
+
+    # 2. 外部 CSS：内部 url() 图片一并快照，CSS 自身也复制为快照（url() 改写为快照绝对路径）
+    css_mapping: dict = {}
+    for tag_type, rel_path in _extract_local_refs(html_text):
+        if tag_type != "stylesheet":
+            continue
+        src_css = _resolve_local_vpath(dir_vpath, session_id, rel_path)
+        if not src_css:
+            continue
+        css_bytes = read_source(src_css)
+        if css_bytes is None:
+            continue
+        css_dir = src_css[: src_css.rfind("/") + 1]
+
+        def css_resolve(raw: str) -> Optional[str]:
+            vpath = _resolve_local_vpath(css_dir, session_id, raw)
+            if vpath is None:
+                return None
+            data = read_source(vpath)
+            if data is None:
+                return None
+            dst = add_copy(vpath, data)
+            return "/" + dst if dst else None
+
+        # 复制 CSS 内的图片引用
+        for content in _iter_css_urls(css_bytes.decode("utf-8", errors="replace")):
+            css_resolve(content)
+
+        # CSS 自身快照（内容中 url() 指向快照图片）
+        dst_css = add_copy(
+            src_css,
+            _rewrite_css_urls(
+                css_bytes.decode("utf-8", errors="replace"),
+                css_resolve,
+            ).encode("utf-8"),
+        )
+        if dst_css:
+            # key 用 HTML 中的原始引用（rel_path），供后续 link href 改写匹配
+            css_mapping[rel_path] = dst_css
+
+    # 3. JS：复制到快照 + 改写 script src（与 CSS 同模式）
+    token = snapshot_root.rsplit("/", 1)[-1]
+
+    def _rewrite_module_tree(
+        js_vpath: str,
+        js_text: str,
+        depth: int,
+        rewritten: dict,
+    ) -> str:
+        """递归处理 module 脚本的静态 import 依赖：复制到快照 + 改写 import 路径。
+
+        改写为相对 asset URL（{token}/asset?path=...，基于页面 URL 解析，
+        兼容任意部署前缀）。外部（http/https/data/node:/blob:）与无法解析的保留原样。
+        """
+        if depth > MAX_ESM_IMPORT_DEPTH:
+            return js_text
+        js_dir = js_vpath[: js_vpath.rfind("/") + 1]
+
+        def dep_resolve(raw: str) -> Optional[str]:
+            if raw.startswith(("/", "http:", "https:", "data:", "node:", "blob:")):
+                return None
+            vpath = _resolve_local_vpath(js_dir, session_id, raw)
+            if vpath is None:
+                return None
+            data = read_source(vpath)
+            if data is None:
+                return None
+            if add_copy(vpath, data) is None:
+                return None
+            if vpath not in rewritten:
+                rewritten[vpath] = _rewrite_module_tree(
+                    vpath, data.decode("utf-8", errors="replace"), depth + 1, rewritten
+                )
+            return vpath
+
+        def repl(m: re.Match) -> str:
+            raw = m.group(1) or m.group(2)
+            if not raw:
+                return m.group(0)
+            vpath = dep_resolve(raw)
+            if vpath is None:
+                return m.group(0)
+            return m.group(0).replace(raw, f"{token}/asset?path={quote(vpath)}")
+
+        return _ESM_IMPORT_RE.sub(repl, js_text)
+
+    script_mapping: dict = {}
+    for tag_type, rel_path in _extract_local_refs(html_text):
+        if tag_type != "script":
+            continue
+        src_js = _resolve_local_vpath(dir_vpath, session_id, rel_path)
+        if not src_js:
+            continue
+        js_bytes = read_source(src_js)
+        if js_bytes is None:
+            continue
+        dst_js = add_copy(src_js, js_bytes)
+        if dst_js:
+            script_mapping[rel_path] = dst_js
+            # module 脚本：递归处理静态 import 依赖（复制 + 改写为 asset 相对 URL）
+            if _script_tag_is_module(html_text, rel_path):
+                rewritten: dict = {}
+                new_content = _rewrite_module_tree(
+                    src_js, js_bytes.decode("utf-8", errors="replace"), 0, rewritten
+                )
+                for vp, content in rewritten.items():
+                    for idx, (s, d, _b) in enumerate(copies):
+                        if s == vp:
+                            copies[idx] = (s, d, content.encode("utf-8"))
+                            break
+                if new_content != js_bytes.decode("utf-8", errors="replace"):
+                    for idx, (s, d, _b) in enumerate(copies):
+                        if s == src_js:
+                            copies[idx] = (s, d, new_content.encode("utf-8"))
+                            break
+
+    # 4. 改写 HTML：图片/图标/style 引用 + stylesheet link + script src → 快照绝对虚拟路径
+    def resolve(raw: str) -> Optional[str]:
+        vpath = _resolve_local_vpath(dir_vpath, session_id, raw)
+        if vpath is None:
+            return None
+        dst = mapping.get(vpath)
+        return "/" + dst if dst else None
+
+    new_html = _rewrite_asset_refs(html_text, resolve)
+
+    # stylesheet link href → 快照 CSS 路径（快照 CSS 内 url() 已指向快照图片）
+    for rel_path, dst_css in css_mapping.items():
+        new_html = re.sub(
+            r'(\bhref\s*=\s*["\'])' + re.escape(rel_path) + r'(["\'])',
+            lambda _m: _m.group(1) + "/" + dst_css + _m.group(2),
+            new_html,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    # script src → 快照 JS 路径（快照 JS 原样内容，view 时从快照内联/引用）
+    for rel_path, dst_js in script_mapping.items():
+        new_html = re.sub(
+            r'(\bsrc\s*=\s*["\'])' + re.escape(rel_path) + r'(["\'])',
+            lambda _m: _m.group(1) + "/" + dst_js + _m.group(2),
+            new_html,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+
+    return new_html, copies

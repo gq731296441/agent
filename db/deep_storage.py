@@ -1661,6 +1661,12 @@ async def cleanup_deep_session_data(user_id: str, session_id: str) -> None:
             "DELETE FROM session_start_tasks WHERE session_id = $1",
             sid,
         )
+        # HTML 分享 token 联动清理（快照目录已随 remove_session_workspace 的 rmtree 删除）
+        await conn.execute(
+            "DELETE FROM html_share_tokens WHERE user_id = $1 AND session_id = $2",
+            user_id,
+            str(sid),
+        )
 
 
 # ==================== User secrets ====================

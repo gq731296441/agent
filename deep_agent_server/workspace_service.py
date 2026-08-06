@@ -15,8 +15,10 @@ from deep_agent_server.quota_service import (
 )
 from deep_agent_server.skills.session_mount import MANIFEST_FILENAME
 from deep_agent_server.workspace import (
+    HTML_SHARE_SNAPSHOT_DIR,
     compute_sha256,
     dir_size_bytes,
+    get_agent_skills_dir,
     get_artifacts_dir,
     get_skills_dir,
     get_uploads_dir,
@@ -29,6 +31,12 @@ from deep_agent_server.workspace import (
 from config import get_logger
 
 logger = get_logger(__name__)
+
+# 远程沙箱（NFS）跨主机时钟偏差容忍（秒）：execute 在 VM 容器写入的文件
+# mtime 用 VM 时钟，与本机 time.time() 可能差数分钟；磁盘兜底窗口下界放宽此值。
+# NTP 同步后偏差微秒级，此值只需覆盖 NTP 中断短期漂移；
+# 不宜过大——跨轮次排除依赖它小于轮次间隔，否则上一轮文件会被误收为本轮新文件
+CLOCK_SKEW_TOLERANCE = 120
 
 
 def _mime_for_path(path: Path) -> str:
@@ -61,7 +69,9 @@ def _scan_tree(base: Path, prefix: str, file_kind: str) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     if not base.exists():
         return items
-    for root, _dirs, files in os.walk(base):
+    for root, dirs, files in os.walk(base):
+        # 分享快照目录对用户不可见（不展示、不可删，见 html_share_snapshot 模块注释）
+        dirs[:] = [d for d in dirs if d != HTML_SHARE_SNAPSHOT_DIR]
         root_path = Path(root)
         for name in files:
             if _is_user_hidden_filename(name):
@@ -150,6 +160,9 @@ def _scan_tree_nodes(
 
     for entry in entries:
         if _is_user_hidden_filename(entry.name):
+            continue
+        # 分享快照目录对用户不可见（不展示、不可删）
+        if entry.name == HTML_SHARE_SNAPSHOT_DIR:
             continue
         try:
             stat = entry.stat()
@@ -377,10 +390,18 @@ def list_files(
     return items
 
 
-def resolve_virtual_path(user_id: str, virtual_path: str) -> Tuple[Path, str, Optional[str], str]:
+def resolve_virtual_path(
+    user_id: str,
+    virtual_path: str,
+    *,
+    agent_id: Optional[str] = None,
+) -> Tuple[Path, str, Optional[str], str]:
     """
     解析虚拟路径 workspace/{sid}/file 或 skills/{skill_dir}/...。
     返回 (absolute_path, rel_path_for_index, session_id, file_kind)
+
+    agent_id: 订阅智能体会话上下文。skills/ 前缀且 agent_id 非空时解析到
+              .agents/{agent_id}/skills/（订阅智能体技能目录），否则解析到用户目录。
     """
     uid = validate_user_id(user_id)
     vpath = (virtual_path or "").strip().lstrip("/").replace("\\", "/")
@@ -399,7 +420,7 @@ def resolve_virtual_path(user_id: str, virtual_path: str) -> Tuple[Path, str, Op
         rel = "/".join(parts[1:]) if len(parts) > 1 else ""
         if not rel:
             raise ValueError("skills 路径格式: skills/{skill_dir}/...")
-        base = get_skills_dir(uid)
+        base = get_agent_skills_dir(agent_id) if agent_id else get_skills_dir(uid)
         return safe_join(base, rel), rel, None, "skill"
     if kind == "artifacts":
         rel = "/".join(parts[1:]) if len(parts) > 1 else ""
@@ -412,14 +433,100 @@ def resolve_virtual_path(user_id: str, virtual_path: str) -> Tuple[Path, str, Op
     raise ValueError(f"不支持的 path 前缀: {kind}")
 
 
-def read_file_bytes(user_id: str, virtual_path: str) -> Tuple[bytes, str]:
+def find_workspace_file_by_sha256(
+    user_id: str,
+    session_id: str,
+    file_name: str,
+    sha256: str,
+) -> Optional[str]:
+    """在会话工作区树内按内容 sha256 定位文件（分享源路径迁移用）。
+
+    先按 basename 快速匹配；未命中时全树 sha 兜底（改名后 basename 变化场景）。
+    跳过隐藏目录（.html-share-assets / .sandbox）；多个命中取 mtime 最新。
+    返回虚拟路径 workspace/{sid}/...，找不到返回 None。
+    """
+    uid = validate_user_id(user_id)
+    root = get_workspace_dir(uid, session_id)
+    if not root.is_dir():
+        return None
+
+    def _match(path: Path) -> bool:
+        rel = path.relative_to(root).as_posix()
+        if rel == HTML_SHARE_SNAPSHOT_DIR or rel.startswith(f"{HTML_SHARE_SNAPSHOT_DIR}/"):
+            return False
+        if rel.startswith(".sandbox/") or "/.sandbox/" in f"/{rel}/":
+            return False
+        try:
+            return compute_sha256(path) == sha256
+        except OSError:
+            return False
+
+    best: Optional[Tuple[float, str]] = None
+
+    def _consider(path: Path) -> None:
+        nonlocal best
+        if not _match(path):
+            return
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return
+        rel = path.relative_to(root).as_posix()
+        if best is None or mtime > best[0]:
+            best = (mtime, f"workspace/{session_id}/{rel}")
+
+    # ① 按 basename 快速匹配（常规改名/移动）
+    for path in root.rglob(file_name):
+        if path.is_file():
+            _consider(path)
+    # ② 全树 sha 兜底（改名后 basename 变化；源缺失时低频触发）
+    if best is None:
+        for path in root.rglob("*"):
+            if path.is_file():
+                _consider(path)
+    return best[1] if best else None
+
+
+def count_workspace_basename(user_id: str, session_id: str, file_name: str) -> int:
+    """统计会话工作区内同名文件数量（不含隐藏目录），分享复用③唯一性判定用。"""
+    uid = validate_user_id(user_id)
+    root = get_workspace_dir(uid, session_id)
+    if not root.is_dir():
+        return 0
+    count = 0
+    for path in root.rglob(file_name):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root).as_posix()
+        if rel == HTML_SHARE_SNAPSHOT_DIR or rel.startswith(f"{HTML_SHARE_SNAPSHOT_DIR}/"):
+            continue
+        if rel.startswith(".sandbox/") or "/.sandbox/" in f"/{rel}/":
+            continue
+        count += 1
+    return count
+
+
+def read_file_bytes(
+    user_id: str,
+    virtual_path: str,
+    *,
+    agent_id: Optional[str] = None,
+) -> Tuple[bytes, str]:
     _assert_user_visible_path(virtual_path)
-    abs_path, rel_path, session_id, file_kind = resolve_virtual_path(user_id, virtual_path)
+    abs_path, rel_path, session_id, file_kind = resolve_virtual_path(
+        user_id, virtual_path, agent_id=agent_id
+    )
+    # 回退链：agent 目录缺失时回退用户目录（覆盖内置会话拿到 agent id、
+    # 订阅会话引用用户自有技能等边缘场景）；仍不存在才报 404
+    if not abs_path.is_file() and agent_id and file_kind == "skill":
+        abs_path, rel_path, session_id, file_kind = resolve_virtual_path(
+            user_id, virtual_path, agent_id=None
+        )
     if not abs_path.is_file():
         logger.warning(
             f"[Workspace] read_file_bytes 文件不存在 user={user_id} "
             f"virtual={virtual_path} abs={abs_path} rel={rel_path} "
-            f"session={session_id} kind={file_kind}"
+            f"session={session_id} kind={file_kind} agent_id={agent_id}"
         )
         raise FileNotFoundError(virtual_path)
     logger.debug(
@@ -441,6 +548,8 @@ async def delete_file(user_id: str, virtual_path: str, *, recursive: bool = Fals
         raise ValueError("Skill 文件不可在此删除，请前往 Skill 管理卸载")
     if "/.sandbox/skills/" in f"/{vpath}/" or vpath.endswith(".sandbox/skills"):
         raise ValueError("Skill 镜像不可删除，请前往 Skill 管理卸载")
+    if f"/{HTML_SHARE_SNAPSHOT_DIR}/" in f"/{vpath}/" or vpath.startswith(HTML_SHARE_SNAPSHOT_DIR):
+        raise ValueError("分享快照文件不可在此删除，请前往分享管理操作")
     if not abs_path.exists():
         raise FileNotFoundError(virtual_path)
 
@@ -598,11 +707,16 @@ async def list_recent_session_workspace_cards(
     conversation_id: str,
     *,
     within_seconds: int = 120,
+    time_window: Optional[Tuple[Optional[float], Optional[float]]] = None,
 ) -> List[Dict[str, Any]]:
-    """扫描会话工作区近期写入的文件（end 时 DB/内存均未登记时的兜底）。
+    """扫描会话工作区在时间窗口内写入的文件（end 时 DB/内存均未登记时的兜底）。
 
+    time_window=(start_ts, end_ts)：扫描 mtime ∈ [start, end] 的文件
+    （run 生命周期窗口——run 开始到结束，覆盖正常完成/出错/用户 stop 全形态，
+    不受固定秒数窗口限制；end 之后写入的文件属于后续 run，排除）。
+    未传 time_window 时用 within_seconds 向后兼容（120s）。
     增加 conversation_id 排他过滤：跳过已在 DB 中登记为其他轮次的文件，
-    避免上一轮的文件被重复推送。时间窗口从 900s 缩至 120s。
+    避免上一轮的文件被重复推送。
     """
     import time
 
@@ -627,7 +741,15 @@ async def list_recent_session_workspace_cards(
         except Exception:
             pass
 
-    cutoff = time.time() - max(60, within_seconds)
+    if time_window is not None:
+        start_ts, end_ts = time_window
+        end_ts = end_ts or time.time()
+        # 远程沙箱（NFS）跨主机时钟偏差：execute 在 VM 写入的 mtime 可能比
+        # 本机早数分钟，下界放宽容忍；mtime 偏早不会越过上界，上界保持不动
+        start_ts = (start_ts - CLOCK_SKEW_TOLERANCE) if start_ts else 0.0
+    else:
+        start_ts = time.time() - max(60, within_seconds)
+        end_ts = time.time()
     cards: List[Dict[str, Any]] = []
     seen = set()
     for path in root.rglob("*"):
@@ -636,12 +758,16 @@ async def list_recent_session_workspace_cards(
         if not path.is_file():
             continue
         try:
-            if path.stat().st_mtime < cutoff:
+            mtime = path.stat().st_mtime
+            if mtime < start_ts or mtime > end_ts:
                 continue
         except OSError:
             continue
         rel = path.relative_to(root).as_posix()
         if not rel or rel in seen or rel in stale_paths:
+            continue
+        # 分享快照目录对用户不可见（rglob 会拾取快照文件，需显式过滤）
+        if rel == HTML_SHARE_SNAPSHOT_DIR or rel.startswith(f"{HTML_SHARE_SNAPSHOT_DIR}/"):
             continue
         agent_path = f"/workspace/{rel}"
         if not is_card_eligible_agent_path(agent_path):

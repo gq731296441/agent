@@ -419,6 +419,7 @@ async def run_deep_agent(
             f"changes={list(config_changes.keys())}"
         )
     run_started_at = datetime.now(timezone.utc)
+    adapter.run_started_at = run_started_at
 
     async def _finalize_tokens(status: str, error: str = "") -> dict:
         usage = token_acc.as_dict()
@@ -503,13 +504,18 @@ async def run_deep_agent(
             datetime.fromisoformat(metrics["finished_at"]),
         )
 
-    async def _yield_workspace_files_async():
-        files_msg = await adapter.async_conversation_files_message()
+    async def _yield_workspace_files_async(finished_at: Optional[str] = None):
+        # 磁盘兜底用 run 生命周期窗口 [run_started_at, finished_at] 扫描，
+        # 覆盖正常完成/出错/用户 stop 全形态（不依赖固定秒数窗口）
+        files_msg = await adapter.async_conversation_files_message(
+            run_started_at=run_started_at,
+            run_ended_at=finished_at,
+        )
         if files_msg:
             yield files_msg
 
-    async def _yield_run_end(reason: EndReason):
-        async for msg in _yield_workspace_files_async():
+    async def _yield_run_end(reason: EndReason, finished_at: Optional[str] = None):
+        async for msg in _yield_workspace_files_async(finished_at):
             yield msg
         yield adapter.end_message(reason)
 
@@ -518,7 +524,7 @@ async def run_deep_agent(
             if stop_event and stop_event.is_set():
                 metrics = await _finalize_tokens("stopped")
                 yield _yield_run_metrics(metrics)
-                async for msg in _yield_run_end(EndReason.STOP):
+                async for msg in _yield_run_end(EndReason.STOP, metrics["finished_at"]):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.STOP)
                 return
@@ -540,7 +546,7 @@ async def run_deep_agent(
 
                 metrics = await _finalize_tokens("completed")
                 yield _yield_run_metrics(metrics)
-                async for msg in _yield_run_end(EndReason.COMPLETED):
+                async for msg in _yield_run_end(EndReason.COMPLETED, metrics["finished_at"]):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.COMPLETED)
                 return
@@ -548,7 +554,7 @@ async def run_deep_agent(
             except DeepRunTimeoutError:
                 metrics = await _finalize_tokens("error", error="timeout")
                 yield _yield_run_metrics(metrics)
-                async for msg in _yield_run_end(EndReason.ERROR):
+                async for msg in _yield_run_end(EndReason.ERROR, metrics["finished_at"]):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.ERROR)
                 return
@@ -557,7 +563,7 @@ async def run_deep_agent(
                 logger.info(f"[DeepRunner] 会话 {session_id} 取消")
                 metrics = await _finalize_tokens("stopped")
                 yield _yield_run_metrics(metrics)
-                async for msg in _yield_run_end(EndReason.STOP):
+                async for msg in _yield_run_end(EndReason.STOP, metrics["finished_at"]):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.STOP)
                 raise
@@ -614,7 +620,7 @@ async def run_deep_agent(
 
                 metrics = await _finalize_tokens("error", error=err_text)
                 yield _yield_run_metrics(metrics)
-                async for msg in _yield_run_end(EndReason.ERROR):
+                async for msg in _yield_run_end(EndReason.ERROR, metrics["finished_at"]):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.ERROR)
                 return

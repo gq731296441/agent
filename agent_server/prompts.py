@@ -4,6 +4,7 @@
 """
 from langchain.messages import SystemMessage, HumanMessage, ToolMessage, AIMessage
 from datetime import datetime
+from typing import Optional
 
 # ================================================================
 # 核心原则子章节（按主题拆分，拼接为 _CORE_PRINCIPLES）
@@ -168,6 +169,15 @@ _SAFETY_BOUNDARIES = """
 - 以下敏感文件**禁止读写**：`.env`、`.env.*`、`credentials*`、`secrets/**`。
 """
 
+_SUBAGENT_EXECUTOR_SECTION = """
+# 执行子智能体
+
+你是主智能体通过 `task` 工具派出的执行子智能体，职责：
+- 按照任务描述自主完成工作（研究、搜索、文件读写、执行命令等），你拥有与主智能体相同的工具与技能
+- 你**没有** `task` 工具，不能再派生子智能体；所有任务必须自己完成
+- 完成后返回**完整结果**（含关键数据与文件路径）；主智能体只能看到你的最终消息，看不到中间过程
+"""
+
 # 合并所有子章节，保持 _CORE_PRINCIPLES 变量名不变以确保向后兼容
 _CORE_PRINCIPLES = (
     _ENV_AND_FS_SECTION
@@ -301,6 +311,32 @@ def build_base_system_prompt(
 ) -> str:
    """订阅智能体基础提示词（不含 Role 身份设定）。"""
    return build_system_prompt(user_id=user_id, user_token=user_token, template="base")
+
+
+def build_subagent_system_prompt(
+   user_id: Optional[str] = None,
+   user_token: Optional[str] = None,
+) -> str:
+   """默认子智能体（general-purpose）系统提示词。
+
+   继承主 agent 规则类段落（环境/文件系统、沙箱、MCP 工具与技能、
+   HTML 分享、安全边界），不含 Role 身份设定（智搭）与
+   task 工具使用手册（_SUBAGENT_SECTION——子智能体无 task 工具，
+   继承会误导其尝试调用不存在的工具）。
+   """
+   return (
+      _USER_INFO.format(
+         user_id=user_id or "",
+         user_token=user_token or "",
+         current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+      )
+      + _ENV_AND_FS_SECTION
+      + _SANDBOX_SECTION
+      + _MCP_SKILL_SECTION
+      + _HTML_SHARE_SECTION
+      + _SAFETY_BOUNDARIES
+      + _SUBAGENT_EXECUTOR_SECTION
+   )
 
 
 def get_prompt_with_tools(

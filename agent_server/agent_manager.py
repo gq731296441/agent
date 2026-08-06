@@ -21,6 +21,36 @@ import json
 from common.enums import MessageType, SenderType, EndReason
 from common.schemas import AgentMessage
 
+
+def _should_skip_ws_subagent_event(message: Dict[str, Any]) -> bool:
+    """子智能体事件 WS 推送过滤。
+
+    子智能体的消息按 subagent_run_id 包装为 SUBAGENT_EVENT 后，agent_manager
+    无法再用消息类型区分"流式推送"与"落库专用"两条通道，这里按 content 结构
+    精确区分：
+
+    - 流式 chunk：content 为**字符串**（subevent_type 在消息外层），必须推送
+    - 落库的完整文本：content 为 **dict**（{"text": ..., "subevent_type": ...}），
+      流式 chunk 已推过同一内容，再推会导致前端追加到同一事件内容翻倍
+    - reasoning_final：完整推理文本，同样只落库不推送
+
+    仅过滤 dict 型消息：reasoning_final（完整推理）与 chat（完整回复）。
+    """
+    msg_type = message.get("type")
+    if msg_type != MessageType.SUBAGENT_EVENT and msg_type != MessageType.SUBAGENT_EVENT.value:
+        return False
+    content = message.get("content") or {}
+    if not isinstance(content, dict):
+        # 流式 chunk（字符串 content）必须推送
+        return False
+    subevent_type = content.get("subevent_type", "")
+    if subevent_type == "reasoning_final":
+        return True
+    if subevent_type == "chat":
+        # 落库的完整回复文本，流式 chunk 已推送同一内容
+        return True
+    return False
+
 logger = get_logger(__name__)
 
 SESSION_RUN_WAIT_TIMEOUT = 5.0
@@ -416,14 +446,12 @@ class AgentManager:
                     continue
                 if msg_type == MessageType.REASONING_FINAL or msg_type == MessageType.REASONING_FINAL.value:
                     continue
-                # 子智能体的 REASONING_FINAL 存库为 subagent_event（确保按
-                # subagent_run_id 分组），但 WS 推送时按 subevent_type 过滤，
-                # 避免完整推理文本重复推送到前端
-                if (msg_type == MessageType.SUBAGENT_EVENT or msg_type == MessageType.SUBAGENT_EVENT.value):
-                    content = message.get("content") or {}
-                    subevent_type = content.get("subevent_type", "") if isinstance(content, dict) else ""
-                    if subevent_type == "reasoning_final":
-                        continue
+                # 子智能体的落库消息（REASONING_FINAL / chat 完整文本）包装为
+                # SUBAGENT_EVENT 存库（确保按 subagent_run_id 分组），但 WS
+                # 推送时按 subevent_type + content 结构过滤——完整文本与已推的
+                # 流式 chunk 内容重复，推送会导致前端渲染两次
+                if _should_skip_ws_subagent_event(message):
+                    continue
 
                 if (
                     self.is_deep_runtime
@@ -636,6 +664,10 @@ class AgentManager:
                     continue
                 msg_type = msg.get("type")
                 if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
+                    continue
+                if msg_type == MessageType.REASONING_FINAL or msg_type == MessageType.REASONING_FINAL.value:
+                    continue
+                if _should_skip_ws_subagent_event(msg):
                     continue
                 frontend_messages.append(msg)
 

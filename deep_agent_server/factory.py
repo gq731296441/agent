@@ -253,7 +253,11 @@ def _patch_acreate_summary_emit_compressing():
 
 
 from deep_agent_server.sandbox.exceptions import SandboxUserLimitExceeded
-from agent_server.prompts import build_base_system_prompt, build_system_prompt
+from agent_server.prompts import (
+    build_base_system_prompt,
+    build_subagent_system_prompt,
+    build_system_prompt,
+)
 
 logger = get_logger(__name__)
 
@@ -423,6 +427,26 @@ async def create_deep_agent_instance(
                 sandbox_mode = True
 
         subagents = config.get("subagents") or None
+        if subagents is None:
+            # 覆盖库默认 general-purpose（deepagents 检测到同名 spec 即跳过自动添加，
+            # graph.py:693）：默认子智能体只有两句英文提示词，与平台规则脱节。
+            # 此处注入继承主 agent 规则类的系统提示词（不含 Role 身份设定与
+            # task 工具使用手册——子智能体无 task 工具）。
+            # tools 不传键 → deepagents 默认继承主 agent 全部工具（graph.py:658）；
+            # model / permissions / interrupt_on 同样默认继承。
+            subagents = [
+                {
+                    "name": "general-purpose",
+                    "description": (
+                        "通用智能体：用于研究复杂问题、搜索文件和内容、执行多步任务。"
+                        "继承主智能体的工具与技能。"
+                    ),
+                    "system_prompt": build_subagent_system_prompt(
+                        user_id=user_id, user_token=user_token
+                    ),
+                    "skills": ["/skills/"],  # 显式 spec 不继承主 agent 的 skills 参数（graph.py:650）
+                }
+            ]
         interrupt_on = build_interrupt_on(config) if app_config.AGENT_RUNTIME == "deep" else None
 
         permissions = build_permissions()

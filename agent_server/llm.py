@@ -184,6 +184,11 @@ def create_llm_from_config(
     })
     if max_tokens is not None:
         config["max_tokens"] = max_tokens
+    else:
+        # 不传 max_tokens 时 API 用默认上限（实测约 16K token），长工具参数
+        # （如 write 大文件）可能被截断导致 JSON 不完整执行失败。
+        # 显式覆盖为更大的默认值；若模型真实上限低于此值，API 会报 400，再调低即可。
+        config["max_tokens"] = 32768
     if use_reasoning:
         return ChatOpenAIWithReasoning(**config)
     return ChatOpenAI(**config)

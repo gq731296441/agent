@@ -9,10 +9,27 @@ import json
 import mimetypes
 import uuid
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from langchain.messages import ToolMessage
+
+
+def _to_timestamp(value: Optional[Any]) -> Optional[float]:
+    """datetime / isoformat 字符串 / 数字 → epoch 秒时间戳（run 时间窗口用）。"""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    if hasattr(value, "timestamp"):
+        return value.timestamp()
+    return None
 
 from common.enums import MessageType, SenderType, EndReason
 from common.schemas import AgentMessage
@@ -262,6 +279,9 @@ class DeepEventAdapter:
         self.agent_id = agent_id
         self.group_id = group_id
         self.step_index = int(initial_step_index or 0)
+        # run 开始时刻（runner 启动后赋值）：execute 兜底扫描窗口下界用，
+        # 避免把上一轮生成的文件误收为本轮新文件
+        self.run_started_at: Optional[datetime] = None
         # task 子 agent：tool_call_id → subagent_run_id，用于 SUBAGENT_END 关联
         self._active_subagents: Dict[str, str] = {}
         self._active_subagent_inputs: Dict[str, dict] = {}
@@ -1828,10 +1848,39 @@ class DeepEventAdapter:
             )
         )
 
-    async def async_conversation_files_message(self) -> Optional[dict]:
-        """内存登记为空时，从 DB / 磁盘最近写入回填文件列表。"""
+    async def async_conversation_files_message(
+        self,
+        *,
+        run_started_at: Optional[Any] = None,
+        run_ended_at: Optional[Any] = None,
+    ) -> Optional[dict]:
+        """内存登记为空时，从 DB / 磁盘回填文件列表。
+
+        run_started_at / run_ended_at：datetime 或可转 timestamp 的对象；
+        提供时磁盘兜底用 run 生命周期窗口（[start, end]）扫描——
+        覆盖正常完成/出错/用户 stop 全形态，不受固定秒数窗口限制。
+        """
         msg = self.conversation_files_message()
         if msg:
+            # 内存登记（含 execute 兜底登记的）也做跨轮次排他：
+            # 跳过已登记到其他轮次的文件（上一轮 execute 生成的文档可能被
+            # 本轮 execute 兜底窗口扫到，这里按 DB 索引排除，不依赖时间窗口）
+            if self.conversation_id:
+                try:
+                    from db import deep_storage
+
+                    stale = await deep_storage.list_workspace_rel_paths_except_conversation(
+                        self.user_id, self.session_id, self.conversation_id
+                    )
+                    if stale:
+                        files = (msg.get("content") or {}).get("files") or []
+                        kept = [f for f in files if f.get("virtual_path") not in stale]
+                        if len(kept) != len(files):
+                            msg["content"]["files"] = kept
+                            if not kept:
+                                return None
+                except Exception:
+                    pass
             return msg
         cards: List[dict] = []
         try:
@@ -1845,10 +1894,17 @@ class DeepEventAdapter:
                     self.user_id, self.session_id, self.conversation_id
                 )
             if not cards:
+                time_window = None
+                if run_started_at is not None or run_ended_at is not None:
+                    time_window = (
+                        _to_timestamp(run_started_at),
+                        _to_timestamp(run_ended_at),
+                    )
                 cards = await list_recent_session_workspace_cards(
                     self.user_id,
                     self.session_id,
                     self.conversation_id or "",
+                    time_window=time_window,
                 )
         except Exception as e:
             from config import get_logger
@@ -1890,6 +1946,7 @@ class DeepEventAdapter:
     ) -> None:
         from deep_agent_server.conversation_files import (
             agent_path_to_virtual,
+            find_recent_document_files,
             is_write_success,
             resolve_agent_file_path,
             resolve_execute_output_tool,
@@ -1900,7 +1957,7 @@ class DeepEventAdapter:
             return
         effective_tool = resolve_write_tool_name(tool_name, args)
         if not effective_tool:
-            # execute 工具：仅收集命令中显式指定的文档输出文件
+            # execute 工具：命令/结果提及文档文件时登记
             if tool_name == "execute":
                 effective_tool = resolve_execute_output_tool(args, result_text)
             if not effective_tool:
@@ -1912,7 +1969,20 @@ class DeepEventAdapter:
             session_id=self.session_id,
             result_text=result_text,
         )
-        if not agent_path:
+        agent_paths: List[str] = []
+        if agent_path:
+            agent_paths.append(agent_path)
+        elif effective_tool == "execute":
+            # execute 兜底：命令未显式指定输出路径（如 python gen.py out.pptx、
+            # soffice --convert-to 等），扫描工作区本轮 run 内写入的全部文档文件
+            # （同一 execute 可能同时生成多个文档；下界用 run 开始时刻，
+            # 避免把上一轮生成的文件误收为本轮新文件）
+            agent_paths = find_recent_document_files(
+                self.user_id,
+                self.session_id,
+                since_ts=_to_timestamp(getattr(self, "run_started_at", None)),
+            )
+        if not agent_paths:
             from config import get_logger
 
             get_logger(__name__).debug(
@@ -1921,16 +1991,17 @@ class DeepEventAdapter:
                 tool_call_id,
             )
             return
-        virtual_path = agent_path_to_virtual(self.session_id, agent_path)
-        if not virtual_path:
-            return
-        self._conversation_files[virtual_path] = {
-            "agent_path": agent_path,
-            "tool_call_id": tool_call_id,
-            "tool_name": effective_tool,
-        }
-        self._schedule_conversation_file_index(virtual_path)
-        self._schedule_html_share(virtual_path)
+        for ap in agent_paths:
+            virtual_path = agent_path_to_virtual(self.session_id, ap)
+            if not virtual_path:
+                continue
+            self._conversation_files[virtual_path] = {
+                "agent_path": ap,
+                "tool_call_id": tool_call_id,
+                "tool_name": effective_tool,
+            }
+            self._schedule_conversation_file_index(virtual_path)
+            self._schedule_html_share(virtual_path)
 
     def _schedule_conversation_file_index(self, virtual_path: str) -> None:
         import asyncio
@@ -2021,10 +2092,16 @@ class DeepEventAdapter:
             )
 
     async def _do_create_html_share(self, virtual_path: str) -> str:
-        """创建分享 token 并返回 URL；文件不完整或不存在时返回空串。"""
+        """创建分享 token 并返回 URL；文件不完整或不存在时返回空串。
+
+        与前端分享同一入口（create_or_reuse_share_token 复用链），
+        同一文件不重复创建 token；内容指纹参与"改名后复用"判定。
+        """
+        import hashlib
+
         from config.config import app_config
         from deep_agent_server.workspace_service import resolve_virtual_path
-        from db.html_share_store import create_share_token as do_create_share_token
+        from db.html_share_store import create_or_reuse_share_token as do_create_share_token
 
         abs_path, _rel_path, _, file_kind = resolve_virtual_path(
             self.user_id, virtual_path
@@ -2037,10 +2114,11 @@ class DeepEventAdapter:
         if "</body>" not in content and "</html>" not in content:
             return ""
 
-        token = await do_create_share_token(
+        token, _reused, _reason = await do_create_share_token(
             user_id=self.user_id,
             session_id=self.session_id,
             file_path=virtual_path,
+            sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
             expires_in_hours=None,
         )
         public_base = (app_config.AGENTA_PUBLIC_BASE_URL or "").rstrip("/")
