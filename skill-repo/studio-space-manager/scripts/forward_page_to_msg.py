@@ -368,7 +368,7 @@ def forward_page_to_email(
     content_id: str,
     caller_emp_no: str,
     token: str,
-    receivers: List[Tuple[str, str]],
+    receivers: Optional[List[Tuple[str, str]]] = None,
     cc_receivers: Optional[List[Tuple[str, str]]] = None,
     bcc_receivers: Optional[List[Tuple[str, str]]] = None,
     postscript: str = "",
@@ -376,12 +376,12 @@ def forward_page_to_email(
     lang: str = "zh_CN",
 ) -> Tuple[bool, str, Optional[str]]:
     """
-    将页面转发到邮件。receivers 为收件人 [(emp_no, name), ...]；cc/bcc 可选。
+    将页面转发到邮件。receivers/cc_receivers/bcc_receivers 至少一个非空即可。
     email_title 为空时使用默认：Co-Claw转发自空间页面"页面标题"。
     Returns: (是否成功, jumpUrl, 失败原因；成功时第三项为 None)
     """
-    if not receivers:
-        return False, "", "收件人不能为空"
+    if not receivers and not cc_receivers and not bcc_receivers:
+        return False, "", "收件人、抄送人、密送人不能全部为空"
     jump_url = f"https://i.zte.com.cn/#/shared/{space_id}/wiki/page/{content_id}/view"
     page_title = (
         get_page_title(space_id, content_id, caller_emp_no, token, lang)
@@ -408,7 +408,9 @@ def forward_page_to_email(
         "system": "space-1920484534",
     }
     body = {
-        "receivers": [{"employeeNo": e, "employeeName": n} for e, n in receivers],
+        "receivers": [
+            {"employeeNo": e, "employeeName": n} for e, n in (receivers or [])
+        ],
         "ccReceivers": [
             {"employeeNo": e, "employeeName": n} for e, n in (cc_receivers or [])
         ],
@@ -474,7 +476,7 @@ def main():
         "--to-email",
         dest="to_email",
         action="store_true",
-        help="转发到邮件（默认转发到消息）；启用时需至少指定一名收件人（--to-emp-no 或 --to-name）",
+        help="转发到邮件（默认转发到消息）；启用时需至少指定一名收件人、抄送人或密送人（--to-emp-no/--to-name、--cc-emp-no/--cc-name 或 --bcc-emp-no/--bcc-name）",
     )
     parser.add_argument(
         "--cc-emp-no",
@@ -553,6 +555,7 @@ def main():
 
     # ---------- 转发到邮件 ----------
     if args.to_email:
+        # 解析收件人、抄送人、密送人（允许全部为空，后续统一校验）
         receivers, err = resolve_recipients(
             args.to_emp_no,
             args.to_name,
@@ -564,13 +567,6 @@ def main():
         )
         if err:
             print(json.dumps(err, ensure_ascii=False, indent=2))
-            sys.exit(1)
-        if not receivers:
-            result = {
-                "success": False,
-                "message": "转发到邮件需至少指定一名收件人，请使用 --to-emp-no 或 --to-name。",
-            }
-            print(json.dumps(result, ensure_ascii=False, indent=2))
             sys.exit(1)
         cc, err_cc = resolve_recipients(
             args.cc_emp_no,
@@ -596,6 +592,15 @@ def main():
         if err_bcc:
             print(json.dumps(err_bcc, ensure_ascii=False, indent=2))
             sys.exit(1)
+
+        # 校验：receivers/cc/bcc 至少有一个非空
+        if not receivers and not cc and not bcc:
+            result = {
+                "success": False,
+                "message": "转发到邮件需至少指定一名收件人、抄送人或密送人，请使用 --to-emp-no/--to-name、--cc-emp-no/--cc-name 或 --bcc-emp-no/--bcc-name。",
+            }
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            sys.exit(1)
         # 未提供附言且未明确「不添加附言」时，先询问用户是否添加附言
         postscript = (args.postscript or "").strip()
         if not postscript and not args.no_postscript:
@@ -606,10 +611,12 @@ def main():
                 "page_link": f"https://i.zte.com.cn/#/shared/{space_id}/wiki/page/{content_id}/view",
                 "space_id": space_id,
                 "content_id": content_id,
-                "to_recipients": [
-                    {"employeeNo": e, "employeeName": n} for e, n in receivers
-                ],
             }
+            # 只在有对应收件人时才添加到结果中
+            if receivers:
+                result["to_recipients"] = [
+                    {"employeeNo": e, "employeeName": n} for e, n in receivers
+                ]
             if cc:
                 result["cc_recipients"] = [
                     {"employeeNo": e, "employeeName": n} for e, n in cc
@@ -625,7 +632,7 @@ def main():
             content_id,
             caller_emp_no,
             token,
-            receivers,
+            receivers or [],
             cc or [],
             bcc or [],
             postscript,
@@ -639,10 +646,12 @@ def main():
             "page_link": jump_url,
             "space_id": space_id,
             "content_id": content_id,
-            "to_recipients": [
-                {"employeeNo": e, "employeeName": n} for e, n in receivers
-            ],
         }
+        # 只在有对应收件人时才添加到结果中
+        if receivers:
+            result["to_recipients"] = [
+                {"employeeNo": e, "employeeName": n} for e, n in receivers
+            ]
         if cc:
             result["cc_recipients"] = [
                 {"employeeNo": e, "employeeName": n} for e, n in cc

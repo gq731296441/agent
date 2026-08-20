@@ -112,7 +112,8 @@ def parse_skill_md(skill_dir: str) -> Optional[SkillMeta]:
     if not path.is_file():
         return None
 
-    text = path.read_text(encoding="utf-8")
+    # utf-8-sig 自动剥离 UTF-8 BOM（﻿），否则 ^--- 无法匹配 frontmatter
+    text = path.read_text(encoding="utf-8-sig")
     m = _FRONTMATTER_RE.match(text)
 
     if not m:

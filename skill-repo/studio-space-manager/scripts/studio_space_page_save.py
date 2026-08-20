@@ -629,7 +629,7 @@ def create_space_page(
 
 def build_page_link(space_id: str, content_id: str) -> str:
     # 按最新规范使用 index/ispace 路径
-    return f"https://i.zte.com.cn/index/ispace/#/space/{space_id}/wiki/page/{content_id}/view"
+    return f"https://i.zte.com.cn/index/ispace/#/space/{space_id}/wiki/page/{content_id}/view?useNewPath=true"
 
 
 # ---------------------------------------------------------------------------

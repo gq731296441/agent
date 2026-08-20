@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MR需求交付分析报告</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="report-header">
+  <div class="header-content">
+    <h1 class="report-title">ZXA10C6XXV3.0.10版本需求交付分析报告</h1>
+    <div class="report-meta">
+      <span class="meta-item">📊 需求类型：快车道 | 标准 | 轻量</span>
+    </div>
+  </div>
+</header>
+
+<nav class="tab-navigation">
+  <button class="tab-btn active" data-tab="tab1">
+    <span class="tab-icon">🎯</span>
+    <span class="tab-text">需求交付瓶颈诊断</span>
+  </button>
+  <button class="tab-btn" data-tab="tab2">
+    <span class="tab-icon">⚖️</span>
+    <span class="tab-text">活动均衡性分析</span>
+  </button>
+  <button class="tab-btn" data-tab="tab3">
+    <span class="tab-icon">📈</span>
+    <span class="tab-text">周期趋势分析</span>
+  </button>
+  <button class="tab-btn" data-tab="tab4">
+    <span class="tab-icon">📍</span>
+    <span class="tab-text">待改进领域</span>
+  </button>
+  <button class="tab-btn" data-tab="tab5">
+    <span class="tab-icon">💡</span>
+    <span class="tab-text">异常需求详单</span>
+  </button>
+</nav>
+
+<main class="report-content">
+  <!-- TAB 1: 需求交付瓶颈诊断 -->
+  <section id="tab1" class="tab-panel active">
+    <div class="panel-header">
+      <h2 class="panel-title">需求交付瓶颈诊断：长周期识别与异常监控</h2>
+      <p class="panel-desc">识别不同类型需求在各活动周期中的瓶颈与异常</p>
+    </div>
+    
+    <div class="key-findings-card">
+      <h3 class="findings-title">🔍 关键发现</h3>
+      <table class="key-findings-table">
+        <thead>
+          <tr>
+            <th>需求类型</th>
+            <th>最长非等待周期</th>
+            <th>超20天异常周期</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>快车道</strong></td>
+            <td>MR计划周期 (39.52天)</td>
+            <td>MR开发等待周期 (24.82天)、MR分析等待周期 (24.21天)</td>
+          </tr>
+          <tr>
+            <td><strong>标准</strong></td>
+            <td>MR计划周期 (44.85天)</td>
+            <td>MR开发等待周期 (37.23天)、MR分析等待周期 (23.20天)</td>
+          </tr>
+          <tr>
+            <td><strong>轻量</strong></td>
+            <td>MR计划周期 (57.96天)</td>
+            <td>MR开发等待周期 (30.86天)</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="chart-container">
+      <h3 class="chart-title">📊 各需求类型活动周期对比</h3>
+      <canvas id="cycleComparisonChart"></canvas>
+      <div class="chart-legend" id="chartLegend1"></div>
+    </div>
+
+    <div class="data-table-container">
+      <h3 class="table-title">📋 详细周期数据（单位：天）</h3>
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th class="activity-col">活动类型</th>
+            <th class="fast-lane-col">快车道</th>
+            <th class="standard-col">标准</th>
+            <th class="light-col">轻量</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>MR计划周期</td>
+            <td>39.52</td>
+            <td>44.85</td>
+            <td>57.96</td>
+          </tr>
+          <tr>
+            <td>MR分析等待周期</td>
+            <td>24.21</td>
+            <td>23.20</td>
+            <td>16.79</td>
+          </tr>
+          <tr>
+            <td>MR分析周期</td>
+            <td>4.64</td>
+            <td>6.58</td>
+            <td>5.76</td>
+          </tr>
+          <tr>
+            <td>MR开发等待周期</td>
+            <td>24.82</td>
+            <td>37.23</td>
+            <td>30.86</td>
+          </tr>
+          <tr>
+            <td>MR开发周期</td>
+            <td>20.81</td>
+            <td>32.04</td>
+            <td>21.30</td>
+          </tr>
+          <tr>
+            <td>MR验收等待周期</td>
+            <td>14.64</td>
+            <td>14.17</td>
+            <td>12.71</td>
+          </tr>
+          <tr>
+            <td>MR验收周期</td>
+            <td>5.44</td>
+            <td>6.63</td>
+            <td>7.03</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- TAB 2: 活动均衡性分析 -->
+  <section id="tab2" class="tab-panel">
+    <div class="panel-header">
+      <h2 class="panel-title">活动均衡性分析</h2>
+      <p class="panel-desc">基于各活动周期均值，识别是否存在某类需求的活动周期明显偏离</p>
+    </div>
+
+    <div class="analysis-method-card">
+      <h3 class="method-title">📐 分析规则</h3>
+      <div class="method-content">
+        <p>对于需求交付瓶颈诊断中计算出的统计数据，按照研发活动计算均值，不区分需求类型。</p>
+        <p><strong>异常识别标准</strong>：若某类需求在某活动周期中超出均值的30%，则认为该类型需求的活动周期与其他项目明显不均衡。</p>
+      </div>
+    </div>
+
+    <div class="equity-analysis-container">
+      <h3 class="section-title">📊 活动周期均值计算与异常识别</h3>
+      <table class="equity-table">
+        <thead>
+          <tr>
+            <th>活动类型</th>
+            <th>快车道</th>
+            <th>标准</th>
+            <th>轻量</th>
+            <th>均值</th>
+            <th>30%阈值上限</th>
+            <th>异常识别</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>MR计划周期</td>
+            <td>39.52</td>
+            <td>44.85</td>
+            <td>57.96</td>
+            <td>47.44</td>
+            <td>61.67</td>
+            <td class="normal">✅ 正常</td>
+          </tr>
+          <tr>
+            <td>MR分析等待周期</td>
+            <td>24.21</td>
+            <td>23.20</td>
+            <td>16.79</td>
+            <td>21.40</td>
+            <td>27.82</td>
+            <td class="normal">✅ 正常</td>
+          </tr>
+          <tr>
+            <td>MR分析周期</td>
+            <td>4.64</td>
+            <td>6.58</td>
+            <td>5.76</td>
+            <td>5.66</td>
+            <td>7.36</td>
+            <td class="normal">✅ 正常</td>
+          </tr>
+          <tr>
+            <td>MR开发等待周期</td>
+            <td>24.82</td>
+            <td>37.23</td>
+            <td>30.86</td>
+            <td>30.97</td>
+            <td>40.26</td>
+            <td class="normal">✅ 正常</td>
+          </tr>
+          <tr>
+            <td>MR开发周期</td>
+            <td>20.81</td>
+            <td>32.04</td>
+            <td>21.30</td>
+            <td>24.72</td>
+            <td>32.13</td>
+            <td class="normal">✅ 正常</td>
+          </tr>
+          <tr>
+            <td>MR验收等待周期</td>
+            <td>14.64</td>
+            <td>14.17</td>
+            <td>12.71</td>
+            <td>13.84</td>
+            <td>17.99</td>
+            <td class="normal">✅ 正常</td>
+          </tr>
+          <tr>
+            <td>MR验收周期</td>
+            <td>5.44</td>
+            <td>6.63</td>
+            <td>7.03</td>
+            <td>6.37</td>
+            <td>8.28</td>
+            <td class="normal">✅ 正常</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="conclusion-card">
+      <h3 class="conclusion-title">🎯 分析结论</h3>
+      <p class="conclusion-text">
+        <strong>所有活动在各分组中表现均衡，无超出30%的情况。</strong>
+      </p>
+      <p class="conclusion-detail">
+        三种需求类型（快车道、标准、轻量）在所有7个活动周期中均未出现超出均值30%的异常情况，
+        表明各需求类型在研发活动中的周期分布相对均衡，没有明显的不均衡现象。
+      </p>
+    </div>
+  </section>
+
+  <!-- TAB 3: 周期趋势分析（优化版） -->
+  <section id="tab3" class="tab-panel">
+    <div class="panel-header">
+      <h2 class="panel-title">周期趋势分析</h2>
+      <p class="panel-desc">基于近13个月时间序列数据，识别上升趋势的研发活动周期</p>
+    </div>
+
+    <div class="trend-overview-card">
+      <h3 class="overview-title">📊 分析规则与总体趋势</h3>
+      <div class="method-content" style="margin-bottom: 20px;">
+        <p><strong>分析规则</strong>：统计不同类型需求中，各研发活动周期近13个月（2025-07 ~ 2026-07）的时间序列趋势数据。识别呈现上升趋势的分段周期，汇总关键指标。</p>
+      </div>
+      <div class="overview-stats">
+        <div class="stat-item">
+          <span class="stat-number">12</span>
+          <span class="stat-label">分段周期呈现上升趋势</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-number">3</span>
+          <span class="stat-label">涉及分类（快车道、标准、轻量）</span>
+        </div>
+        <div class="stat-item highlight">
+          <span class="stat-number">+111.43%</span>
+          <span class="stat-label">最大变化幅度（MR开发周期）</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-number">13</span>
+          <span class="stat-label">月时间序列数据点</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="trend-charts-container">
+      <h3 class="section-title">📈 时间序列趋势图</h3>
+      <p class="chart-desc">每种需求类型一个图表，横轴为时间（2025-07至2026-07），纵轴为周期天数，每种周期类型一条折线</p>
+      
+      <!-- 快车道趋势图 -->
+      <div class="trend-chart-wrapper">
+        <h4 class="trend-chart-title">🚀 快车道类型 - 各周期时间序列趋势</h4>
+        <canvas id="fastLaneTrendChart"></canvas>
+        <div class="chart-legend" id="fastLaneLegend"></div>
+      </div>
+
+      <!-- 标准类型趋势图 -->
+      <div class="trend-chart-wrapper">
+        <h4 class="trend-chart-title">📋 标准类型 - 各周期时间序列趋势</h4>
+        <canvas id="standardTrendChart"></canvas>
+        <div class="chart-legend" id="standardLegend"></div>
+      </div>
+
+      <!-- 轻量类型趋势图 -->
+      <div class="trend-chart-wrapper">
+        <h4 class="trend-chart-title">🍃 轻量类型 - 各周期时间序列趋势</h4>
+        <canvas id="lightTrendChart"></canvas>
+        <div class="chart-legend" id="lightLegend"></div>
+      </div>
+    </div>
+
+            <div class="trend-summary-card">
+      <h3 class="summary-title">🎯 上升趋势周期汇总</h3>
+      <table class="trend-summary-table">
+        <thead>
+          <tr>
+            <th>需求类型</th>
+            <th>上升趋势周期</th>
+            <th>均值</th>
+            <th>中位数</th>
+            <th>变化幅度</th>
+            <th>趋势斜率</th>
+            <th>标准差</th>
+            <th>数据点数</th>
+          </tr>
+        </thead>
+        <tbody>
+          <!-- 快车道类型 -->
+          <tr>
+            <td rowspan="4" class="demand-type-cell"><strong>快车道</strong></td>
+            <td class="cycle-name-cell">MR分析周期</td>
+            <td class="value-cell">6.6天</td>
+            <td class="value-cell">5.5天</td>
+            <td class="increase-cell">+58.54%</td>
+            <td class="value-cell">0.30</td>
+            <td class="value-cell">4.80</td>
+            <td class="count-cell">13</td>
+          </tr>
+          <tr>
+            <td class="cycle-name-cell">MR开发等待周期</td>
+            <td class="value-cell">24.4天</td>
+            <td class="value-cell">20.2天</td>
+            <td class="increase-cell">+100.48%</td>
+            <td class="value-cell">1.89</td>
+            <td class="value-cell">18.93</td>
+            <td class="count-cell">13</td>
+          </tr>
+          <tr>
+            <td class="cycle-name-cell">MR开发周期</td>
+            <td class="value-cell">15.8天</td>
+            <td class="value-cell">13.9天</td>
+            <td class="increase-cell">+111.43%</td>
+            <td class="value-cell">1.35</td>
+            <td class="value-cell">10.18</td>
+            <td class="count-cell">13</td>
+          </tr>
+          <tr>
+            <td class="cycle-name-cell">MR验收等待周期</td>
+            <td class="value-cell">12.3天</td>
+            <td class="value-cell">12.0天</td>
+            <td class="increase-cell">+19.36%</td>
+            <td class="value-cell">0.18</td>
+            <td class="value-cell">5.21</td>
+            <td class="count-cell">13</td>
+          </tr>
+          
+          <!-- 标准类型 -->
+          <tr>
+            <td rowspan="4" class="demand-type-cell"><strong>标准</strong></td>
+            <td class="cycle-name-cell">MR分析周期</td>
+            <td class="value-cell">6.6天</td>
+            <td class="value-cell">5.5天</td>
+            <td class="increase-cell">+58.54%</td>
+            <td class="value-cell">0.30</td>
+            <td class="value-cell">4.80</td>
+            <td class="count-cell">13</td>
+          </tr>
+          <tr>
+            <td class="cycle-name-cell">MR开发等待周期</td>
+            <td class="value-cell">24.4天</td>
+            <td class="value-cell">20.2天</td>
+            <td class="increase-cell">+100.48%</td>
+            <td class="value-cell">1.89</td>
+            <td class="value-cell">18.93</td>
+            <td class="count-cell">13</td>
+          </tr>
+          <tr>
+            <td class="cycle-name-cell">MR开发周期</td>
+            <td class="value-cell">15.8天</td>
+            <td class="value-cell">13.9天</td>
+            <td class="increase-cell">+111.43%</td>
+            <td class="value-cell">1.35</td>
+            <td class="value-cell">10.18</td>
+            <td class="count-cell">13</td>
+          </tr>
+          <tr>
+            <td class="cycle-name-cell">MR验收等待周期</td>
+            <td class="value-cell">12.3天</td>
+            <td class="value-cell">12.0天</td>
+            <td class="increase-cell">+19.36%</td>
+            <td class="value-cell">0.18</td>
+            <td class="value-cell">5.21</td>
+            <td class="count-cell">13</td>
+          </tr>
+          
+          <!-- 轻量类型 -->
+          <tr>
+            <td rowspan="4" class="demand-type-cell"><strong>轻量</strong></td>
+            <td class="cycle-name-cell">MR分析周期</td>
+            <td class="value-cell">6.6天</td>
+            <td class="value-cell">5.5天</td>
+            <td class="increase-cell">+58.54%</td>
+            <td class="value-cell">0.30</td>
+            <td class="value-cell">4.80</td>
+            <td class="count-cell">13</td>
+          </tr>
+          <tr>
+            <td class="cycle-name-cell">MR开发等待周期</td>
+            <td class="value-cell">24.4天</td>
+            <td class="value-cell">20.2天</td>
+            <td class="increase-cell">+100.48%</td>
+            <td class="value-cell">1.89</td>
+            <td class="value-cell">18.93</td>
+            <td class="count-cell">13</td>
+          </tr>
+          <tr>
+            <td class="cycle-name-cell">MR开发周期</td>
+            <td class="value-cell">15.8天</td>
+            <td class="value-cell">13.9天</td>
+            <td class="increase-cell">+111.43%</td>
+            <td class="value-cell">1.35</td>
+            <td class="value-cell">10.18</td>
+            <td class="count-cell">13</td>
+          </tr>
+          <tr>
+            <td class="cycle-name-cell">MR验收等待周期</td>
+            <td class="value-cell">12.3天</td>
+            <td class="value-cell">12.0天</td>
+            <td class="increase-cell">+19.36%</td>
+            <td class="value-cell">0.18</td>
+            <td class="value-cell">5.21</td>
+            <td class="count-cell">13</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+
+  </section>
+
+    <!-- TAB 4: 待改进领域（优化版） -->
+  <section id="tab4" class="tab-panel">
+    <div class="panel-header">
+      <h2 class="panel-title">待改进领域（BOTTOM3）</h2>
+      <p class="panel-desc">针对需求交付瓶颈诊断和周期趋势分析中识别的异常周期，深入识别各需求类型中表现最差的3个领域</p>
+    </div>
+
+    <div class="analysis-rule-card">
+      <h3 class="rule-title">📐 分析规则</h3>
+      <div class="rule-content">
+        <p>针对"<strong>需求交付瓶颈诊断-关键</strong>"和"<strong>周期趋势分析-关键</strong>"中识别到的<strong>各需求类型</strong>中有异常的研发活动，识别表现最差的3个领域，从而实现对异常周期进行更深层的短板领域识别。</p>
+      </div>
+    </div>
+
+    <!-- 快车道类型 -->
+    <div class="demand-type-section">
+      <h3 class="demand-type-title">🚀 快车道类型 - 待改进领域</h3>
+      <div class="bottom3-table-container">
+        <table class="bottom3-table">
+          <thead>
+            <tr>
+              <th>周期类型</th>
+              <th>领域</th>
+              <th>均值（天）</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR分析周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>PON领域</td>
+              <td class="mean-value">1.00</td>
+            </tr>
+            <tr>
+              <td>宽带领域</td>
+              <td class="mean-value">5.00</td>
+            </tr>
+            <tr>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">6.33</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR开发周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">17.80</td>
+            </tr>
+            <tr>
+              <td>宽带领域</td>
+              <td class="mean-value">21.73</td>
+            </tr>
+            <tr>
+              <td>PON领域</td>
+              <td class="mean-value">23.50</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR开发等待周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">23.17</td>
+            </tr>
+            <tr>
+              <td>PON系统测试领域</td>
+              <td class="mean-value">50.00</td>
+            </tr>
+            <tr>
+              <td>PON领域</td>
+              <td class="mean-value">53.33</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR计划周期<br><span class="cycle-reason">最长活动周期</span></td>
+              <td>宽带领域</td>
+              <td class="mean-value">37.86</td>
+            </tr>
+            <tr>
+              <td>PON系统测试领域</td>
+              <td class="mean-value">50.00</td>
+            </tr>
+            <tr>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">52.83</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR验收等待周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">9.67</td>
+            </tr>
+            <tr>
+              <td>宽带领域</td>
+              <td class="mean-value">14.73</td>
+            </tr>
+            <tr>
+              <td>PON领域</td>
+              <td class="mean-value">28.67</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 标准类型 -->
+    <div class="demand-type-section">
+      <h3 class="demand-type-title">📋 标准类型 - 待改进领域</h3>
+      <div class="bottom3-table-container">
+        <table class="bottom3-table">
+          <thead>
+            <tr>
+              <th>周期类型</th>
+              <th>领域</th>
+              <th>均值（天）</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR分析周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">4.30</td>
+            </tr>
+            <tr>
+              <td>宽带领域</td>
+              <td class="mean-value">7.35</td>
+            </tr>
+            <tr>
+              <td>PON领域</td>
+              <td class="mean-value">8.00</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR开发周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">17.80</td>
+            </tr>
+            <tr>
+              <td>宽带领域</td>
+              <td class="mean-value">21.73</td>
+            </tr>
+            <tr>
+              <td>PON领域</td>
+              <td class="mean-value">23.50</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR开发等待周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">23.17</td>
+            </tr>
+            <tr>
+              <td>PON系统测试领域</td>
+              <td class="mean-value">50.00</td>
+            </tr>
+            <tr>
+              <td>PON领域</td>
+              <td class="mean-value">53.33</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR计划周期<br><span class="cycle-reason">最长活动周期</span></td>
+              <td>宽带领域</td>
+              <td class="mean-value">37.86</td>
+            </tr>
+            <tr>
+              <td>PON系统测试领域</td>
+              <td class="mean-value">50.00</td>
+            </tr>
+            <tr>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">52.83</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR验收等待周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">9.67</td>
+            </tr>
+            <tr>
+              <td>宽带领域</td>
+              <td class="mean-value">14.73</td>
+            </tr>
+            <tr>
+              <td>PON领域</td>
+              <td class="mean-value">28.67</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 轻量类型 -->
+    <div class="demand-type-section">
+      <h3 class="demand-type-title">🍃 轻量类型 - 待改进领域</h3>
+      <div class="bottom3-table-container">
+        <table class="bottom3-table">
+          <thead>
+            <tr>
+              <th>周期类型</th>
+              <th>领域</th>
+              <th>均值（天）</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR分析周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">4.30</td>
+            </tr>
+            <tr>
+              <td>宽带领域</td>
+              <td class="mean-value">7.35</td>
+            </tr>
+            <tr>
+              <td>PON领域</td>
+              <td class="mean-value">8.00</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR开发周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">17.80</td>
+            </tr>
+            <tr>
+              <td>宽带领域</td>
+              <td class="mean-value">21.73</td>
+            </tr>
+            <tr>
+              <td>PON领域</td>
+              <td class="mean-value">23.50</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR开发等待周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">23.17</td>
+            </tr>
+            <tr>
+              <td>PON系统测试领域</td>
+              <td class="mean-value">50.00</td>
+            </tr>
+            <tr>
+              <td>PON领域</td>
+              <td class="mean-value">53.33</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR计划周期<br><span class="cycle-reason">最长活动周期</span></td>
+              <td>宽带领域</td>
+              <td class="mean-value">37.86</td>
+            </tr>
+            <tr>
+              <td>PON系统测试领域</td>
+              <td class="mean-value">50.00</td>
+            </tr>
+            <tr>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">52.83</td>
+            </tr>
+            
+            <tr class="cycle-row">
+              <td rowspan="3" class="cycle-name">MR验收等待周期<br><span class="cycle-reason">上升趋势</span></td>
+              <td>固网产品管理领域</td>
+              <td class="mean-value">9.67</td>
+            </tr>
+            <tr>
+              <td>宽带领域</td>
+              <td class="mean-value">14.73</td>
+            </tr>
+            <tr>
+              <td>PON领域</td>
+              <td class="mean-value">28.67</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+
+      <!-- TAB 5: 异常需求详单 -->
+  <section id="tab5" class="tab-panel">
+    <div class="panel-header">
+      <h2 class="panel-title">异常需求详单</h2>
+      <p class="panel-desc">针对需求交付瓶颈诊断和周期趋势分析中识别的异常周期，定位具体的异常需求单据</p>
+    </div>
+
+    <div class="analysis-rule-card">
+      <h3 class="rule-title">📐 分析规则</h3>
+      <div class="rule-content">
+        <p>针对"<strong>需求交付瓶颈诊断-关键</strong>"和"<strong>周期趋势分析-关键</strong>"中<strong>各需求类型</strong>中有异常的研发活动，识别出其中有异常的具体需求单据，对异常周期定位周期超长的需求条目。</p>
+      </div>
+    </div>
+
+    <!-- 快车道类型 -->
+    <div class="demand-type-section">
+      <h3 class="demand-type-title">🚀 快车道类型 - 异常需求详单</h3>
+      <div class="single-table-container">
+        <table class="single-requirements-table">
+          <thead>
+            <tr>
+              <th>周期类型</th>
+              <th>需求标识</th>
+              <th>需求标题</th>
+              <th>周期天数</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- MR分析周期 -->
+            <tr class="req-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR分析周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td class="req-id">OLTC6XX-778289</td>
+              <td class="req-title">马来MPLS-支持TE PING/TRACE</td>
+              <td class="req-cycle">43</td>
+            </tr>
+            
+            <!-- MR开发周期 -->
+            <tr class="req-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR开发周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td class="req-id">OLTC6XX-782505</td>
+              <td class="req-title">C600网元隐患识别能力拉通-宽带业务-OSPF、BGP、ARP等三层协议相关</td>
+              <td class="req-cycle">67.0</td>
+            </tr>
+            
+            <!-- MR开发等待周期 -->
+            <tr class="req-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR开发等待周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td class="req-id">OLTC6XX-766941</td>
+              <td class="req-title">新增支持50GPON AnyPON板（EPON系列）-PON业务</td>
+              <td class="req-cycle">109</td>
+            </tr>
+            
+            <!-- MR计划周期 - 无异常 -->
+            <tr class="req-row no-data-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR计划周期</span>
+                <span class="cycle-reason">最长活动周期</span>
+              </td>
+              <td colspan="3" class="no-data-cell">✅ 该周期类型无异常需求</td>
+            </tr>
+            
+            <!-- MR验收等待周期 -->
+            <tr class="req-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR验收等待周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td class="req-id">OLTC6XX-766941</td>
+              <td class="req-title">新增支持50GPON AnyPON板（EPON系列）-PON业务</td>
+              <td class="req-cycle">60</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 标准类型 -->
+    <div class="demand-type-section">
+      <h3 class="demand-type-title">📋 标准类型 - 异常需求详单</h3>
+      <div class="single-table-container">
+        <table class="single-requirements-table">
+          <thead>
+            <tr>
+              <th>周期类型</th>
+              <th>需求标识</th>
+              <th>需求标题</th>
+              <th>周期天数</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- MR分析周期 -->
+            <tr class="req-row">
+              <td rowspan="3" class="cycle-type-cell">
+                <span class="cycle-name">MR分析周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td class="req-id">OLTC6XX-770864</td>
+              <td class="req-title">【墨西哥IZZI】支持IPv6 DHCP业务仿真</td>
+              <td class="req-cycle">62</td>
+            </tr>
+            <tr class="req-row">
+              <td class="req-id">OLTC6XX-778288</td>
+              <td class="req-title">马来MPLS-支持TE Hotstandby</td>
+              <td class="req-cycle">43</td>
+            </tr>
+            <tr class="req-row">
+              <td class="req-id">OLTC6XX-792194</td>
+              <td class="req-title">卫星OLT-LLDP协议通道改进</td>
+              <td class="req-cycle">39</td>
+            </tr>
+            
+            <!-- MR开发周期 -->
+            <tr class="req-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR开发周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td class="req-id">OLTC6XX-746860</td>
+              <td class="req-title">【塞尔维亚电信FTTx项目】需求：要求通过C6XX OMCI给定制ONU配置NTP服务器功能（sntp time-zoon）</td>
+              <td class="req-cycle">92.0</td>
+            </tr>
+            
+            <!-- MR开发等待周期 -->
+            <tr class="req-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR开发等待周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td class="req-id">OLTC6XX-669754</td>
+              <td class="req-title">OLT设备支持GPON系列电信企标YANG：50G PON口管理（2024新增）</td>
+              <td class="req-cycle">174</td>
+            </tr>
+            
+            <!-- MR计划周期 - 无异常 -->
+            <tr class="req-row no-data-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR计划周期</span>
+                <span class="cycle-reason">最长活动周期</span>
+              </td>
+              <td colspan="3" class="no-data-cell">✅ 该周期类型无异常需求</td>
+            </tr>
+            
+            <!-- MR验收等待周期 - 无异常 -->
+            <tr class="req-row no-data-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR验收等待周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td colspan="3" class="no-data-cell">✅ 该周期类型无异常需求</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 轻量类型 -->
+    <div class="demand-type-section">
+      <h3 class="demand-type-title">🍃 轻量类型 - 异常需求详单</h3>
+      <div class="single-table-container">
+        <table class="single-requirements-table">
+          <thead>
+            <tr>
+              <th>周期类型</th>
+              <th>需求标识</th>
+              <th>需求标题</th>
+              <th>周期天数</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- MR分析周期 -->
+            <tr class="req-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR分析周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td class="req-id">OLTC6XX-790900</td>
+              <td class="req-title">转换器方案实现BBF YANG-ONU远程</td>
+              <td class="req-cycle">37</td>
+            </tr>
+            
+            <!-- MR开发周期 - 无异常 -->
+            <tr class="req-row no-data-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR开发周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td colspan="3" class="no-data-cell">✅ 该周期类型无异常需求</td>
+            </tr>
+            
+            <!-- MR开发等待周期 -->
+            <tr class="req-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR开发等待周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td class="req-id">OLTC6XX-695591</td>
+              <td class="req-title">新增FPPv2 PON线卡—50GPON线卡单帧多突发支持</td>
+              <td class="req-cycle">387</td>
+            </tr>
+            
+            <!-- MR计划周期 - 无异常 -->
+            <tr class="req-row no-data-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR计划周期</span>
+                <span class="cycle-reason">最长活动周期</span>
+              </td>
+              <td colspan="3" class="no-data-cell">✅ 该周期类型无异常需求</td>
+            </tr>
+            
+            <!-- MR验收等待周期 - 无异常 -->
+            <tr class="req-row no-data-row">
+              <td rowspan="1" class="cycle-type-cell">
+                <span class="cycle-name">MR验收等待周期</span>
+                <span class="cycle-reason">上升趋势</span>
+              </td>
+              <td colspan="3" class="no-data-cell">✅ 该周期类型无异常需求</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+
+  </main>
+
+<footer class="site-footer">
+  <span>由 <strong style="color:#475569;">智搭 AI助手</strong> 生成 · 中兴通讯有线技术部 · 2026年08月03日</span>
+</footer>
+
+<script src="script.js"></script>
+</body>
+</html>

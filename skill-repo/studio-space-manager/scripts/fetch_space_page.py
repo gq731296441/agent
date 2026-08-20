@@ -143,8 +143,8 @@ def fetch_space_content(space_id, page_id, user_id, token):
             bo = data.get("bo", {})
             html_content = bo.get("contentBody", "")
             title = bo.get("title", "")
-
-            return {"status": "success", "html_content": html_content, "title": title}
+            parentPath = bo.get("parentPath","")
+            return {"status": "success", "html_content": html_content, "title": title, "parentPath": parentPath}
         else:
             error_msg = code_info.get("msg", "未知错误")
             return {
@@ -186,6 +186,7 @@ def fetch_space_page(space_id, page_id, user_id, token):
             - html_content: 原始 HTML 内容（推荐用于编辑）
             - space_id: 空间 ID
             - page_id: 页面 ID
+            - parentPath: 页面路径
     """
     # 获取 HTML 内容（不做任何转换）
     content_result = fetch_space_content(space_id, page_id, user_id, token)
@@ -195,7 +196,7 @@ def fetch_space_page(space_id, page_id, user_id, token):
 
     html_content = content_result.get("html_content", "")
     title = content_result.get("title", "")
-
+    parent_path = content_result.get("parentPath", "")
     if not html_content:
         return {"status": "error", "message": "获取的内容为空"}
 
@@ -205,6 +206,7 @@ def fetch_space_page(space_id, page_id, user_id, token):
         "html_content": html_content,  # ⭐ 原始 HTML，用于安全编辑（无格式损失）
         "space_id": space_id,
         "page_id": page_id,
+        "parent_path": parent_path
     }
 
 

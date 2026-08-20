@@ -7,8 +7,6 @@ HTML工具模块
 ``pip install beautifulsoup4`` 并重试导入；仍失败则返回原 HTML，不阻断保存流程。
 """
 
-from __future__ import annotations
-
 import logging
 
 from _pip_retry import ensure_import
@@ -28,7 +26,11 @@ def _import_bs4():
 
 def html_add_ai_attr(html: str, ai_app_id: str = "studio-space-manager") -> str:
     """
-    为HTML内容添加AI标识属性（简化版本，参考Java实现）
+    为HTML内容添加AI标识属性（迭代版本，避免大文档递归溢出）
+
+    策略：将原始 HTML 包装在一个临时容器 `<div id='__ai_wrapper__'>` 中，再解析。
+    这可以避免当 HTML 中内嵌完整 HTML 文档时，BeautifulSoup 错将其当作根节点。
+    处理完后返回容器的内部 HTML（`decode_contents()`），即注入后的原始内容。
 
     优先保证可用：依赖缺失时会尝试自动安装后重试；最终仍不可用时返回原始 HTML。
     """
@@ -49,39 +51,38 @@ def html_add_ai_attr(html: str, ai_app_id: str = "studio-space-manager") -> str:
 
     BeautifulSoup, Tag = bs4_pair
 
-    def text_add_ai_attr(element: Tag, app_id: str) -> None:
-        if not isinstance(element, Tag):
-            return
-
-        tag_name = element.name.lower()
-
-        if element.get("class-name") == "plantuml-source":
-            return
-
-        if tag_name == TAG_P or tag_name in TAG_H:
-            element["data-ai"] = app_id
-
-        if element.children:
-            for child in element.children:
-                if isinstance(child, Tag):
-                    text_add_ai_attr(child, app_id)
-
     try:
-        soup = BeautifulSoup(html, "html.parser")
-        body = soup.body
+        # 使用包装器避免内嵌文档干扰结构
+        wrapper_html = f"<div id='__ai_wrapper__'>{html}</div>"
+        soup = BeautifulSoup(wrapper_html, "html.parser")
+        wrapper = soup.find('div', id='__ai_wrapper__')
+        if wrapper is None:
+            logger.warning("包装器未找到，回退直接返回原始 HTML")
+            return html
 
-        if body is None:
-            body = soup
-
-        for child in body.children:
+        # 迭代遍历 wrapper 的直接子元素
+        stack = []
+        for child in list(wrapper.children):
             if isinstance(child, Tag):
-                text_add_ai_attr(child, ai_app_id)
+                stack.append(child)
 
-        if soup.body:
-            return soup.body.decode_contents()
-        if soup.html:
-            return soup.html.decode_contents()
-        return str(soup)
+        while stack:
+            elem = stack.pop()
+            # 跳过特定类
+            if elem.get("class-name") == "plantuml-source":
+                continue
+
+            tag_name = (elem.name or "").lower()
+            if tag_name == TAG_P or tag_name in TAG_H:
+                elem["data-ai"] = ai_app_id
+
+            # 将当前元素的子元素入栈
+            for child in list(elem.children):
+                if isinstance(child, Tag):
+                    stack.append(child)
+
+        # 返回包装器的内部 HTML
+        return wrapper.decode_contents()
 
     except Exception as error:
         logger.error("添加AI标识失败: %s", error)

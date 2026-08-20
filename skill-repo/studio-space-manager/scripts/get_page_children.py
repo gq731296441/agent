@@ -84,8 +84,9 @@ def get_page_children(space_id, content_id, json_output=False):
     # 构建请求URL
     timestamp = int(time.time() * 1000)
     system_param = build_system_param("space")
+    base_url = build_icenter_api_url("/zte-rd-icenter-contents/content/subtree/")
     url = (
-        build_icenter_api_url("/zte-rd-icenter-contents/content/subtree/")
+        f"{base_url}"
         f"?contentId={content_id}"
         f"&system={system_param}"
         f"&v={timestamp}"
@@ -266,8 +267,9 @@ def get_all_descendants(
 
     # 构建请求URL
     system_param = build_system_param("space")
+    base_url = build_icenter_api_url("/zte-rd-icenter-contents/content/subtree/")
     url = (
-        build_icenter_api_url("/zte-rd-icenter-contents/content/subtree/")
+        f"{base_url}"
         f"?contentId={content_id}"
         f"&system={system_param}"
         f"&v={timestamp}"

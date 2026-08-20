@@ -56,7 +56,7 @@ def parse_page_link(url: str) -> Optional[Tuple[str, str]]:
 
 def build_page_url(space_id: str, page_id: str) -> str:
     """拼接页面访问链接。"""
-    return f"https://i.zte.com.cn/index/ispace/#/space/{space_id}/wiki/page/{page_id}/view"
+    return f"https://i.zte.com.cn/index/ispace/#/space/{space_id}/wiki/page/{page_id}/view?useNewPath=true"
 
 
 def fetch_page_content(space_id: str, page_id: str, headers: Dict[str, str]) -> Dict[str, Any]:

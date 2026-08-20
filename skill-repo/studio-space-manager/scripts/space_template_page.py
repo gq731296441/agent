@@ -264,7 +264,7 @@ def create_from_template(
     if page_id:
         link = (
             f"https://i.zte.com.cn/index/ispace/#/space/{space_id}/wiki/page/"
-            f"{page_id}/view"
+            f"{page_id}/view?useNewPath=true"
         )
     return {
         "status": "success",

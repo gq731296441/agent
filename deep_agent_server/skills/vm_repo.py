@@ -7,6 +7,7 @@
 import io
 import logging
 import os
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -368,6 +369,33 @@ async def sync_catalog_from_vm_repo() -> dict:
     return {"synced": len(entries), "skill_ids": present_ids}
 
 
+def _parse_version(v: str | None) -> tuple:
+    """版本号转可比较元组，如 '4.0.8' → (4, 0, 8)。"""
+    parts = re.findall(r"\d+", v or "")
+    return tuple(int(p) for p in parts) or (0,)
+
+
+def _project_skill_is_newer(project_dir: Path, vm_dir: Path) -> bool:
+    """判断项目 skill-repo 中的 skill 是否比 VM 副本更新。
+
+    规则：SKILL.md frontmatter 版本更高 → 更新；
+    版本相同但项目文件 mtime 更新 → 更新（改了描述/tags 未升版本的情况）。
+    """
+    src_md = project_dir / "SKILL.md"
+    dst_md = vm_dir / "SKILL.md"
+    try:
+        src_meta = parse_skill_md(str(project_dir))
+        dst_meta = parse_skill_md(str(vm_dir))
+        src_v = _parse_version(src_meta.version if src_meta else "")
+        dst_v = _parse_version(dst_meta.version if dst_meta else "")
+        if src_v != dst_v:
+            return src_v > dst_v
+        return src_md.stat().st_mtime > dst_md.stat().st_mtime
+    except Exception as e:
+        logger.warning(f"[VMMigrate] 版本比较失败，默认不覆盖 {project_dir.name}: {e}")
+        return False
+
+
 async def migrate_non_builtin_skills() -> dict:
     """首次部署：将项目 skill-repo/ 中非内置 skill 迁移到 VM .skill-repo/。
 
@@ -398,15 +426,17 @@ async def migrate_non_builtin_skills() -> dict:
 
         vm_target = vm_repo / skill_id
         if vm_target.is_dir() and (vm_target / "SKILL.md").is_file():
-            skipped += 1
-            continue
+            # 已存在：仅当项目源更新（版本更高，或版本相同但文件更新）时覆盖，
+            # 否则跳过，避免平台升级的 SKILL.md 永远不同步到 VM
+            if not _project_skill_is_newer(child, vm_target):
+                skipped += 1
+                continue
+            shutil.rmtree(vm_target)
 
         try:
-            if vm_target.exists():
-                shutil.rmtree(vm_target)
             shutil.copytree(child, vm_target)
             migrated += 1
-            logger.info(f"[VMMigrate] 已迁移: {skill_id}")
+            logger.info(f"[VMMigrate] 已迁移/升级: {skill_id}")
         except Exception as e:
             errors += 1
             logger.error(f"[VMMigrate] 迁移失败 {skill_id}: {e}")

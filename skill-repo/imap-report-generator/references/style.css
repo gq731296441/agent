@@ -1,0 +1,1318 @@
+/* ===== CSS变量定义 - 设计系统 ===== */
+:root {
+  /* 主色调 */
+  --primary-blue: #1e3a8a;
+  --primary-blue-light: #3b82f6;
+  --accent-cyan: #0891b2;
+  --accent-orange: #ea580c;
+  --accent-red: #dc2626;
+  --accent-green: #16a34a;
+  
+  /* 中性色 */
+  --bg-light: #f8fafc;
+  --bg-white: #ffffff;
+  --text-dark: #1e293b;
+  --text-medium: #475569;
+  --text-light: #64748b;
+  --border-color: #e2e8f0;
+  
+  /* 需求类型颜色 */
+  --fast-lane-color: #2563eb;
+  --standard-color: #7c3aed;
+  --light-color: #059669;
+  
+  /* 间距 */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+  
+  /* 圆角 */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  
+  /* 阴影 */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+}
+
+/* ===== 全局重置 ===== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background-color: var(--bg-light);
+  color: var(--text-dark);
+  line-height: 1.6;
+}
+
+/* ===== 头部样式 ===== */
+.report-header {
+  background: linear-gradient(135deg, var(--primary-blue) 0%, var(--accent-cyan) 100%);
+  color: white;
+  padding: var(--spacing-xl) var(--spacing-lg);
+  text-align: center;
+}
+
+.header-content {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.report-title {
+  font-size: 2.5rem;
+  font-weight: 700;
+  margin-bottom: var(--spacing-sm);
+}
+
+.report-project {
+  font-size: 1.2rem;
+  opacity: 0.95;
+  margin-bottom: var(--spacing-xs);
+}
+
+.report-daterange {
+  font-size: 1rem;
+  opacity: 0.9;
+  margin-bottom: var(--spacing-md);
+}
+
+.report-subtitle {
+  font-size: 1.1rem;
+  opacity: 0.9;
+  margin-bottom: var(--spacing-md);
+}
+
+.report-meta {
+  display: flex;
+  justify-content: center;
+  gap: var(--spacing-lg);
+  flex-wrap: wrap;
+}
+
+.meta-item {
+  background: rgba(255, 255, 255, 0.15);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+}
+
+/* ===== TAB导航 ===== */
+.tab-navigation {
+  background: var(--bg-white);
+  border-bottom: 2px solid var(--border-color);
+  padding: 0 var(--spacing-md);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: transparent;
+  border: none;
+  border-bottom: 3px solid transparent;
+  cursor: pointer;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--text-medium);
+  transition: all 0.3s ease;
+  flex: 0 0 auto;
+}
+
+.tab-btn:hover {
+  color: var(--primary-blue);
+  background: rgba(59, 130, 246, 0.05);
+}
+
+.tab-btn.active {
+  color: var(--primary-blue);
+  border-bottom-color: var(--primary-blue);
+}
+
+.tab-icon {
+  font-size: 1.2rem;
+}
+
+/* ===== 主内容区 ===== */
+.report-content {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: var(--spacing-lg);
+}
+
+.tab-panel {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+
+.tab-panel.active {
+  display: block;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.panel-header {
+  margin-bottom: var(--spacing-lg);
+}
+
+.panel-title {
+  font-size: 1.8rem;
+  color: var(--primary-blue);
+  margin-bottom: var(--spacing-xs);
+}
+
+.panel-desc {
+  color: var(--text-light);
+  font-size: 1rem;
+}
+
+/* ===== 关键发现卡片 ===== */
+.key-findings-card {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  margin-bottom: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+  border-left: 4px solid var(--accent-orange);
+}
+
+.findings-title {
+  font-size: 1.3rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+}
+
+.key-findings-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.key-findings-table th,
+.key-findings-table td {
+  padding: var(--spacing-md);
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.key-findings-table th {
+  background: var(--bg-light);
+  font-weight: 600;
+  color: var(--text-dark);
+}
+
+.key-findings-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* ===== 图表容器 ===== */
+.chart-container {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  margin-bottom: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.chart-title {
+  font-size: 1.3rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+}
+
+#cycleComparisonChart {
+  width: 100%;
+  height: 400px;
+  background: var(--bg-light);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+}
+
+.chart-legend {
+  display: flex;
+  justify-content: center;
+  gap: var(--spacing-lg);
+  margin-top: var(--spacing-md);
+  flex-wrap: wrap;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: 0.9rem;
+}
+
+.legend-color {
+  width: 20px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.legend-color.fast-lane {
+  background: var(--fast-lane-color);
+}
+
+.legend-color.standard {
+  background: var(--standard-color);
+}
+
+.legend-color.light {
+  background: var(--light-color);
+}
+
+/* ===== 数据表格 ===== */
+.data-table-container {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.table-title {
+  font-size: 1.3rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+}
+
+.data-table th,
+.data-table td {
+  padding: var(--spacing-md);
+  text-align: center;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.data-table th {
+  font-weight: 600;
+  color: var(--text-dark);
+}
+
+.data-table th.activity-col {
+  text-align: left;
+  background: var(--bg-light);
+}
+
+/* 详细周期数据表格表头样式 - 与折线图颜色保持一致 */
+.data-table th.col-0 {
+  background: rgba(37, 99, 235, 0.15);
+}
+
+.data-table th.col-1 {
+  background: rgba(124, 58, 237, 0.15);
+}
+
+.data-table th.col-2 {
+  background: rgba(5, 150, 105, 0.15);
+}
+
+.data-table th.col-3 {
+  background: rgba(220, 38, 38, 0.15);
+}
+
+.data-table th.col-4 {
+  background: rgba(234, 88, 12, 0.15);
+}
+
+.data-table th.col-5 {
+  background: rgba(8, 145, 178, 0.15);
+}
+
+.data-table th.col-6 {
+  background: rgba(219, 39, 119, 0.15);
+}
+
+.data-table th.col-7 {
+  background: rgba(79, 70, 229, 0.15);
+}
+
+.data-table th.col-8 {
+  background: rgba(14, 165, 233, 0.15);
+}
+
+.data-table th.col-9 {
+  background: rgba(101, 163, 13, 0.15);
+}
+
+.data-table tbody tr:hover {
+  background: rgba(59, 130, 246, 0.05);
+}
+
+.data-table td:first-child {
+  text-align: left;
+  font-weight: 500;
+}
+
+/* ===== 分析方法卡片 ===== */
+.analysis-method-card {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  margin-bottom: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+  border-left: 4px solid var(--accent-cyan);
+}
+
+.method-title {
+  font-size: 1.3rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+}
+
+.method-content p {
+  color: var(--text-medium);
+  margin-bottom: var(--spacing-sm);
+}
+
+/* ===== 均衡性分析表格 ===== */
+.equity-analysis-container {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  margin-bottom: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.section-title {
+  font-size: 1.3rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+}
+
+.equity-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.equity-table th,
+.equity-table td {
+  padding: var(--spacing-sm) var(--spacing-md);
+  text-align: center;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.equity-table th {
+  background: var(--bg-light);
+  font-weight: 600;
+  color: var(--text-dark);
+}
+
+.equity-table td:first-child {
+  text-align: left;
+  font-weight: 500;
+}
+
+.equity-table .normal {
+  color: var(--accent-green);
+  font-weight: 600;
+}
+
+.equity-table tr:hover {
+  background: rgba(59, 130, 246, 0.05);
+}
+
+/* ===== 结论卡片 ===== */
+.conclusion-card {
+  background: linear-gradient(135deg, rgba(22, 163, 74, 0.1) 0%, rgba(5, 150, 105, 0.1) 100%);
+  border: 2px solid var(--accent-green);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.conclusion-title {
+  font-size: 1.3rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+}
+
+.conclusion-text {
+  font-size: 1.1rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-sm);
+}
+
+.conclusion-detail {
+  color: var(--text-medium);
+  line-height: 1.8;
+}
+
+/* 分析结论列表样式 */
+.conclusion-list {
+  list-style-type: disc;
+  padding-left: var(--spacing-xl);
+  margin: var(--spacing-md) 0;
+}
+
+.conclusion-list li {
+  margin-bottom: var(--spacing-sm);
+  line-height: 1.6;
+  color: var(--text-dark);
+}
+
+.conclusion-list li:first-child {
+  margin-top: 0;
+}
+
+.conclusion-list li:last-child {
+  margin-bottom: 0;
+}
+
+/* ===== 趋势概览卡片 ===== */
+.trend-overview-card {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  margin-bottom: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.overview-title {
+  font-size: 1.3rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+}
+
+.overview-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: var(--spacing-md);
+}
+
+.stat-item {
+  background: var(--bg-light);
+  padding: var(--spacing-md);
+  border-radius: var(--radius-md);
+  text-align: center;
+}
+
+.stat-number {
+  display: block;
+  font-size: 2rem;
+  font-weight: 700;
+  color: var(--primary-blue);
+  margin-bottom: var(--spacing-xs);
+}
+
+.stat-item.highlight .stat-number {
+  color: var(--accent-orange);
+}
+
+.stat-label {
+  font-size: 0.9rem;
+  color: var(--text-medium);
+}
+
+/* ===== 趋势详情 ===== */
+.trend-details-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+}
+
+.trend-type-card {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.trend-type-title {
+  font-size: 1.2rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+}
+
+.trend-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.trend-table th,
+.trend-table td {
+  padding: var(--spacing-sm) var(--spacing-md);
+  text-align: center;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.trend-table th {
+  background: var(--bg-light);
+  font-weight: 600;
+  color: var(--text-dark);
+}
+
+.trend-table .trend-up {
+  background: rgba(234, 88, 12, 0.05);
+}
+
+.trend-table .increase {
+  color: var(--accent-orange);
+  font-weight: 600;
+}
+
+/* ===== 改进领域 ===== */
+.improvement-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+}
+
+.improvement-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+  gap: var(--spacing-md);
+}
+
+.improvement-card {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-md);
+  box-shadow: var(--shadow-md);
+  transition: transform 0.3s ease;
+}
+
+.improvement-card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-lg);
+}
+
+.improvement-card-title {
+  font-size: 1.1rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-xs);
+}
+
+.improvement-subtitle {
+  font-size: 0.9rem;
+  color: var(--text-light);
+  margin-bottom: var(--spacing-md);
+}
+
+.bottom-list {
+  list-style: none;
+  counter-reset: bottom-counter;
+}
+
+.bottom-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.bottom-item:last-child {
+  border-bottom: none;
+}
+
+.rank {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: var(--accent-orange);
+  color: white;
+  border-radius: 50%;
+  font-size: 0.8rem;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.field-name {
+  flex: 1;
+  font-weight: 500;
+  color: var(--text-dark);
+}
+
+.field-value {
+  font-size: 0.85rem;
+  color: var(--text-light);
+  white-space: nowrap;
+}
+
+/* ===== 总结容器 ===== */
+.summary-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+}
+
+.summary-card {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.summary-card.highlight-red {
+  border-left: 4px solid var(--accent-red);
+  background: linear-gradient(135deg, rgba(220, 38, 38, 0.05) 0%, rgba(234, 88, 12, 0.05) 100%);
+}
+
+.summary-card.highlight-blue {
+  border-left: 4px solid var(--accent-cyan);
+  background: linear-gradient(135deg, rgba(8, 145, 178, 0.05) 0%, rgba(59, 130, 246, 0.05) 100%);
+}
+
+.summary-title {
+  font-size: 1.3rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+}
+
+.summary-list {
+  list-style: none;
+}
+
+.summary-list li {
+  padding: var(--spacing-sm) 0;
+  color: var(--text-medium);
+  line-height: 1.8;
+}
+
+.summary-list li strong {
+  color: var(--text-dark);
+}
+
+.action-list {
+  list-style: none;
+  counter-reset: action-counter;
+}
+
+.action-item {
+  display: flex;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md) 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.action-item:last-child {
+  border-bottom: none;
+}
+
+.action-icon {
+  font-size: 1.5rem;
+  flex-shrink: 0;
+}
+
+.action-content {
+  flex: 1;
+}
+
+.action-content strong {
+  display: block;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-xs);
+  font-size: 1.05rem;
+}
+
+.action-content p {
+  color: var(--text-medium);
+  line-height: 1.7;
+}
+
+/* ===== 优先级矩阵 ===== */
+.priority-matrix {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.matrix-title {
+  font-size: 1.3rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+  text-align: center;
+}
+
+.matrix-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--spacing-md);
+}
+
+.matrix-cell {
+  padding: var(--spacing-md);
+  border-radius: var(--radius-md);
+  min-height: 150px;
+}
+
+.matrix-cell h4 {
+  font-size: 1rem;
+  margin-bottom: var(--spacing-sm);
+  color: var(--text-dark);
+}
+
+.matrix-cell ul {
+  list-style: none;
+  padding-left: 0;
+}
+
+.matrix-cell li {
+  padding: var(--spacing-xs) 0;
+  color: var(--text-medium);
+  font-size: 0.9rem;
+}
+
+.matrix-cell li::before {
+  content: "• ";
+  color: var(--primary-blue);
+  font-weight: bold;
+}
+
+.matrix-cell.high-impact.high-urgency {
+  background: linear-gradient(135deg, rgba(220, 38, 38, 0.1) 0%, rgba(234, 88, 12, 0.1) 100%);
+  border: 2px solid var(--accent-red);
+}
+
+.matrix-cell.high-impact.medium-urgency {
+  background: linear-gradient(135deg, rgba(234, 88, 12, 0.1) 0%, rgba(245, 158, 11, 0.1) 100%);
+  border: 2px solid var(--accent-orange);
+}
+
+.matrix-cell.medium-impact.high-urgency {
+  background: linear-gradient(135deg, rgba(234, 88, 12, 0.05) 0%, rgba(220, 38, 38, 0.05) 100%);
+  border: 2px solid rgba(220, 38, 38, 0.3);
+}
+
+.matrix-cell.medium-impact.medium-urgency {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.05) 0%, rgba(234, 88, 12, 0.05) 100%);
+  border: 2px solid rgba(234, 88, 12, 0.3);
+}
+
+/* ===== 页脚 ===== */
+.site-footer {
+  text-align: center;
+  padding: var(--spacing-xl) var(--spacing-lg);
+  color: var(--text-light);
+  font-size: 0.9rem;
+  border-top: 1px solid var(--border-color);
+  margin-top: var(--spacing-xl);
+  background: var(--bg-white);
+}
+
+/* ===== 响应式设计 ===== */
+@media (max-width: 768px) {
+  .report-title {
+    font-size: 1.8rem;
+  }
+  
+  .tab-navigation {
+    overflow-x: auto;
+    white-space: nowrap;
+  }
+  
+  .tab-btn {
+    padding: var(--spacing-sm) var(--spacing-md);
+    font-size: 0.85rem;
+  }
+  
+  .report-content {
+    padding: var(--spacing-sm);
+  }
+  
+  .panel-title {
+    font-size: 1.4rem;
+  }
+  
+  .key-findings-table,
+  .data-table,
+  .equity-table,
+  .trend-table {
+    font-size: 0.8rem;
+    overflow-x: auto;
+    display: block;
+  }
+  
+  .improvement-grid,
+  .matrix-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .overview-stats {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ===== TAB 3: 趋势图表容器 ===== */
+.trend-charts-container {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  margin-bottom: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.chart-desc {
+  color: var(--text-medium);
+  font-size: 0.95rem;
+  margin-bottom: var(--spacing-md);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: var(--bg-light);
+  border-left: 3px solid var(--accent-cyan);
+  border-radius: var(--radius-sm);
+}
+
+.trend-chart-wrapper {
+  margin-bottom: var(--spacing-xl);
+}
+
+.trend-chart-wrapper:last-child {
+  margin-bottom: 0;
+}
+
+.trend-chart-title {
+  font-size: 1.2rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+  padding-bottom: var(--spacing-sm);
+  border-bottom: 2px solid var(--border-color);
+}
+
+.trend-chart-wrapper canvas {
+  width: 100%;
+  height: 350px;
+  background: var(--bg-light);
+  border-radius: var(--radius-md);
+  padding: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+}
+
+/* ===== 趋势汇总卡片 ===== */
+.trend-summary-card {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+  margin-top: var(--spacing-lg);
+}
+
+.trend-summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.trend-summary-table th,
+.trend-summary-table td {
+  padding: var(--spacing-sm) var(--spacing-md);
+  text-align: center;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.trend-summary-table th {
+  background: var(--bg-light);
+  font-weight: 600;
+  color: var(--text-dark);
+}
+
+.trend-summary-table td:first-child {
+  text-align: left;
+  font-weight: 600;
+}
+
+/* ===== TAB 3: 上升趋势周期汇总表格样式 ===== */
+.trend-summary-card {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  margin-top: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.summary-title {
+  font-size: 1.3rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+}
+
+.trend-summary-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+/* 表头样式 */
+.trend-summary-table th {
+  background: linear-gradient(to bottom, #f1f5f9, #e2e8f0);
+  padding: var(--spacing-md) var(--spacing-lg);
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-dark);
+  border-bottom: 2px solid var(--border-color);
+  white-space: nowrap;
+}
+
+/* 数据行样式 */
+.trend-summary-table td {
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* 需求类型列（第1列）- 左对齐，粗体 */
+.trend-summary-table .demand-type-cell {
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-dark);
+  vertical-align: middle;
+  border-right: 2px solid var(--border-color);
+}
+
+/* 上升趋势周期列（第2列）- 左对齐，粗体 */
+.trend-summary-table .cycle-name-cell {
+  text-align: left;
+  color: var(--text-dark);
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+/* 数值列（均值、中位数、趋势斜率、标准差）- 右对齐，颜色由nth-of-type控制 */
+.trend-summary-table .value-cell {
+  text-align: right;
+  font-weight: 500;
+}
+
+/* 趋势斜率和标准差列 - 右对齐，蓝色粗体 */
+.trend-summary-table td:nth-of-type(6),
+.trend-summary-table td:nth-of-type(7) {
+  color: var(--primary-blue);
+  font-weight: 600;
+}
+
+/* 数据点数额（第8列，最右列）- 居中 */
+.trend-summary-table .count-cell {
+  text-align: center;
+  font-weight: 600;
+  color: var(--text-dark);
+  background: rgba(59, 130, 246, 0.05);
+}
+
+/* 悬停效果 */
+.trend-summary-table tbody tr:hover {
+  background: rgba(59, 130, 246, 0.05);
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+  .trend-summary-table {
+    font-size: 0.8rem;
+    overflow-x: auto;
+    display: block;
+  }
+  
+  .trend-summary-table th,
+  .trend-summary-table td {
+    padding: var(--spacing-xs) var(--spacing-sm);
+  }
+}
+
+/* 均值、中位数列（第3-4列）- 右对齐 */
+.trend-summary-table td:nth-of-type(3),
+.trend-summary-table td:nth-of-type(4) {
+  text-align: right;
+  color: var(--text-dark);
+  font-weight: 500;
+}
+
+/* 变化幅度列（第5列）- 橙色突出显示，只针对.increase-cell类 */
+.trend-summary-table .increase-cell {
+  text-align: right;
+  color: var(--accent-orange) !important;
+  font-weight: 600 !important;
+}
+
+/* 数据点数额（第8列，最右列）- 居中，浅蓝色背景 */
+.trend-summary-table td:nth-of-type(8) {
+  text-align: center;
+  font-weight: 600;
+  color: var(--text-dark);
+  background: rgba(59, 130, 246, 0.05);
+}
+
+/* 趋势斜率和标准差列 - 强制蓝色，覆盖所有其他样式 */
+.trend-summary-table tr td:nth-of-type(6),
+.trend-summary-table tr td:nth-of-type(7) {
+  color: var(--primary-blue) !important;
+  font-weight: 600 !important;
+}
+
+/* ===== TAB 4: 待改进领域样式 ===== */
+.analysis-rule-card {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  margin-bottom: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+  border-left: 4px solid var(--accent-cyan);
+}
+
+.rule-title {
+  font-size: 1.2rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+}
+
+.rule-content {
+  background: var(--bg-light);
+  padding: var(--spacing-md);
+  border-radius: var(--radius-md);
+  color: var(--text-medium);
+  line-height: 1.8;
+}
+
+.demand-type-section {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: var(--spacing-lg);
+  margin-bottom: var(--spacing-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.demand-type-title {
+  font-size: 1.4rem;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-md);
+  padding-bottom: var(--spacing-sm);
+  border-bottom: 2px solid var(--border-color);
+}
+
+.bottom3-table-container {
+  overflow-x: auto;
+}
+
+.bottom3-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.bottom3-table th,
+.bottom3-table td {
+  padding: var(--spacing-sm) var(--spacing-md);
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.bottom3-table th {
+  background: var(--bg-light);
+  font-weight: 600;
+  color: var(--text-dark);
+  position: sticky;
+  top: 0;
+}
+
+.bottom3-table .cycle-row:first-child td {
+  border-top: 2px solid var(--border-color);
+}
+
+.bottom3-table .cycle-name {
+  font-weight: 600;
+  color: var(--text-dark);
+  vertical-align: top;
+  padding-top: var(--spacing-md);
+}
+
+.bottom3-table .cycle-reason {
+  font-size: 0.8rem;
+  color: var(--accent-orange);
+  font-weight: normal;
+}
+
+.bottom3-table .mean-value {
+  font-weight: 600;
+  color: var(--primary-blue);
+  text-align: right;
+  min-width: 80px;
+}
+
+.bottom3-table tbody tr:hover {
+  background: rgba(59, 130, 246, 0.05);
+}
+
+/* 不同需求类型的标题颜色 */
+.demand-type-section:nth-of-type(1) .demand-type-title {
+  color: var(--fast-lane-color);
+  border-bottom-color: var(--fast-lane-color);
+}
+
+.demand-type-section:nth-of-type(2) .demand-type-title {
+  color: var(--standard-color);
+  border-bottom-color: var(--standard-color);
+}
+
+.demand-type-section:nth-of-type(3) .demand-type-title {
+  color: var(--light-color);
+  border-bottom-color: var(--light-color);
+}
+
+/* ===== TAB 5: 异常需求详单样式 ===== */
+.single-table-container {
+  overflow-x: auto;  /* 恢复水平滚动条，防止表格内容溢出容器 */
+  max-width: 100%;   /* 限制容器最大宽度 */
+}
+
+.single-requirements-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  background: var(--bg-white);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  table-layout: auto; /* 自适应表格布局，根据内容自动调整列宽 */
+}
+
+.single-requirements-table th,
+.single-requirements-table td {
+  padding: var(--spacing-md) var(--spacing-lg);
+  text-align: left;
+  border-bottom: 1px solid var(--border-color);
+  vertical-align: top;
+  word-wrap: break-word; /* 长单词自动换行 */
+  word-break: break-word; /* 在任意字符间断行 */
+  white-space: normal; /* 允许换行 */
+  overflow-wrap: break-word; /* 现代浏览器的换行支持 */
+}
+
+.single-requirements-table th {
+  background: linear-gradient(to bottom, var(--bg-light), #f1f5f9);
+  font-weight: 600;
+  color: var(--text-dark);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  white-space: nowrap;
+}
+
+.single-requirements-table .req-row {
+  transition: background-color 0.2s ease;
+}
+
+.single-requirements-table .req-row:hover {
+  background: rgba(59, 130, 246, 0.08);
+}
+
+.single-requirements-table .cycle-type-cell {
+  vertical-align: middle;
+  padding: var(--spacing-md);
+  border-right: 2px solid var(--border-color);
+  min-width: 100px; /* 最小宽度 */
+  max-width: 180px; /* 最大宽度限制 */
+  width: auto; /* 自适应宽度 */
+  white-space: nowrap; /* 不换行 */
+}
+
+.single-requirements-table .cycle-name {
+  display: block;
+  font-weight: 600;
+  color: var(--text-dark);
+  margin-bottom: var(--spacing-xs);
+}
+
+.single-requirements-table .cycle-reason {
+  display: inline-block;
+  background: var(--accent-orange);
+  color: white;
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.single-requirements-table .req-id {
+  font-family: 'Courier New', monospace;
+  font-weight: 700;
+  color: var(--primary-blue);
+  white-space: nowrap; /* 不换行 */
+  min-width: 80px; /* 最小宽度 */
+  max-width: 150px; /* 最大宽度限制 */
+  width: auto; /* 自适应宽度 */
+}
+
+.single-requirements-table .req-title {
+  color: var(--text-medium);
+  line-height: 1.6;
+  width: auto; /* 自适应宽度，占据剩余空间 */
+  min-width: 200px; /* 最小宽度保证 */
+  word-wrap: break-word;
+  word-break: break-word;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.single-requirements-table .req-cycle {
+  font-weight: 700;
+  color: var(--accent-orange);
+  text-align: right;
+  min-width: 60px; /* 最小宽度 */
+  max-width: 100px; /* 最大宽度限制 */
+  width: auto; /* 自适应宽度 */
+  white-space: nowrap; /* 不换行 */
+}
+
+.single-requirements-table .no-data-row {
+  background: rgba(22, 163, 74, 0.05);
+}
+
+.single-requirements-table .no-data-cell {
+  text-align: center;
+  color: var(--accent-green);
+  font-weight: 600;
+  font-style: italic;
+  padding: var(--spacing-lg);
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+  .demand-type-title {
+    font-size: 1.2rem;
+  }
+  
+  .bottom3-table,
+  .single-requirements-table {
+    font-size: 0.8rem;
+  }
+  
+  .bottom3-table th,
+  .bottom3-table td,
+  .single-requirements-table th,
+  .single-requirements-table td {
+    padding: var(--spacing-xs) var(--spacing-sm);
+  }
+}

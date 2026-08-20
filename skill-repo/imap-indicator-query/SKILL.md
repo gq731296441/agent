@@ -3,7 +3,7 @@ name: imap-indicator-query
 description: IMAP指标查询:认证、权限、指示器/名称转 ID、指标统计数据、URL 免鉴权取数（含单指示器详单）、场景化数据对接;支持自然语言 quick_query 与图表结构。详细接口与示例见 references/.
 version: 1.0.5
 author: platform
-tags: ["研发提效"]
+tags: ["研发提效", "数据智能"]
 triggers: ["查指标", "MR交付周期", "里程碑复盘", "IMAP", "指标统计", "KPI"]
 changes: |
   - v1.4.0: 优化技能描述，明确功能层级：将「单指示器详单数据获取」定位为「URL 免鉴权取数」的子能力；将「指标详单」改为「指标统计数据」

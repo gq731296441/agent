@@ -371,12 +371,14 @@ def per_type_from_space_page_edit(authority_bo: Optional[Dict[str, Any]]) -> str
     return "R"
 
 
-def add_doc_auth(
+def add_doc_auth(        
     space_id: str,
     group_key: str,
     doc_id: str,
+    content_id: str,
+    business_path: str,
     udm_config: Dict[str, str],
-    per_type: str = "R",
+    per_type: str = "R"
 ) -> bool:
     """
     添加文档访问权限
@@ -414,6 +416,8 @@ def add_doc_auth(
         "filePers": [
             {"perType": per_type, "perObjId": [{"objType": "U", "objID": emp_no}]}
         ],
+        "businessPath": business_path,
+        "businessId": content_id
     }
 
     data = _request_json(
@@ -427,23 +431,6 @@ def add_doc_auth(
     if not data:
         return False
     ok = data.get("code", {}).get("code") == "0000"
-    if os.getenv("SPACE_ATTACH_DEBUG"):
-        debug_payload = {
-            "groupKey": group_key,
-            "filePers": payload.get("filePers", []),
-            "docId": doc_id,
-            "perType": per_type,
-            "spaceId": space_id,
-        }
-        if ok:
-            print("docAuth/add 入参:", json.dumps(debug_payload, ensure_ascii=False))
-        else:
-            print(
-                "docAuth/add 失败:",
-                data.get("code"),
-                "| 入参:",
-                json.dumps(debug_payload, ensure_ascii=False),
-            )
     return ok
 
 
@@ -1590,7 +1577,8 @@ def download_attachments_from_page(
     # 4. 同一页面仅请求一次内容权限，用于后续每个附件的 docAuth perType
     authority_bo = fetch_page_content_authority(space_id, page_id)
     per_type = per_type_from_space_page_edit(authority_bo)
-
+    content_id = page_id
+    business_path = page_data.get("parent_path", "") or ""
     # 5. 逐个处理附件：先 addAuth，再取 downloadUrl
     for idx, att in enumerate(attachments, 1):
         doc_id = att.get("doc_id", "")
@@ -1601,7 +1589,7 @@ def download_attachments_from_page(
         group_key = att.get("groupKey", "")
 
         auth_ok = add_doc_auth(
-            space_id, group_key, doc_id, udm_config, per_type=per_type
+            space_id, group_key, doc_id, content_id, business_path, udm_config, per_type
         )
         if not auth_ok:
             download_result = {
@@ -1617,13 +1605,6 @@ def download_attachments_from_page(
             continue
 
         download_url, auth_method = get_download_url(space_id, doc_id, udm_config)
-
-        # # 获取预览链接
-        # preview_url = (
-        #     get_online_view_url(space_id, doc_id, udm_config)
-        #     if not download_url
-        #     else None
-        # )
 
         download_result = {
             "doc_id": doc_id,
