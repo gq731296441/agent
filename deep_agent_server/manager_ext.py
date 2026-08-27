@@ -58,6 +58,7 @@ async def resolve_mcp_list(
     *,
     agent_kind: str = "default",
     creator_user_id: str = "",
+    auth_token: str = "",
 ) -> list:
     """合并 agent 模板 MCP 绑定与请求 payload；订阅体按绑定 id + 创建者 catalog 过滤。"""
     if agent_kind == "default":
@@ -79,7 +80,7 @@ async def resolve_mcp_list(
 
     try:
         # 订阅智能体：用创建者的 user_id 获取 MCP 目录，而非订阅者
-        catalog, source = await _resolve_mcp_source_list(creator_user_id or user_id)
+        catalog, source = await _resolve_mcp_source_list(creator_user_id or user_id, auth_token)
         id_to_item = {int(i.get("id")): i for i in catalog if i.get("id")}
         matched = [id_to_item[mid] for mid in binding_ids if mid in id_to_item]
         missing_ids = [mid for mid in binding_ids if mid not in id_to_item]
@@ -203,6 +204,7 @@ async def create_deep_agent_for_session(
         mcp_list or [],
         agent_kind=agent_kind,
         creator_user_id=creator_user_id,
+        auth_token=user_token,
     )
     mcp_hash = manager._mcp_list_hash(mcp_list)
     token_fp = manager._token_fingerprint(user_token)

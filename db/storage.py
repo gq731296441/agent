@@ -145,12 +145,13 @@ async def get_user_sessions(
         else:
             rows = await conn.fetch(
                 f"""
-                SELECT session_id, session_name, last_active_at, created_at, updated_at,
-                       agent_id, agent_kind, context_epoch, subscription_frozen
-                FROM user_sessions
-                WHERE user_id = $1 AND is_deleted = FALSE
+                SELECT s.session_id, s.session_name, s.last_active_at, s.created_at,
+                       s.updated_at, s.agent_id, s.agent_kind, s.context_epoch,
+                       s.subscription_frozen
+                FROM user_sessions s
+                WHERE s.user_id = $1 AND s.is_deleted = FALSE
                       {empty_filter}
-                ORDER BY last_active_at DESC
+                ORDER BY s.last_active_at DESC
                 """,
                 user_id,
             )

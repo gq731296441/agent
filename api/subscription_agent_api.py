@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, Query
+from fastapi import APIRouter, Body, Header, Query
 from pydantic import BaseModel, Field
 
 from api.mcp_api import _resolve_mcp_source_list
@@ -73,12 +73,12 @@ class SubscriptionAgentUpdate(BaseModel):
     )
 
 
-async def _resolve_mcp_names(user_id: str, mcp_ids: List[int]) -> Dict[int, str]:
+async def _resolve_mcp_names(user_id: str, mcp_ids: List[int], auth_token: str = "") -> Dict[int, str]:
     """从用户的 MCP catalog 中批量解析名称，仅返回 mcp_ids 中指定的 ID。"""
     if not mcp_ids:
         return {}
     try:
-        mcp_list, _ = await _resolve_mcp_source_list(user_id)
+        mcp_list, _ = await _resolve_mcp_source_list(user_id, auth_token)
         target_ids = {int(mid) for mid in mcp_ids}
         return {
             int(m["id"]): m["name"]
@@ -139,7 +139,10 @@ async def used_agents(user_id: str = Query(...)):
 
 
 @router.post("", response_model=ApiResponse)
-async def create_agent(body: SubscriptionAgentCreate = Body(...)):
+async def create_agent(
+    body: SubscriptionAgentCreate = Body(...),
+    x_auth_value: str = Header(default="", description="用户 token（前端自动携带，透传外部接口）"),
+):
     vis = (body.visibility or "public").lower()
     if vis not in ("public", "private"):
         return ApiResponse.error(msg="visibility 须为 public 或 private", code=400)
@@ -159,12 +162,12 @@ async def create_agent(body: SubscriptionAgentCreate = Body(...)):
         unnamed_ids = [mid for mid in mcp_ids if mid not in mcp_names]
         if unnamed_ids:
             try:
-                mcp_names.update(await _resolve_mcp_names(body.user_id, unnamed_ids))
+                mcp_names.update(await _resolve_mcp_names(body.user_id, unnamed_ids, x_auth_value))
             except Exception:
                 pass
     elif body.mcp_ids:
         mcp_ids = body.mcp_ids
-        mcp_names = await _resolve_mcp_names(body.user_id, body.mcp_ids)
+        mcp_names = await _resolve_mcp_names(body.user_id, body.mcp_ids, x_auth_value)
     else:
         mcp_ids = []
         mcp_names = {}
@@ -189,7 +192,11 @@ async def create_agent(body: SubscriptionAgentCreate = Body(...)):
 
 
 @router.get("/{agent_id}", response_model=ApiResponse)
-async def get_agent(agent_id: str, user_id: str = Query(...)):
+async def get_agent(
+    agent_id: str,
+    user_id: str = Query(...),
+    x_auth_value: str = Header(default="", description="用户 token（前端自动携带，透传外部接口）"),
+):
     agent = await deep_storage.resolve_agent_for_caller(
         agent_id, user_id, include_prompt=True
     )
@@ -211,11 +218,11 @@ async def get_agent(agent_id: str, user_id: str = Query(...)):
         if missing_ids:
             creator_id = agent.get("user_id") or agent.get("creator_user_id") or ""
             if creator_id:
-                name_map.update(await _resolve_mcp_names(creator_id, missing_ids))
+                name_map.update(await _resolve_mcp_names(creator_id, missing_ids, x_auth_value))
         # L3: 查看者的 MCP catalog（最终兜底）
         still_missing = [mid for mid in mcp_ids if mid not in name_map or not name_map[mid]]
         if still_missing and user_id != (agent.get("user_id") or agent.get("creator_user_id") or ""):
-            name_map.update(await _resolve_mcp_names(user_id, still_missing))
+            name_map.update(await _resolve_mcp_names(user_id, still_missing, x_auth_value))
         for mid in mcp_ids:
             mcps.append({"id": mid, "name": name_map.get(mid, "")})
     agent["mcps"] = mcps
@@ -237,6 +244,7 @@ async def update_agent(
     agent_id: str,
     body: SubscriptionAgentUpdate = Body(...),
     user_id: str = Query(...),
+    x_auth_value: str = Header(default="", description="用户 token（前端自动携带，透传外部接口）"),
 ):
     ok = await deep_storage.update_user_agent(
         agent_id,
@@ -255,12 +263,12 @@ async def update_agent(
             unnamed_ids = [mid for mid in mcp_ids if mid not in mcp_names]
             if unnamed_ids:
                 try:
-                    mcp_names.update(await _resolve_mcp_names(user_id, unnamed_ids))
+                    mcp_names.update(await _resolve_mcp_names(user_id, unnamed_ids, x_auth_value))
                 except Exception:
                     pass
         else:
             mcp_ids = list(body.mcp_ids or [])
-            mcp_names = await _resolve_mcp_names(user_id, mcp_ids)
+            mcp_names = await _resolve_mcp_names(user_id, mcp_ids, x_auth_value)
         await deep_storage.set_agent_mcp_bindings(
             agent_id, mcp_ids, mcp_names=mcp_names
         )
