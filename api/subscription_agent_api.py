@@ -213,12 +213,27 @@ async def get_agent(
         for mid, snap_name in snapshots.items():
             if mid in mcp_ids:
                 name_map[mid] = snap_name
-        # L2: 创建者的 MCP catalog（兜底未命中的）
+        # L2: 全量 MCP 目录（兜底未命中的名称）
+        # 认证约束：外部接口要求 id+token 匹配同一用户，创建者 id + 查看者 token 会校验失败，
+        # 因此改用全量目录（查看者自己的认证即可访问全部公共组件）
         missing_ids = [mid for mid in mcp_ids if mid not in name_map or not name_map[mid]]
         if missing_ids:
-            creator_id = agent.get("user_id") or agent.get("creator_user_id") or ""
-            if creator_id:
-                name_map.update(await _resolve_mcp_names(creator_id, missing_ids, x_auth_value))
+            try:
+                from api.mcp_api import _fetch_external_mcp_all_list, _normalize_mcp_item
+
+                all_raw = await _fetch_external_mcp_all_list(user_id, x_auth_value)
+                all_catalog = [_normalize_mcp_item(item) for item in all_raw]
+                for mid in missing_ids:
+                    if mid not in name_map or not name_map[mid]:
+                        name = next(
+                            (m.get("name") for m in all_catalog
+                             if int(m.get("id") or 0) == mid and m.get("name")),
+                            None,
+                        )
+                        if name:
+                            name_map[mid] = name
+            except Exception:
+                pass
         # L3: 查看者的 MCP catalog（最终兜底）
         still_missing = [mid for mid in mcp_ids if mid not in name_map or not name_map[mid]]
         if still_missing and user_id != (agent.get("user_id") or agent.get("creator_user_id") or ""):

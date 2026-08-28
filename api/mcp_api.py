@@ -117,10 +117,19 @@ async def _fetch_external_mcp_list(user_id: str, auth_token: str = "") -> List[d
         external_data = response.json()
 
     if external_data.get("code") != 0 or not external_data.get("status"):
-        logger.error(f"[MCP API] 外部接口返回错误: {external_data.get('msg')}")
+        reason = (
+            (external_data.get("reason") or {}).get("zh_CN")
+            if isinstance(external_data.get("reason"), dict)
+            else external_data.get("reason")
+        )
+        detail = external_data.get("msg") or reason or f"code={external_data.get('code')}"
+        logger.error(
+            f"[MCP API] 外部接口返回错误: code={external_data.get('code')} "
+            f"msg={external_data.get('msg')} reason={reason}"
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"获取 MCP 工具列表失败: {external_data.get('msg', '未知错误')}",
+            detail=f"获取 MCP 工具列表失败: {detail}",
         )
 
     return external_data.get("data", []) or []
@@ -151,10 +160,19 @@ async def _fetch_external_mcp_all_list(user_id: str = "", auth_token: str = "") 
         external_data = response.json()
 
     if external_data.get("code") != 0 or not external_data.get("status"):
-        logger.error(f"[MCP API] 外部 all 接口返回错误: {external_data.get('msg')}")
+        reason = (
+            (external_data.get("reason") or {}).get("zh_CN")
+            if isinstance(external_data.get("reason"), dict)
+            else external_data.get("reason")
+        )
+        detail = external_data.get("msg") or reason or f"code={external_data.get('code')}"
+        logger.error(
+            f"[MCP API] 外部 all 接口返回错误: code={external_data.get('code')} "
+            f"msg={external_data.get('msg')} reason={reason}"
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"获取全量 MCP 工具列表失败: {external_data.get('msg', '未知错误')}",
+            detail=f"获取全量 MCP 工具列表失败: {detail}",
         )
 
     return external_data.get("data", []) or []

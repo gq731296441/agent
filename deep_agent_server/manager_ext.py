@@ -60,7 +60,7 @@ async def resolve_mcp_list(
     creator_user_id: str = "",
     auth_token: str = "",
 ) -> list:
-    """合并 agent 模板 MCP 绑定与请求 payload；订阅体按绑定 id + 创建者 catalog 过滤。"""
+    """合并 agent 模板 MCP 绑定与请求 payload；订阅体按绑定 id + 全量目录过滤。"""
     if agent_kind == "default":
         # 默认智能体：严格以请求 capabilities.mcp 为准；空列表 = 用户未勾选任何 MCP。
         # 开发环境不再在此处静默注入 Mock（与 skills 空列表语义对齐）。
@@ -74,13 +74,31 @@ async def resolve_mcp_list(
         allowed = set(binding_ids)
         return [m for m in payload_mcp if int(m.get("id") or 0) in allowed]
 
-    from api.mcp_api import _resolve_mcp_source_list
+    from api.mcp_api import _fetch_external_mcp_all_list, _normalize_mcp_item, _resolve_mcp_source_list
     from config import get_logger
     _mcp_log = get_logger(__name__)
 
+    # 认证约束：外部 cmtool 接口要求 x-emp-no（用户 id）与 x-auth-value（token）必须匹配同一用户，
+    # 不能用创建者 id + 订阅者 token（会返回 0002 令牌校验失败）。
+    # 目录来源用 all（全量公共组件，订阅者未必订阅了创建者绑定的组件）；mock 环境走原逻辑。
+    if app_config.MCP_USE_MOCK:
+        try:
+            catalog, source = await _resolve_mcp_source_list(user_id, auth_token)
+        except Exception:
+            catalog, source = [], ""
+    else:
+        try:
+            raw = await _fetch_external_mcp_all_list(user_id, auth_token)
+            catalog = [_normalize_mcp_item(item) for item in raw]
+            source = "all"
+        except Exception as e:
+            _mcp_log.warning(f"[MCPResolve] 全量 MCP 目录获取失败({e})，回退订阅者 mine")
+            try:
+                catalog, source = await _resolve_mcp_source_list(user_id, auth_token)
+            except Exception:
+                catalog, source = [], ""
+
     try:
-        # 订阅智能体：用创建者的 user_id 获取 MCP 目录，而非订阅者
-        catalog, source = await _resolve_mcp_source_list(creator_user_id or user_id, auth_token)
         id_to_item = {int(i.get("id")): i for i in catalog if i.get("id")}
         matched = [id_to_item[mid] for mid in binding_ids if mid in id_to_item]
         missing_ids = [mid for mid in binding_ids if mid not in id_to_item]
