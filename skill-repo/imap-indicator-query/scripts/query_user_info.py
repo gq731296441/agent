@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 from auth import get_auth_headers, AuthManager
 
 
-def query_user_info(empno: str, yxdata_token: str = None, 
+def query_user_info(empno: str, yxdata_token: str = None,
                    auth_token: str = None) -> Dict[str, Any]:
     """
     查询用户信息
@@ -55,20 +55,20 @@ def query_user_info(empno: str, yxdata_token: str = None,
 def extract_user_org_info(user_info: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """
     从用户信息中提取组织架构信息
-    
+
     Args:
         user_info: 用户信息数据
-        
+
     Returns:
-        组织信息字典，包含department, projectGroup, subCenter等
+        组织信息字典,包含department, projectGroup, subCenter等
     """
     if not user_info.get('status'):
         return None
-    
+
     content = user_info.get('data', {}).get('content', [])
     if not content:
         return None
-    
+
     user = content[0]
     return {
         'employee_id': user.get('employee_id'),
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     # 测试代码
     import os
     import json
-    
+
     empno = os.getenv('coclaw_empno', '12345678')
     token = os.getenv('coclaw_token', 'xxxx')
     auth = AuthManager()
@@ -100,7 +100,7 @@ if __name__ == "__main__":
         print(f"查询用户 {empno} 的信息:")
         result = query_user_info(empno,yxdata_token=yxdata_token, auth_token=token)
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        
+
         if result.get('status'):
             org_info = extract_user_org_info(result)
             print("\n组织信息:")

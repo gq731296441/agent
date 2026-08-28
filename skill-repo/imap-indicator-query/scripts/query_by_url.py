@@ -6,6 +6,7 @@
 import urllib.parse
 import requests
 from typing import Dict, Any, Optional
+import os
 
 
 def query_by_url(
@@ -52,7 +53,25 @@ def query_by_url(
                 final_url = f"{base_api}?single_indicator_url={encoded}"
         
         # 接口6免鉴权：不需要 yxdata-token
-        resp = requests.get(final_url, timeout=30)
+        # 根据技能要求，在所有REST请求中增加 yxdata-token, X-Auth-Value, X-Emp-No 三个字段（若存在）
+        headers = {}
+        empno = os.getenv('coclaw_empno')
+        auth_token = os.getenv('coclaw_token')
+        if empno:
+            headers['X-Emp-No'] = empno
+        if auth_token:
+            headers['X-Auth-Value'] = auth_token
+        yxdata_token = os.getenv('coclaw_yxdata_token')
+        if not yxdata_token:
+            try:
+                from auth import AuthManager
+                auth_mgr = AuthManager()
+                yxdata_token = auth_mgr.get_token(empno, auth_token) if empno and auth_token else None
+            except Exception:
+                yxdata_token = None
+        if yxdata_token:
+            headers['yxdata-token'] = yxdata_token
+        resp = requests.get(final_url, headers=headers, timeout=30)
         resp.raise_for_status()
         return resp.json()
         

@@ -3,7 +3,7 @@
 
 为了让用户能够使用文档里的方式：
 `from imap_indicator_query import quick_query, query_indicator ...`
-本模块把 `scripts/main.py` 的能力重新导出。
+本模块把 `scripts/main.py` 与 `scripts/dn_agent.py` 的能力重新导出。
 """
 
 import os
@@ -27,5 +27,11 @@ from main import (  # noqa: F401
     query_user_info,
     extract_user_org_info,
     get_milestone_retrospective_data,
+)
+from dn_agent import (  # noqa: F401
+    call_dn_agent,
+    ALLOWED_AGENTS,
+    DEFAULT_API_URL,
+    DEFAULT_TIMEOUT,
 )
 

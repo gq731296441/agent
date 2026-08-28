@@ -1,11 +1,12 @@
 ---
 name: imap-indicator-query
 description: IMAP指标查询:认证、权限、指示器/名称转 ID、指标统计数据、URL 免鉴权取数（含单指示器详单）、场景化数据对接;支持自然语言 quick_query 与图表结构。详细接口与示例见 references/.
-version: 1.0.5
-author: platform
+version: 1.0.6
+author: 00114732 (optimized by Co-Claw)
 tags: ["研发提效", "数据智能"]
 triggers: ["查指标", "MR交付周期", "里程碑复盘", "IMAP", "指标统计", "KPI"]
 changes: |
+  - v1.6.0: 新增「DN 智能体调用（dn_search_imap）」，支持用电量监控、MR交付周期基础分析、北极星指标等 iCenter 报告，软平中心多指标基线目标报告，以及数据查询汇聚结果（见「场景化数据对接」）
   - v1.4.0: 优化技能描述，明确功能层级：将「单指示器详单数据获取」定位为「URL 免鉴权取数」的子能力；将「指标详单」改为「指标统计数据」
   - v1.3.0: 新增「单指示器详单数据获取」功能（免鉴权接口）
   - v1.2.0: 优化里程碑复盘报告数据获取，支持标准格式输入
@@ -59,8 +60,9 @@ python scripts/main.py "查询ZXUFP项目组的MR交付周期"
 | 用户权限 / 用户信息 | 多级组织与资源权限 |
 | 名称转 ID | 项目组/部门/中心等 → `param` + `id` |
 | 指标统计数据 | 基于 `api_接口地址` + 维度参数 + 时间（**返回聚合统计结果**） |
+| 指标详单数据 | 基于查询指示器获取信息中详单信息的 `all_api` （**返回全量详单csv文件**） |
 | URL 取数 | `get_indicator_data_by_url`,**免鉴权**；支持完整指标卡片数据 |
-| **单指示器详单数据** | **URL 免鉴权的详情下钻查询（子能力）**，只需提供URL和字段名；**默认展示前10条**，**完整数据自动保存为 Excel** |
+| **单指示器详单数据** | **URL 取详单数据**，只需提供URL和字段名；**完整数据自动保存为 CSV** |
 
 ### 场景化数据对接
 
@@ -175,10 +177,100 @@ result = get_milestone_retrospective_data(
 - 名称转 ID:某项目组/部门对应的系统参数。
 - **里程碑复盘报告**:获取里程碑复盘报告数据、复盘报告数据、报告数据获取、获取报告数据、报告数据、复盘报告、里程碑报告等。
 - **场景化数据对接**:里程碑复盘、项目复盘、阶段总结等场景的数据获取。
-- **单指示器详单数据**:查询单指示器的明细数据（下钻数据），属于「URL 免鉴权取数」的子能力.
+- **单指示器详单数据**:URL 取详单数据，只需提供URL和字段名；完整数据自动保存为 CSV,属于「URL 免鉴权取数」的子能力.
   > **v2.0 优化说明：** 当检测到**标准格式输入**时，系统**跳过意图识别**，直接调用里程碑复盘API。这避免了被错误分类为普通指标查询.
+- **DN 智能体调用**:查询/生成用电量监控报告、MR交付周期基础分析报告、北极星指标分析报告、软平中心指标统计报告、数据汇聚统计结果等。
 
 ---
+
+#### DN 智能体调用（dn_search_imap）
+
+通过统一接口 `https://aip.zte.com.cn/dashboard/api/mcp/dn_search_imap` 调用 DN 应用智能体，
+按 `agent_name` 路由，`query_request` **完全透传**。适用于生成 iCenter 分析报告、指标统计报告、
+数据汇聚统计结果。用户常表述为「使用 iMAP 技能，查询/生成 ……报告」。
+
+**支持的应用（agent_name）：**
+
+| agent_name | 名称 | query_request 结构 |
+|---|---|---|
+| `iMAP_Data_Analysis` | 【在用】有线imap分析智能体-对接iCenter空间 | `{"analysis_scene":..., "organize":..., "indicator":...}` |
+| `iMAP_Report_Analysis` | 【在用】有线imap分析智能体-指标报告 | `{"organize":..., "indicators":..., "report_template":...}` |
+| `iMAP_Indicator_Statistics` | 【在用】有线imap分析智能体-数据查询 | `{"question":...}` |
+
+**凭证：** 环境变量 `coclaw_empno` / `coclaw_token`（即 auth_value），由 openclaw 注入。
+缺失时快速失败并提示变量名，**勿在命令里硬编码工号/令牌**。
+
+**CLI 用法：**
+
+```bash
+export coclaw_empno="你的工号"
+export coclaw_token="你的auth_value"
+
+# 通用形式：<agent_name> '<query_request JSON>'
+python scripts/dn_agent.py <agent_name> '<query_request JSON>'
+
+# 长 JSON 可从 stdin 读取
+echo '<query_request JSON>' | python scripts/dn_agent.py <agent_name> -
+
+# 排障：原始服务端响应打印到 stderr
+python scripts/dn_agent.py <agent_name> '<query_request JSON>' --raw
+```
+
+**5 个典型场景配方（可直接照抄）：**
+
+1. 查询用电量监控报告（研究院）
+```bash
+python scripts/dn_agent.py iMAP_Data_Analysis \
+  '{"analysis_scene":"用电量","organize":"研究院"}'
+```
+
+2. ZXUFP 项目 MR 交付周期基础分析报告
+```bash
+python scripts/dn_agent.py iMAP_Data_Analysis \
+  '{"analysis_scene":"MR交付周期基础分析","organize":"ZXUFP","indicator":"MR交付周期"}'
+```
+
+3. Jinos 项目北极星指标分析报告（organize 用正式名 ZXJiNOS）
+```bash
+python scripts/dn_agent.py iMAP_Data_Analysis \
+  '{"analysis_scene":"北极星指标分析","organize":"ZXJiNOS"}'
+```
+
+4. 软件平台中心多指标基线目标统计报告
+```bash
+python scripts/dn_agent.py iMAP_Report_Analysis \
+  '{"organize":"软件平台中心","indicators":"MR交付周期,MR分析周期,MR开发周期,MR测试周期,MR研发人均交付数","report_template":"基线目标"}'
+```
+
+5. ROSNG V13.0 MR 交付周期，团队按月趋势
+```bash
+python scripts/dn_agent.py iMAP_Indicator_Statistics \
+  '{"question":"ROSNG V13.0 MR交付周期，团队按月趋势"}'
+```
+
+**参数说明与注意事项：**
+
+- `query_request` 完全透传，skill 不校验/改写字段；场景值以 DN 应用实际支持为准。
+- 场景 1~3 返回 **iCenter 链接**；场景 4 返回指标统计表格；场景 5 返回数据汇聚表格。结果正文原样返回，不作二次改写。
+- 默认超时 **175 秒**（网关约 180 秒截断），可用 `--timeout` 覆盖；**不自动重试**。
+- **已知问题**：`iMAP_Report_Analysis`（场景 4）当前偶发返回服务端异常（提示词泄漏/内部错误），
+  skill 会显式报错退出而不是把无效内容当报告；待服务端修复后无需改代码。
+- 场景 2/3 的 `analysis_scene`（`MR交付周期基础分析` / `北极星指标分析`）、场景 4 的 `report_template`
+  （`基线目标`）为按需求推断值，**尚未经服务端验证**；若报告内容不符请按实际支持值调整。
+- 失败时：stdout 为空、stderr 输出一行错误、退出码 1（参数错误为 2）；原始响应需加 `--raw` 才输出到 stderr。
+
+**Python API：**
+
+```python
+from imap_indicator_query import call_dn_agent
+
+result = call_dn_agent(
+    agent_name="iMAP_Data_Analysis",
+    query_request={"analysis_scene": "用电量", "organize": "研究院"},
+)
+# 成功: {"status": True, "result": "**iCenter链接**：...", "agent_name": ..., "raw_response": {...}}
+# 失败: {"status": False, "error": "..."}
+```
 
 ## 必备前提
 
@@ -201,10 +293,11 @@ result = get_milestone_retrospective_data(
 | 5 | 用户信息 | `.../d6e24b8e49d19eda/detail` | **是** |
 | 6 | 名称转 ID | `.../8ca5daa07b878eaf/detail` | **是** |
 | 7 | 指标统计数据查询 | `{api_接口地址}/detail` + 维度与时间（返回聚合统计） | **是** |
-| 8 | URL 取数（聚合） | `GET .../dashboard/api/mcp/get_indicator_data_by_url` | **否** |
-| 9 | 单指示器详单数据获取 | `GET /imap/api/mcp/get_indicator_detail_data_by_url?single_indicator_url=...&column_name=...` | **否** (免鉴权；URL取数的子能力) |
+| 8 | 指标详单数据查询 | `{all_api}/detail` + 维度与时间（返回详单数据） | **是** |
+| 9 | URL 取数（聚合） | `GET .../dashboard/api/mcp/get_indicator_data_by_url` | **否** |
+| 10 | 单指示器详单数据获取 | `GET /imap/api/mcp/get_indicator_detail_data_by_url?single_indicator_url=...&column_name=...` | **否** (免鉴权；URL取数的子能力) |
 
-除接口 8、9 外,业务请求通常同时携带 **`X-Auth-Value`**、`X-Emp-No`(与接口文档一致)。完整示例与返回 JSON 见 [`references/api_docs.md`](references/api_docs.md)。
+业务请求通常同时携带 **`X-Auth-Value`**、`X-Emp-No`(与接口文档一致)。完整示例与返回 JSON 见 [`references/api_docs.md`](references/api_docs.md)。
 
 ---
 
@@ -226,9 +319,16 @@ result = get_milestone_retrospective_data(
 
 ```python
 from imap_indicator_query import (
+    quick_query,
+    list_all_indicators,
     query_indicator,
-    query_by_imap_url,
     query_indicator_list_export,
+    query_by_imap_url,
+    query_indicator_detail_by_url,
+    query_user_auth,
+    get_user_auth_types,
+    query_user_info,
+    extract_user_org_info,
     get_milestone_retrospective_data,
 )
 
@@ -243,7 +343,7 @@ result = query_indicator(
     end_date="2026-03-31",
 )
 
-# URL 免鉴权
+# URL
 result = query_by_imap_url("https://aip.zte.com.cn/dashboard/...", is_encoded=False)
 
 # 指标列表
@@ -267,6 +367,7 @@ result = quick_query(
 ### CLI
 
 ```bash
+# 智能查询（推荐方式 - 自然语言）
 export coclaw_empno="00114732"
 export coclaw_token="your_auth_token"
 
@@ -286,13 +387,21 @@ python scripts/milestone_retrospective.py \
   --indicators "MR吞吐量,PR吞吐量,成果鉴定前一个月发现缺陷占比" \
   --additional "需求分析引入缺陷数"
 
-# **单指示器详单数据获取**（新增，免鉴权接口）
+# 或使用标准输入格式（注意全角冒号和分号）
+python scripts/milestone_retrospective.py --stdin "返回类型：table；里程碑：ZXUFPV2.30.30,ZXUFPV1.50.30；指标：MR吞吐量,PR吞吐量；添加内容：需求分析引入缺陷数；"
+# **单指示器详单数据获取*
 python scripts/query_indicator_detail_by_url.py \
   "https://aip.zte.com.cn/dashboard/#!/kanban/window/2-10-76-75/template/menu/107/sub-menu/MTA3LS8tL-WfuuehgOaVsOaNrg/5dd1e3ef2c674aa6bd54d259aaf840d0" \
   "数量"
 
-# 使用标准输入格式（注意：冒号和分号必须用全角字符）
-python scripts/milestone_retrospective.py --stdin "返回类型：table；里程碑：ZXUFPV2.30.30,ZXUFPV1.50.30；指标：MR吞吐量,PR吞吐量；添加内容：需求分析引入缺陷数；"
+
+# 用户权限与信息查询（传统 API 脚本）
+python scripts/query_user_auth.py --empno "00114732" --token "your_token"
+python scripts/query_user_info.py --empno "00114732"
+python scripts/query_by_url.py --imap-url "https://aip.zte.com.cn/dashboard/..." --is-encoded false
+
+# 指示器列表查询
+python scripts/query_indicator_list.py --keyword "交付周期"
 ```
 
 ---

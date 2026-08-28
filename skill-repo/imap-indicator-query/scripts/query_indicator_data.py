@@ -17,10 +17,11 @@ def query_indicator_data(
     auth_token: str,
     empno: str,
     start_date: Optional[str] = None,
-    end_date: Optional[str] = None
+    end_date: Optional[str] = None,
+    page_size: int = 2000
 ) -> Dict[str, Any]:
     """
-    查询指标数据
+    查询指标数据（自动分页，返回全量数据）
     
     Args:
         api_url: 指示器的API接口地址
@@ -31,17 +32,13 @@ def query_indicator_data(
         empno: 用户工号
         start_date: 开始日期（可选），格式：YYYY-MM-DD
         end_date: 结束日期（可选），格式：YYYY-MM-DD
+        page_size: 每页大小，默认2000
         
     Returns:
-        指标数据
-        
-    Example:
-        >>> query_indicator_data(
-        ...     "https://aip.zte.com.cn/middle/api/remote/call/81185dacaae0ad00",
-        ...     "projectGroup_id", "48",
-        ...     yxdata_token, auth_token, empno
-        ... )
+        指标数据（包含全量content）
     """
+    import time
+    
     # 组装完整URL
     if api_url.endswith('/detail'):
         base_url = api_url
@@ -50,7 +47,12 @@ def query_indicator_data(
     
     headers = get_auth_headers(yxdata_token, auth_token, empno)
 
-    params = {dimension_param: dimension_value, 'pageSize': '0'}
+    # 先请求第1页，获取总数和内容
+    params = {
+        dimension_param: dimension_value,
+        'pageSize': str(page_size),
+        'page': '1'
+    }
     
     # 添加时间范围参数
     if start_date:
@@ -59,9 +61,53 @@ def query_indicator_data(
         params['endTime'] = f"{end_date} 23:59:59"
     
     try:
-        resp = requests.get(base_url, headers=headers, params=params, timeout=30)
+        # 第一页
+        resp = requests.get(base_url, headers=headers, params=params, timeout=60)
         resp.raise_for_status()
-        return resp.json()
+        result = resp.json()
+        
+        if not result.get('status'):
+            return result
+        
+        data = result.get('data', {})
+        if isinstance(data, dict):
+            content = data.get('content', [])
+            total = data.get('total', 0)
+        else:
+            content = data if isinstance(data, list) else []
+            total = len(content)
+        
+        all_content = content.copy()
+        
+        # 如果需要翻页，则循环获取剩余页
+        if total > page_size:
+            total_pages = (total + page_size - 1) // page_size
+            for page in range(2, total_pages + 1):
+                try:
+                    params['page'] = str(page)
+                    resp = requests.get(base_url, headers=headers, params=params, timeout=60)
+                    resp.raise_for_status()
+                    page_result = resp.json()
+                    if page_result.get('status'):
+                        page_data = page_result.get('data', {})
+                        page_content = page_data.get('content', []) if isinstance(page_data, dict) else (page_data if isinstance(page_data, list) else [])
+                        all_content.extend(page_content)
+                    time.sleep(0.2)  # 礼貌性延迟，避免压垮服务端
+                except Exception as e:
+                    # 某页失败则停止翻页，保留已获取数据
+                    print(f"[Warning] 第{page}页获取失败: {e}")
+                    break
+        
+        # 构造合并后的返回结果（保持原结构）
+        result['data'] = {
+            'content': all_content,
+            'total': total,
+            'pageSize': page_size,
+            'pageCount': (total + page_size - 1) // page_size if total else 1
+        }
+        
+        return result
+        
     except requests.RequestException as e:
         return {
             "status": False,

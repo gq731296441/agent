@@ -121,7 +121,16 @@ result = quick_query("https://aip.zte.com.cn/dashboard/#!/kanban/...")
 如果需要精确控制，仍可使用传统API：
 
 ```python
-from imap_indicator_query import query_indicator, query_indicator_list_export, query_user_auth
+from imap_indicator_query import (
+    query_indicator,
+    query_indicator_list_export,
+    query_by_imap_url,
+    query_indicator_detail_by_url,
+    query_user_auth,
+    query_user_info,
+    list_all_indicators,
+    get_milestone_retrospective_data,
+)
 
 # 精确参数查询
 result = query_indicator(
@@ -134,9 +143,31 @@ result = query_indicator(
 
 # 列出所有指标
 result = query_indicator_list_export()
+# 或使用简化版本
+result = list_all_indicators()
+
+# 通过URL查询
+result = query_by_imap_url("https://aip.zte.com.cn/dashboard/...", is_encoded=False)
+
+# 单指示器详单数据
+result = query_indicator_detail_by_url(
+    single_indicator_url="https://aip.zte.com.cn/dashboard/.../single-indicator/...",
+    column_name="数量"
+)
 
 # 查询权限
 result = query_user_auth(empno, token)
+# 查询用户信息
+result = query_user_info(empno, token)
+
+# 里程碑复盘报告数据获取
+result = get_milestone_retrospective_data(
+    milestones=['ZXUFPV2.30.30', 'ZXUFPV1.50.30'],
+    indicators=['MR吞吐量', 'PR吞吐量', '成果鉴定前一个月发现缺陷占比'],
+    additional_metrics=['需求分析引入缺陷数'],
+    empno=empno,
+    token=token
+)
 ```
 
 ---

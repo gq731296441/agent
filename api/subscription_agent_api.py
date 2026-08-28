@@ -79,11 +79,12 @@ async def _resolve_mcp_names(user_id: str, mcp_ids: List[int], auth_token: str =
         return {}
     try:
         mcp_list, _ = await _resolve_mcp_source_list(user_id, auth_token)
+        # mcp_ids 是组件 id，目录条目通过 componentId 字段对应
         target_ids = {int(mid) for mid in mcp_ids}
         return {
-            int(m["id"]): m["name"]
+            int(m["componentId"]): m["name"]
             for m in mcp_list
-            if m.get("id") and m.get("name") and int(m["id"]) in target_ids
+            if m.get("componentId") and m.get("name") and int(m["componentId"]) in target_ids
         }
     except Exception:
         return {}
@@ -225,9 +226,10 @@ async def get_agent(
                 all_catalog = [_normalize_mcp_item(item) for item in all_raw]
                 for mid in missing_ids:
                     if mid not in name_map or not name_map[mid]:
+                        # 绑定 ID 是组件 id，目录条目通过 componentId 字段对应
                         name = next(
                             (m.get("name") for m in all_catalog
-                             if int(m.get("id") or 0) == mid and m.get("name")),
+                             if int(m.get("componentId") or 0) == mid and m.get("name")),
                             None,
                         )
                         if name:

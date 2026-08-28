@@ -14,7 +14,16 @@
 import urllib.parse
 import requests
 import sys
+import os
 from typing import Dict, Any, Optional
+from export_utils import export_table_to_csv, generate_filename
+from auth import get_auth_headers
+
+# 主工作区目录（用于导出文件）- 使用相对路径，支持多用户
+# 获取用户主目录下的 .openclaw/workspace
+WORKSPACE_DIR = os.path.join(os.path.expanduser('~'), '.openclaw', 'workspace')
+# 确保目录存在
+os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
 
 def query_indicator_detail_data_by_url(
@@ -52,8 +61,21 @@ def query_indicator_detail_data_by_url(
         # 构造完整请求URL（免鉴权接口）
         final_url = f"{base_api}?single_indicator_url={encoded_url}&column_name={encoded_column}"
 
-        # GET请求（免鉴权，不需要yxdata-token）
-        resp = requests.get(final_url, timeout=30)
+        # GET请求（免鉴权接口，但根据技能要求仍添加认证头部）
+        empno = os.getenv('coclaw_empno')
+        auth_token = os.getenv('coclaw_token')
+        yxdata_token = os.getenv('coclaw_yxdata_token')
+        if not yxdata_token and empno and auth_token:
+            try:
+                from auth import AuthManager
+                auth_mgr = AuthManager()
+                yxdata_token = auth_mgr.get_token(empno, auth_token)
+            except Exception:
+                yxdata_token = None
+        headers = get_auth_headers(yxdata_token, auth_token, empno)
+        # 过滤掉 None 值，避免发送空字段
+        headers = {k: v for k, v in headers.items() if v is not None}
+        resp = requests.get(final_url, headers=headers, timeout=30)
         resp.raise_for_status()
         result = resp.json()
         # DEBUG: 打印API原始返回的关键字段
@@ -74,8 +96,35 @@ def query_indicator_detail_data_by_url(
                 standardized = {
                     "code": 200,
                     "message": result.get('message', 'success'),
-                    "data": result.get('data', [])
+                    "data": result.get('data', []),
+                    "export": {"csv": []}
                 }
+                # 自动导出为 CSV
+                try:
+                    data_content = result.get('data')
+                    if data_content:
+                        # 构造表格结构
+                        if isinstance(data_content, list) and len(data_content) > 0:
+                            # 从数据中提取表头（保持顺序）
+                            if isinstance(data_content[0], dict):
+                                columns = list(data_content[0].keys())
+                                table = {'column': columns, 'row': [[item.get(col) for col in columns] for item in data_content]}
+                            else:
+                                table = None
+                        elif isinstance(data_content, dict) and 'row' in data_content:
+                            table = data_content
+                        else:
+                            table = None
+                        
+                        if table:
+                            safe_col = column_name.replace(' ', '_').replace('/', '_').replace('\\', '_')[:50]
+                            base_name = generate_filename("indicator_detail", safe_col)
+                            base_path = os.path.join(WORKSPACE_DIR, base_name)
+                            
+                            if export_table_to_csv(table, base_path):
+                                standardized['export']['csv'].append(f"{base_path}.csv")
+                except Exception as e:
+                    standardized['export_error'] = str(e)
             else:
                 standardized = {
                     "code": 500,

@@ -7,8 +7,11 @@ import os
 import re
 import json
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
+
+import requests
+import time
 
 # 配置日志
 logging.basicConfig(level=logging.INFO)
@@ -120,6 +123,20 @@ class ImapQueryOrchestrator:
             r'指标.*明细',
             r'column.*name',
             r'single_indicator_url'
+        ],
+        'query_indicator_detail': [
+            r'导出.*详单',
+            r'导出.*excel',
+            r'获取.*详单',
+            r'下载.*详单',
+            r'导出.*数据'
+        ],
+        'query_all_detail': [
+            r'\|\s*指标详单数据\s*\|',
+            r'指标详单数据',
+            r'all_api.*指标',
+            r'全量.*详单',
+            r'导出.*全量.*数据'
         ]
     }
 
@@ -161,6 +178,60 @@ class ImapQueryOrchestrator:
         }
         return mapping.get(query_type, [])
 
+    def _extract_target_object(self, name: str) -> str:
+        """从指标名称提取目标对象(MR/PR/US等)"""
+        name_lower = name.lower()
+        # 按优先级匹配
+        mapping_list = [
+            ('us', 'US'),
+            ('mr', 'MR'),
+            ('pr', 'PR'),
+            ('rr', 'RR'),
+            ('版本', '版本'),
+            ('单板', '单板'),
+            ('硬件', '硬件'),
+            ('人力', '人力'),
+            ('代码', '代码'),
+            ('缺陷', '缺陷'),
+            ('故障', '故障'),
+            ('需求', '需求')
+        ]
+        for key, val in mapping_list:
+            if key in name_lower:
+                return val
+        return "其他"
+
+    def _infer_indicator_type(self, name: str, description: str = "") -> List[str]:
+        """推断指标类型标签(交付周期/吞吐量/缺陷/比率等)"""
+        types = []
+        name_lower = name.lower()
+        desc_lower = description.lower() if description else ""
+        text = name_lower + " " + desc_lower
+        
+        if any(kw in text for kw in ['交付周期', '周期', '周转']):
+            types.append('交付周期')
+        if any(kw in text for kw in ['吞吐量', '吞吐率', '吞吐', '产出']):
+            types.append('吞吐量')
+        if any(kw in text for kw in ['缺陷', '泄露', '故障', '问题']):
+            types.append('缺陷')
+        if '完成度' in text or '完成率' in text:
+            types.append('完成度')
+        if any(kw in text for kw in ['率', '占比', '达成率', '合格率', '成功率', '比例', '比率']):
+            types.append('比率')
+        if '代码' in text or '千行' in text:
+            types.append('代码')
+        if '人力' in text or '人月' in text:
+            types.append('人力')
+        if '开发' in text and '周期' in text:
+            types.append('开发周期')
+        if '测试' in text and '周期' in text:
+            types.append('测试周期')
+        if '分析' in text and '周期' in text:
+            types.append('分析周期')
+        if not types:
+            types.append('其他')
+        return types
+
     def process_query(self, user_query: str):
         logger.info(f"处理查询: {user_query}")
 
@@ -200,7 +271,8 @@ class ImapQueryOrchestrator:
             'query_by_url': self._handle_query_by_url,
             'list_capabilities': self._handle_list_capabilities,
             'unknown': self._handle_unknown,
-        'query_indicator_detail_by_url': self._handle_query_indicator_detail_by_url
+            'query_indicator_detail_by_url': self._handle_query_indicator_detail_by_url,
+            'query_all_detail': self._handle_query_all_detail
         }
 
         handler = handlers.get(intent, self._handle_unknown)
@@ -250,6 +322,59 @@ class ImapQueryOrchestrator:
         if any(kw in indicator_name for kw in ['速率', '趋势', '走势', '变化']):
             return "折线图"
         return "柱状图"
+    
+    def _match_detail_field(self, indicator_name: str, available_fields: List[str]) -> Optional[str]:
+        """从可用字段中匹配最相关的详单字段
+        
+        Args:
+            indicator_name: 指标名称（如"MR交付周期（天）"）
+            available_fields: 详单信息中的字段名列表
+            
+        Returns:
+            匹配的字段名，未匹配返回None
+        """
+        if not available_fields:
+            return None
+        
+        # 清理指标名称，移除括号和特殊字符
+        clean_name = re.sub(r'[（()）]', '', indicator_name)
+        clean_name = clean_name.replace(' ', '').lower()
+        
+        # 得分映射
+        scores = {}
+        for field in available_fields:
+            score = 0
+            field_lower = field.lower()
+            
+            # 1. 完全包含匹配
+            if clean_name in field_lower or field_lower in clean_name:
+                score += 100
+            
+            # 2. 核心关键词匹配
+            keywords = ['mr', 'pr', 'us', '交付周期', '吞吐量', '缺陷', '关闭', '发现', '完成', '人数', '代码']
+            for kw in keywords:
+                if kw in clean_name and kw in field_lower:
+                    score += 50
+            
+            # 3. 对象类型匹配
+            if 'mr' in clean_name and 'mr' in field_lower:
+                score += 30
+            if 'pr' in clean_name and 'pr' in field_lower:
+                score += 30
+            if '缺陷' in clean_name and ('缺陷' in field_lower or '问题' in field_lower):
+                score += 30
+            
+            # 4. 长度惩罚（避免过长字段）
+            if len(field) > 50:
+                score -= 20
+            
+            scores[field] = score
+        
+        # 取最高分
+        if not scores:
+            return None
+        best = max(scores.items(), key=lambda x: x[1])
+        return best[0] if best[1] > 0 else None
 
     def _detect_x_axis(self, content: list) -> str:
         """自动识别X轴字段(时间/周期类)"""
@@ -294,9 +419,29 @@ class ImapQueryOrchestrator:
 
         if intent == 'query_indicator':
             # 提取指标名称
+            # 优化：优先匹配更长的、更具体的指标名称（避免'缺陷'过早匹配）
             indicator_keywords = [
-                'MR交付周期', '需求交付', '代码产出', '缺陷', '代码量',
-                '交付速率', '交付周期', '产出量', '完成率'
+                '系统测试缺陷关闭占比', '系统测试自动化发现缺陷占比',
+                'MR交付周期', 'MR人均分析吞吐率', 'MR人均开发吞吐率', 'MR人均测试吞吐率',
+                'MR分析周期', 'MR吞吐量', 'MR实现周期', 'MR开发周期', 'MR测试周期',
+                'PR交付周期', 'PR吞吐量', 'PR开发周期', 'PR分析周期',
+                'RR按期达成率', 'US吞吐量', 'US故事点吞吐量',
+                '人均MR吞吐率', '人均PR吞吐率', '人均US吞吐率', '人均US故事点吞吐率',
+                '代码优选率', '位号优选率', '关键故障业务恢复时长', '关键故障软件定位时长',
+                '单板一年批量商用率', '单板一版成功率', '单板半年批量商用率', '单板直通率的达标率',
+                '吞吐量_MR/PR/US', '商用发布版本的补丁占比', '外场关键故障数', '外场故障数',
+                '开发人均代码行', '开发人均泄露缺陷数', '开发千行代码缺陷数',
+                '异常出厂比例', '整机直通率的达标率', '方案引入缺陷率', '标模调用率',
+                '测试策略原因导致的外场故障数', '测试设计原因导致的外场故障数',
+                '版本交付周期', '版本发布1个月前关闭缺陷占比', '版本发布1个月前发现缺陷占比',
+                '硬件交付周期', '硬件开发周期', '硬件故障定位时长', '硬件转产周期',
+                '系统测试周期', '系统测试缺陷关闭占比', '系统测试自动化发现缺陷占比',
+                '缺陷平均解决周期', '缺陷CCB审核周期',
+                '补丁数', '里程碑基准计划达成率', '需求分析引入缺陷率', '研究院内非外包人力',
+                '已规划MR-折算0.1', '已开发MR-折算0.5', '已验收MR-折算0.3', '可交付MR-折算0.1',
+                'AI需求分析评审问题采纳率', 'AI需求分析占比', 'AI需求分析内容采纳率',
+                'AI需求分析生成率', 'AI文本测试用例生成率', 'AI系统测试文本测试用例生成率',
+                '需求交付', '代码产出', '代码量', '交付速率', '交付周期', '产出量', '完成率'
             ]
             for kw in indicator_keywords:
                 if kw in query:
@@ -307,7 +452,7 @@ class ImapQueryOrchestrator:
 
             # 提取查询类型和名称
             # 优先基于已知实体列表精确匹配,提高鲁棒性
-            known_project_groups = ['ZXUFP', 'BVB', '有线效能工具', 'VBP', 'VBS', 'ZXSUP']
+            known_project_groups = ['ZXUFP', 'BVB', '有线效能工具', 'VBP', 'VBS', 'ZXSUP', 'ZXROSNG', 'ZXA10 C6xx', 'ZXA10 C3xx', 'ZXMP M721', 'ZXUCP', 'ZXONE 7000']
             known_departments = ['FM开发二部', '软件平台开发六部', '有线研究院']
             known_centers = ['FM产品研发中心', '软件平台研发中心']
 
@@ -496,6 +641,232 @@ class ImapQueryOrchestrator:
             "message": "认证失败或未配置token,显示示例数据(共87个指标)"
         }
 
+    def _parse_response_page(self, result: Any) -> List[Any]:
+        """解析API单页响应数据（支持多种返回格式）"""
+        page_data = []
+        if isinstance(result, dict):
+            if result.get('status') is True or result.get('code') == 200:
+                payload = result.get('data', result.get('content', []))
+                if isinstance(payload, dict) and 'content' in payload:
+                    page_data = payload['content']
+                elif isinstance(payload, list):
+                    page_data = payload
+            elif 'column' in result and 'row' in result:
+                columns = result['column']
+                rows = result['row']
+                if isinstance(columns, list) and isinstance(rows, list):
+                    page_data = [dict(zip(columns, row)) for row in rows if isinstance(row, list)]
+            elif 'content' in result:
+                content = result['content']
+                if isinstance(content, list):
+                    page_data = content
+        elif isinstance(result, list):
+            page_data = result
+        return page_data
+
+    def _fetch_paginated_data(self, api_url: str, base_params: Dict[str, Any], headers: Dict[str, str], page_size: int = 5000) -> List[Any]:
+        """自动翻页获取全量数据（从支持分页的API）"""
+        import time
+        all_data = []
+        total = None
+        page = 1
+        
+        while True:
+            params = base_params.copy()
+            params['pageSize'] = str(page_size)
+            params['page'] = str(page)
+            
+            try:
+                resp = requests.get(api_url, params=params, headers=headers, timeout=60)
+                resp.raise_for_status()
+                result = resp.json()
+                
+                page_data = self._parse_response_page(result)
+                all_data.extend(page_data)
+                
+                # 尝试获取总数
+                if total is None:
+                    if isinstance(result, dict):
+                        if 'total' in result:
+                            total = result['total']
+                        elif 'data' in result and isinstance(result['data'], dict) and 'total' in result['data']:
+                            total = result['data']['total']
+                
+                # 判断是否继续翻页
+                if total is not None and len(all_data) >= total:
+                    break
+                if len(page_data) < page_size:
+                    break
+                page += 1
+                time.sleep(0.2)
+            except Exception as e:
+                logger.warning(f"第{page}页失败: {e}")
+                break
+        
+        return all_data
+
+    def _fetch_detail_data(self, detail_config: Dict, indicator_name: str, indicator_type: Any, y_axis_meta: str, 
+                          dimension_param: str, dimension_id: str, yxdata_token: str = None, auth_token: str = None, empno: str = None, export_excel: bool = False) -> Tuple[Dict, Dict]:
+        """获取详单数据并可选导出Excel
+        
+        Returns:
+            (detail_data_dict, excel_export_info)
+        """
+        detail_data = {}
+        excel_info = None
+        
+        # 确定分子分母或主字段
+        numerator_name = None
+        denominator_name = None
+        main_field = None
+        
+        # 规范化指标类型字符串
+        if isinstance(indicator_type, list):
+            indicator_type_str = ' '.join(indicator_type)
+        else:
+            indicator_type_str = str(indicator_type) if indicator_type else ''
+        
+        # 率值类判断
+        is_ratio = False
+        if '率值' in indicator_type_str or '占比' in indicator_name or '率' in indicator_name:
+            is_ratio = True
+            # 尝试从Y轴字段解析
+            y_fields = [f.strip() for f in y_axis_meta.split(',')] if y_axis_meta else []
+            if len(y_fields) >= 2:
+                numerator_name = y_fields[0]
+                denominator_name = y_fields[1]
+            else:
+                # 智能识别
+                keys = list(detail_config.keys())
+                for key in keys:
+                    if any(kw in key for kw in ['关闭', '完成', '达标', '交付']):
+                        numerator_name = key
+                        break
+                for key in keys:
+                    if any(kw in key for kw in ['发现', '新增', '总数', '需求']):
+                        if key != numerator_name:
+                            denominator_name = key
+                            break
+                # 如果仍未找到，尝试查找人力、人数相关字段
+                if not denominator_name:
+                    for key in keys:
+                        if any(kw in key for kw in ['人力', '人数', '人月', '人员', 'headcount']):
+                            if key != numerator_name:
+                                denominator_name = key
+                                break
+        else:
+            # 数量类/周期类：匹配指标名称
+            main_field = self._match_detail_field(indicator_name, list(detail_config.keys()))
+        
+        # 获取详单数据
+        def fetch_one(field_name: str) -> Optional[Dict]:
+            info = detail_config.get(field_name)
+            if not info or not isinstance(info, dict):
+                return None
+            api_url = info.get('all_api') or info.get('association_api')
+            if not api_url:
+                return None
+            try:
+                # 构造请求头
+                headers = {}
+                if yxdata_token:
+                    headers['yxdata-token'] = yxdata_token
+                if auth_token:
+                    headers['X-Auth-Value'] = auth_token
+                if empno:
+                    headers['X-Emp-No'] = empno
+                
+                # 使用统一分页方法获取全量数据
+                all_data = self._fetch_paginated_data(api_url, {dimension_param: dimension_id}, headers)
+                
+                return {
+                    'field': field_name,
+                    'url': f"{api_url}?{dimension_param}={dimension_id}",
+                    'count': len(all_data),
+                    'data': all_data
+                }
+            except Exception as e:
+                logger.error(f"详单获取失败[{field_name}]: {e}")
+                return None
+        
+        if is_ratio:
+            if numerator_name:
+                num = fetch_one(numerator_name)
+                if num:
+                    detail_data['numerator'] = num
+            if denominator_name:
+                den = fetch_one(denominator_name)
+                if den:
+                    detail_data['denominator'] = den
+        else:
+            if main_field:
+                main = fetch_one(main_field)
+                if main:
+                    detail_data['main'] = main
+        
+        # 导出数据为多个 CSV 文件（不依赖 pandas）
+        if detail_data and export_excel:
+            try:
+                from datetime import datetime
+                import csv
+                
+                safe_name = re.sub(r'[^\w\u4e00-\u9fa5]', '_', indicator_name)[:50]
+                base_filename = f"{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                # 导出到 workspace 根目录（统一使用用户目录）
+                workspace_dir = os.path.join(os.path.expanduser('~'), '.openclaw', 'workspace')
+                os.makedirs(workspace_dir, exist_ok=True)
+                base_path = os.path.join(workspace_dir, base_filename)
+                
+                exported_files = []
+                
+                # 为每个详单字段导出独立 CSV
+                for key, val in detail_data.items():
+                    if val and val.get('data'):
+                        data_rows = val['data']
+                        if not data_rows:
+                            continue
+                        # 尝试确定列名
+                        if isinstance(data_rows[0], dict):
+                            columns = list(data_rows[0].keys())
+                            rows = [list(row.values()) for row in data_rows]
+                        else:
+                            columns = [f'列{i+1}' for i in range(len(data_rows[0]))]
+                            rows = data_rows
+                        csv_file = f"{base_path}_{key}.csv"
+                        with open(csv_file, 'w', newline='', encoding='utf-8-sig') as f:
+                            writer = csv.writer(f)
+                            writer.writerow(columns)
+                            for row in rows:
+                                writer.writerow([str(item) if item is not None else '' for item in row])
+                        exported_files.append(csv_file)
+                
+                # 导出汇总 info CSV
+                summary = [{
+                    '类型': k,
+                    '字段': v.get('field', ''),
+                    '记录数': v.get('count', len(v.get('data', [])) if v else 0),
+                    'URL': v.get('url', '')
+                } for k, v in detail_data.items() if v]
+                if summary:
+                    info_file = f"{base_path}_info.csv"
+                    with open(info_file, 'w', newline='', encoding='utf-8-sig') as f:
+                        if summary:
+                            writer = csv.DictWriter(f, fieldnames=summary[0].keys())
+                            writer.writeheader()
+                            writer.writerows(summary)
+                    exported_files.append(info_file)
+                
+                excel_info = {
+                    'available': True,
+                    'filename': base_filename,
+                    'exported_files': exported_files,
+                    'count': len(exported_files)
+                }
+            except Exception as e:
+                excel_info = {'available': False, 'reason': str(e)}
+        
+        return detail_data, excel_info
+
     def _handle_query_indicator(self, query: str, params: Dict):
         """处理指标查询"""
         missing = []
@@ -512,6 +883,10 @@ class ImapQueryOrchestrator:
                 "error": f"缺少必要参数: {', '.join(missing)}",
                 "suggestion": "请提供完整的查询描述,例如:'查询ZXUFP项目组的MR交付周期'"
             }
+        
+        # 是否自动获取详单数据（用户未明确，默认False；可通过参数控制）
+        auto_fetch_detail = params.get('auto_fetch_detail', False)
+        export_excel = params.get('export_excel', False)
 
         # 尝试使用真实API查询(接口2权限校验 -> 接口1取指标元信息 -> 接口4名称转ID -> 接口5取数)
         if REAL_API_AVAILABLE:
@@ -571,6 +946,19 @@ class ImapQueryOrchestrator:
                 if not api_url:
                     raise Exception("指标缺少API地址")
 
+                # ✅ 从接口1返回中直接读取三个字段（data_analysis_indicator_config表）
+                # 1. 指标类型：优先使用接口返回，否则回退到推断
+                raw_indicator_type = indicator.get('指标类型') or indicator.get('indicator_type')
+                if not raw_indicator_type:
+                    raw_indicator_type = self._infer_indicator_type(
+                        indicator.get('指示器名称', ''),
+                        indicator.get('指示器描述', '')
+                    )
+                # 2. 指向性：直接读取接口返回（应为结构化对象）
+                raw_directivity = indicator.get('指向性') or indicator.get('directivity')
+                # 3. 详单信息：直接读取接口返回
+                raw_detail_info = indicator.get('详单信息') or indicator.get('detail_info')
+                
                 chart_type_cn = indicator.get('图表类型') or indicator.get('chart_type') or self._infer_chart_type(indicator.get('指示器名称', ''))
                 chart_type = self._map_chart_type(chart_type_cn)
                 x_axis_meta = indicator.get('图表x轴', '')
@@ -612,6 +1000,54 @@ class ImapQueryOrchestrator:
                 if not y_axis_meta:
                     y_axis_meta = self._detect_y_axis(content)
 
+                # 计算指标类型和目标对象
+                indicator_type = self._infer_indicator_type(
+                    indicator.get('指示器名称', ''),
+                    indicator.get('指示器描述', '')
+                )
+                target_object = self._extract_target_object(indicator.get('指示er名称', ''))
+                
+                # ========== 新增：自动获取详单数据（使用当前指标的详单配置） ==========
+                detail_data = {}
+                excel_info = None
+                if raw_detail_info:
+                    logger.info(f"检测到指标'{indicator.get('指示器名称')}'的详单配置，自动获取详单数据...")
+                    try:
+                        # 解析 raw_detail_info（可能是字符串或字典）
+                        detail_config = None
+                        if isinstance(raw_detail_info, dict):
+                            detail_config = raw_detail_info
+                        elif isinstance(raw_detail_info, str):
+                            try:
+                                detail_config = json.loads(raw_detail_info)
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"详单配置JSON解析失败: {e}")
+                                detail_config = None
+                        
+                        if detail_config:
+                            detail_data, excel_info = self._fetch_detail_data(
+                                detail_config=detail_config,
+                                indicator_name=indicator.get('指示器名称', ''),
+                                indicator_type=raw_indicator_type or indicator_type,
+                                y_axis_meta=y_axis_meta,
+                                dimension_param=dimension_param,
+                                dimension_id=dimension_id,
+                                yxdata_token=yxdata_token,
+                                auth_token=self.token,
+                                empno=self.empno,
+                                export_excel=True
+                            )
+                            logger.info(f"详单数据获取完成: {len(detail_data)} 个字段")
+                        else:
+                            logger.warning("详单配置为空或格式错误，跳过详单获取")
+                    except Exception as e:
+                        logger.warning(f"自动获取详单数据失败: {e}")
+                        detail_data = {}
+                        excel_info = None
+                else:
+                    logger.info(f"指标'{indicator.get('指示器名称')}'未配置详单信息，跳过详单获取")
+                # ========== 新增结束 ==========
+                
                 return {
                     "status": True,
                     "type": "indicator_data",
@@ -619,15 +1055,34 @@ class ImapQueryOrchestrator:
                         "name": indicator.get('指示器名称'),
                         "description": indicator.get('指示器描述'),
                         "chart_type": chart_type_cn,
+                        # ✅ 使用从接口返回的字段（已做回退处理）
+                        "indicator_type": raw_indicator_type,
+                        "directivity": raw_directivity,
+                        "detail_info": raw_detail_info,
+                        "target_object": target_object,
                         "x_axis": x_field,
                         "y_axis": y_axis_meta,
-                        "api_url": api_url
+                        "api_url": api_url,
+                        "raw_metadata": {
+                            "指示器名称": indicator.get('指示器名称'),
+                            "指示器描述": indicator.get('指示器描述'),
+                            "api_接口地址": api_url,
+                            "图表类型": chart_type_cn,
+                            "图表x轴": x_axis_meta,
+                            "图表y轴": indicator.get('图表y轴'),
+                            "api_返回字段": indicator.get('api_返回字段'),
+                            # ✅ 保留原始三个字段的原始值
+                            "指标类型": indicator.get('指标类型'),
+                            "指向性": indicator.get('指向性'),
+                            "详单信息": indicator.get('详单信息')
+                        }
                     },
                     "query_condition": {
                         "type": params['query_type'],
                         "name": params['query_name'],
                         "id": dimension_id,
-                        "param": dimension_param
+                        "param": dimension_param,
+                        "scope": f"{params['query_type']}视图"
                     },
                     "data": {
                         "count": len(content),
@@ -646,26 +1101,57 @@ class ImapQueryOrchestrator:
                             "y_label": y_axis_meta or '数值'
                         }
                     },
-                    "message": "查询成功(实时数据)"
+                    # ✅ 详单信息优先使用接口返回的数据，否则沿用detail_info结构
+                    "detail_info": raw_detail_info if raw_detail_info else {
+                        "available": False,
+                        "reason": "未提供single_indicator_url",
+                        "suggestion": "如需要获取详单（下钻）数据，请提供IMAP Dashboard中该指标的URL链接，或使用URL取数功能。"
+                    },
+                    "message": "查询成功(实时数据)",
+                    "detail_data": detail_data,
+                    "excel_export": excel_info
                 }
             except Exception as e:
                 logger.error(f"实时查询失败,回退到示例数据: {e}")
 
         # 回退示例数据
+        # 注意：示例模式下无法从接口获取 指标类型/指向性/详单信息，使用推断或默认值
+        example_indicator_type = self._infer_indicator_type(params['indicator_name'], '')
+        example_target_object = self._extract_target_object(params['indicator_name'])
+        example_directivity = {"scope": "示例模式", "note": "实际数据需配置认证"}
+        example_detail_info = {
+            "available": False,
+            "reason": "示例模式不提供详单数据",
+            "suggestion": "配置有效 token 后可获取实时数据及详单信息。"
+        }
+        
         return {
             "status": True,
             "type": "indicator_data",
             "indicator": {
                 "name": params['indicator_name'],
                 "chart_type": "柱状图",
+                "indicator_type": example_indicator_type,
+                "directivity": example_directivity,
+                "detail_info": example_detail_info,
+                "target_object": example_target_object,
                 "x_axis": "周期",
                 "y_axis": "平均数,中位数",
+                "api_url": "",
+                "raw_metadata": {
+                    "指示器名称": params['indicator_name'],
+                    "图表类型": "柱状图",
+                    "指标类型": example_indicator_type,
+                    "指向性": example_directivity,
+                    "详单信息": example_detail_info
+                }
             },
             "query_condition": {
                 "type": params['query_type'],
                 "name": params['query_name'],
                 "id": "48",
-                "param": "projectGroup_id"
+                "param": "projectGroup_id",
+                "scope": f"{params['query_type']}视图"
             },
             "data": {
                 "count": 29,
@@ -690,7 +1176,14 @@ class ImapQueryOrchestrator:
                     "y_label": "平均数,中位数"
                 }
             },
-            "message": "查询成功(示例数据)"
+            "detail_info": {
+                "available": False,
+                "reason": "示例模式不提供详单数据",
+                "suggestion": "配置有效 token 后可获取实时数据及详单信息。"
+            },
+            "message": "查询成功(示例数据)",
+            "detail_data": {},
+            "excel_export": None
         }
 
     def _handle_list_capabilities(self, query: str, params: Dict):
@@ -1173,6 +1666,62 @@ class ImapQueryOrchestrator:
                 "suggestion": "请检查网络连接或稍后重试"
             }
 
+    def _handle_query_all_detail(self, query: str, params: Dict):
+        """处理全量详单数据查询（all_api场景）
+        
+        用户可以使用此场景直接获取指标的完整详单数据并导出为CSV。
+        参数：
+        - indicator_name: 指标名称
+        - query_type: 查询类型（项目组/部门/中心）
+        - query_name: 查询名称
+        """
+        # 检查必要参数
+        missing = []
+        if not params.get('indicator_name'):
+            missing.append('指标名称')
+        if not params.get('query_type'):
+            missing.append('查询类型')
+        if not params.get('query_name'):
+            missing.append('查询条件')
+        
+        if missing:
+            return {
+                "status": False,
+                "error": f"缺少必要参数: {', '.join(missing)}",
+                "suggestion": "请提供完整的查询描述,例如: '| 指标详单数据 | 查询ZXUFP项目组的MR交付周期'"
+            }
+        
+        # 调用 _handle_query_indicator 并强制导出CSV
+        # 合并参数：除了原参数外，强制设置 export_excel=True
+        merged_params = params.copy()
+        merged_params['export_excel'] = True
+        
+        # 重用指标查询逻辑，但只关注导出结果
+        result = self._handle_query_indicator(query, merged_params)
+        
+        # 简化返回：只保留导出信息
+        if result.get('status'):
+            excel_info = result.get('excel_export')
+            if excel_info and excel_info.get('available'):
+                return {
+                    "status": True,
+                    "type": "all_detail_export",
+                    "indicator": result.get('indicator', {}),
+                    "query_condition": result.get('query_condition', {}),
+                    "excel_export": excel_info,
+                    "message": f"全量详单数据已导出: {excel_info.get('filename')} (共{excel_info.get('count')}个文件)"
+                }
+            else:
+                return {
+                    "status": False,
+                    "error": "详单数据导出失败",
+                    "reason": excel_info.get('reason') if excel_info else '未知错误',
+                    "suggestion": "请确认指标已配置详单信息或all_api接口可用"
+                }
+        else:
+            # 查询失败，返回原错误
+            return result
+
     def _handle_unknown(self, query: str, params: Dict):
         """处理未知意图"""
         return {
@@ -1183,7 +1732,8 @@ class ImapQueryOrchestrator:
                 "查询ZXUFP项目组的MR交付周期",
                 "查看我的权限",
                 "查询我的用户信息",
-                "通过URL链接查询数据"
+                "通过URL链接查询数据",
+                "| 指标详单数据 | 查询项目组的指标详单"
             ],
             "help": "请尝试更明确的描述"
         }
@@ -1229,7 +1779,7 @@ class ImapQueryOrchestrator:
 
     def _save_data_to_excel(self, data: list, url: str, column_name: str) -> str:
         """
-        将详单数据保存为 Excel 文件
+        将详单数据保存为 CSV 文件（纯标准库实现）
         
         Args:
             data: 完整数据列表
@@ -1237,7 +1787,7 @@ class ImapQueryOrchestrator:
             column_name: 下钻字段名
             
         Returns:
-            Excel文件保存路径
+            CSV文件保存路径
         """
         try:
             # 创建工作区目录（如果不存在）
@@ -1255,48 +1805,38 @@ class ImapQueryOrchestrator:
                 url_part = 'dashboard'
             
             safe_column = column_name.replace('/', '_').replace('\\', '_')[:30]
-            filename = f"imap_detail_{timestamp}_{safe_column}"
+            base_name = f"imap_detail_{timestamp}_{safe_column}"
             if url_part:
-                filename += f"_{url_part}"
-            filename += ".xlsx"
+                base_name += f"_{url_part}"
             
-            excel_path = os.path.join(workspace_dir, filename)
+            csv_path = os.path.join(workspace_dir, f"{base_name}.csv")
             
-            # 尝试使用 pandas（需要 openpyxl）
-            try:
-                import pandas as pd
-                df = pd.DataFrame(data)
-                df.to_excel(excel_path, index=False)
-                logger.info(f"详单数据已保存到: {excel_path} (使用 pandas)")
-                return excel_path
-            except ImportError:
-                logger.warning("pandas 未安装，尝试使用 xlwt")
-                try:
-                    import xlwt
-                except ImportError:
-                    logger.error("既没有 pandas 也没有 xlwt，无法保存 Excel")
-                    return None
-                
-                workbook = xlwt.Workbook(encoding='utf-8')
-                worksheet = workbook.add_sheet('详单数据')
-                
-                if data:
-                    headers = list(data[0].keys())
-                    for col_idx, header in enumerate(headers):
-                        worksheet.write(0, col_idx, header)
-                    
-                    for row_idx, row in enumerate(data, start=1):
-                        for col_idx, header in enumerate(headers):
-                            value = row.get(header, '')
-                            worksheet.write(row_idx, col_idx, str(value))
-                
-                workbook.save(excel_path)
-                logger.info(f"详单数据已保存到: {excel_path} (使用 xlwt)")
-                return excel_path
+            if not data:
+                logger.warning("无数据可保存")
+                return ''
+            
+            # 确定 CSV 列和数据行
+            first = data[0]
+            if isinstance(first, dict):
+                columns = list(first.keys())
+                rows = [list(d.values()) for d in data]
+            else:
+                columns = [f'列{i+1}' for i in range(len(first))]
+                rows = data
+            
+            import csv
+            with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow(columns)
+                for row in rows:
+                    writer.writerow([str(x) if x is not None else '' for x in row])
+            
+            logger.info(f"详单数据已保存到: {csv_path}")
+            return csv_path
             
         except Exception as e:
-            logger.error(f"保存Excel失败: {e}")
-            return None
+            logger.error(f"保存 CSV 失败: {e}")
+            return ''
 
 
 def quick_query(user_query: str, empno=None, token=None):

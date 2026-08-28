@@ -72,7 +72,11 @@ async def resolve_mcp_list(
 
     if payload_mcp:
         allowed = set(binding_ids)
-        return [m for m in payload_mcp if int(m.get("id") or 0) in allowed]
+        # 绑定 ID 是组件 id；payload 条目优先用 componentId，缺省时退化为 id
+        return [
+            m for m in payload_mcp
+            if int(m.get("componentId") or m.get("id") or 0) in allowed
+        ]
 
     from api.mcp_api import _fetch_external_mcp_all_list, _normalize_mcp_item, _resolve_mcp_source_list
     from config import get_logger
@@ -99,7 +103,8 @@ async def resolve_mcp_list(
                 catalog, source = [], ""
 
     try:
-        id_to_item = {int(i.get("id")): i for i in catalog if i.get("id")}
+        # 绑定 ID 是组件 id（Component.id），目录条目通过 componentId 字段对应
+        id_to_item = {int(i.get("componentId")): i for i in catalog if i.get("componentId")}
         matched = [id_to_item[mid] for mid in binding_ids if mid in id_to_item]
         missing_ids = [mid for mid in binding_ids if mid not in id_to_item]
 
