@@ -435,7 +435,7 @@ class ProductionConfig(BaseConfig):
     MCP_ALL_TOOLS_API_URL: str = "https://aip.zte.com.cn/cmtool/api/v1/component/mcp/all"
     MCP_USE_MOCK: bool = False
     MCP_FALLBACK_TO_MOCK: bool = False
-    SKILL_CATALOG_AUTO_SYNC: bool = False
+    SKILL_CATALOG_AUTO_SYNC: bool = True
 
 
 # ==================== 配置工厂 ====================
