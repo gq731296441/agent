@@ -97,7 +97,11 @@ async def get_sandbox_backend_if_enabled(
     store=None,
     user_token: Optional[str] = None,
 ):
-    """向后兼容：返回 backend 实例。"""
+    """向后兼容：返回 backend 实例。
+
+    注：全仓库当前无调用者（保留作为兼容入口）。生产路径走 factory.py 的
+    `get_sandbox_backend_factory_if_enabled`。
+    """
     factory = await get_sandbox_backend_factory_if_enabled(
         user_id, session_id, store=store, user_token=user_token
     )
@@ -136,43 +140,66 @@ async def touch_session_sandbox(user_id: str, session_id: str) -> None:
 
 
 async def release_session_sandbox(user_id: str, session_id: str) -> bool:
-    """Run 结束后 stop 沙箱，保留 container 供 docker start 复用。"""
+    """Run 结束后 stop 沙箱，保留 container 供 docker start 复用。
+
+    返回是否真正释放（False = 无沙箱可释放，或释放失败）。
+    """
     if not app_config.SANDBOX_ENABLED:
         return False
     try:
         released = await get_sandbox_service().release(user_id, session_id)
-        if released:
-            from deep_agent_server.sandbox.status_notify import notify_sandbox_status_changed
-
-            await notify_sandbox_status_changed(user_id)
-        return released
     except Exception as e:
         logger.warning(f"[Sandbox] release session 失败: {e}")
         return False
+    if released:
+        try:
+            from deep_agent_server.sandbox.status_notify import notify_sandbox_status_changed
+
+            await notify_sandbox_status_changed(user_id)
+        except Exception as e:
+            # 通知失败不应把已成功的释放报成失败
+            logger.debug(f"[Sandbox] release 后状态通知失败: {e}")
+    return released
 
 
-async def stop_session_sandbox(user_id: str, session_id: str) -> None:
+async def stop_session_sandbox(user_id: str, session_id: str) -> bool:
+    """停止指定会话沙箱。返回是否成功（供删除会话等调用方判断）。"""
     if not app_config.SANDBOX_ENABLED:
-        return
+        return False
     try:
         await get_sandbox_service().stop(user_id, session_id)
+    except Exception as e:
+        logger.warning(f"[Sandbox] stop session 失败: {e}")
+        return False
+    try:
         from deep_agent_server.sandbox.status_notify import notify_sandbox_status_changed
 
         await notify_sandbox_status_changed(user_id)
     except Exception as e:
-        logger.warning(f"[Sandbox] stop session 失败: {e}")
+        logger.debug(f"[Sandbox] stop 后状态通知失败: {e}")
+    return True
 
 
-async def stop_user_sandboxes(user_id: str) -> None:
-    """停止用户全部 session 沙箱（删用户等 bulk 操作）。"""
+async def stop_user_sandboxes(user_id: str) -> bool:
+    """停止用户全部 session 沙箱（删用户等 bulk 操作）。返回是否全部成功。"""
     if not app_config.SANDBOX_ENABLED:
-        return
+        return False
+    # 两个动作必须独立失败：停止容器失败时若跳过 DB 行清理，库里会残留
+    # running 记录，用户随后被误报"已达沙箱并发上限"却没有任何活容器。
+    stopped = True
     try:
         await get_sandbox_service().stop_all_for_user(user_id)
+    except Exception as e:
+        logger.warning(f"[Sandbox] stop all 失败（仍继续清理 DB 记录）: {e}")
+        stopped = False
+    try:
         from db import deep_storage
+
         await deep_storage.clear_user_sandbox_sessions(user_id)
     except Exception as e:
-        logger.warning(f"[Sandbox] stop all 失败: {e}")
+        logger.warning(f"[Sandbox] 清理沙箱记录失败: {e}")
+        stopped = False
+    return stopped
 
 
 async def stop_user_sandbox(user_id: str) -> None:

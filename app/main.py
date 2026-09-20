@@ -680,7 +680,7 @@ async def ws_endpoint(websocket: WebSocket):
                             await t
 
                         await SessionReadinessService.flush_pending(
-                            sid, user_id, _process_pending
+                            sid, user_id, _process_pending, send_fn=manager.send
                         )
 
                     SessionReadinessService.start_warmup(

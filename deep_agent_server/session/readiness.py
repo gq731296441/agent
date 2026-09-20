@@ -160,13 +160,30 @@ class SessionReadinessService:
                                 resolved_agent_id or "",
                                 creator_uid,
                             )
-                            await ensure_session_skill_mount(
-                                user_id,
-                                session_id,
-                                candidate_dirs,
-                                selected_skill_ids,
-                                manager=manager_agents,
+                            from deep_agent_server.skills.selection_guard import (
+                                SkillSelectionLockedError,
                             )
+
+                            try:
+                                await ensure_session_skill_mount(
+                                    user_id,
+                                    session_id,
+                                    candidate_dirs,
+                                    selected_skill_ids,
+                                    manager=manager_agents,
+                                )
+                            except SkillSelectionLockedError:
+                                raise  # 业务错误（skill 勾选锁定）照常上报
+                            except Exception as e:
+                                # 沙箱基础设施故障：降级为"无 execute"，warmup 仍 READY。
+                                # 与上方 try_ensure_sandbox_running 的语义对齐 —— 此前
+                                # 这里失败会让整个 warmup ERROR、会话卡在 ERROR 状态，
+                                # 而两者相隔仅二十余行。
+                                logger.warning(
+                                    f"[SessionReadiness] skill mount 失败，降级无 execute "
+                                    f"session={session_id}: {e}"
+                                )
+                                sandbox_ok = False
                     else:
                         sandbox_ok = None
                 else:
@@ -190,9 +207,17 @@ class SessionReadinessService:
                     err_content = e.to_error_payload()
                 else:
                     err_content = f"会话预热失败: {e}"
-                await deep_storage.upsert_session_start_task(
-                    session_id, user_id, SessionStartStatus.ERROR.value, error=str(e)[:500]
-                )
+                try:
+                    await deep_storage.upsert_session_start_task(
+                        session_id, user_id, SessionStartStatus.ERROR.value, error=str(e)[:500]
+                    )
+                except Exception as db_err:
+                    # 错误处理器自身不能抛：否则新异常会取代原始异常向外传播，
+                    # 把真正的失败原因掩盖掉。
+                    logger.error(
+                        f"[SessionReadiness] 写入 ERROR 状态失败 "
+                        f"session={session_id}: {db_err}"
+                    )
                 if send_fn:
                     from common.enums import MessageType, SenderType
                     from common.schemas import AgentMessage
@@ -363,6 +388,7 @@ class SessionReadinessService:
         session_id: str,
         user_id: str,
         process_fn: Callable,
+        send_fn: Optional[Callable] = None,
     ) -> None:
         """顺序处理 pending messages。"""
         if not await SessionReadinessService.is_ready(session_id):
@@ -376,4 +402,25 @@ class SessionReadinessService:
                 await process_fn(session_id, user_id, payload)
             except Exception as e:
                 logger.error(f"[SessionReadiness] flush error session={session_id}: {e}")
+                # 本批消息紧接着会被整体删除，失败的那条不会重排队 —— 必须让
+                # 用户知道它没被执行，否则消息静默消失、前端毫无感知。
+                if send_fn:
+                    try:
+                        from common.enums import MessageType, SenderType
+                        from common.schemas import AgentMessage
+
+                        await send_fn(
+                            AgentMessage(
+                                type=MessageType.ERROR,
+                                sender=SenderType.SYSTEM,
+                                session_id=session_id,
+                                content=f"消息处理失败，请重新发送: {str(e)[:200]}",
+                                save=False,
+                            ).to_frontend_dict(),
+                            session_id,
+                        )
+                    except Exception as notify_err:
+                        logger.warning(
+                            f"[SessionReadiness] flush 失败通知发送失败: {notify_err}"
+                        )
         await deep_storage.delete_pending_messages(session_id)

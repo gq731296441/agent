@@ -40,6 +40,10 @@ def get_docker_client() -> "docker.DockerClient":
 
     - 未设置 SANDBOX_DOCKER_HOST：docker.from_env()（本地 socket / 环境变量 DOCKER_HOST）
     - 已设置：DockerClient(base_url=SANDBOX_DOCKER_HOST)，如 ssh://sandbox@10.0.0.1
+
+    构造期即探测 daemon API 版本，连接失败（daemon 故障 / ssh 隧道断开 /
+    远端账号异常等）统一抛 SandboxUnavailable，便于调用方判别并降级，
+    而不是把第三方的 DockerException 裸露到上层。
     """
     global _client
     if _client is not None:
@@ -47,14 +51,23 @@ def get_docker_client() -> "docker.DockerClient":
 
     import docker
 
+    from deep_agent_server.sandbox.exceptions import SandboxUnavailable
+
     host = (app_config.SANDBOX_DOCKER_HOST or "").strip()
-    if host:
-        logger.info(
-            f"[Sandbox] Docker client remote: {format_sandbox_docker_host_for_log(host)}"
-        )
-        _client = docker.DockerClient(base_url=host)
-    else:
-        _client = docker.from_env()
+    try:
+        if host:
+            logger.info(
+                f"[Sandbox] Docker client remote: {format_sandbox_docker_host_for_log(host)}"
+            )
+            _client = docker.DockerClient(base_url=host)
+        else:
+            _client = docker.from_env()
+    except SandboxUnavailable:
+        raise
+    except Exception as e:
+        raise SandboxUnavailable(
+            f"沙箱服务不可用（无法连接 Docker daemon）: {e}", cause=e
+        ) from e
     return _client
 
 

@@ -272,10 +272,6 @@ async def create_deep_agent_for_session(
         llm_fp = "unknown"
 
     cache_agent_key = resolved_agent_id or "default"
-    cache_key = (
-        f"deep:{session_id}:{cache_agent_key}:cfg{config_version}:llm{llm_fp}:"
-        f"{mcp_hash}:{token_fp}:skills{selection_sig}:{sandbox_tag}"
-    )
 
     # 订阅智能体的 agent_skills_root 与 agent_id_for_sandbox
     agent_skills_root = None
@@ -302,6 +298,28 @@ async def create_deep_agent_for_session(
             sandbox_recreated = mount_result.recreated
         except SkillSelectionLockedError as lock_err:
             return None, lock_err.to_error_payload()
+        except SandboxUserLimitExceeded as limit_err:
+            # 配额超限是用户可感知、可自行处理的业务错误（前端有专门弹窗），
+            # 必须上报，不能被下面的降级分支吞成"无 execute 继续对话"。
+            return None, limit_err.to_error_payload()
+        except Exception as sandbox_err:
+            # 沙箱不可用时降级为"无 execute"继续构建，而不是让整个 run 失败。
+            # 常见诱因：Docker daemon 故障、ssh:// 隧道断开、远端账号异常（如密码过期）。
+            # 与 factory.py 中 get_sandbox_backend_factory_if_enabled 的降级语义保持一致。
+            from config import get_logger
+
+            get_logger(__name__).warning(
+                f"[Sandbox] 初始化失败，本次降级为无 execute: "
+                f"user={user_id} session={session_id} err={sandbox_err}"
+            )
+            skip_sandbox = True
+            sandbox_tag = "no-sbx"  # 让缓存 key 区分降级态，避免污染正常沙箱缓存
+
+    # cache_key 延后至此计算：沙箱降级会改写 sandbox_tag
+    cache_key = (
+        f"deep:{session_id}:{cache_agent_key}:cfg{config_version}:llm{llm_fp}:"
+        f"{mcp_hash}:{token_fp}:skills{selection_sig}:{sandbox_tag}"
+    )
 
     if (
         app_config.AGENT_CACHE_ENABLED

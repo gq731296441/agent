@@ -1501,6 +1501,24 @@ async def list_expired_sandbox_sessions(limit: int = 50) -> List[Dict[str, Any]]
         return [dict(r) for r in rows]
 
 
+async def list_all_sandbox_container_ids() -> List[str]:
+    """返回 DB 中登记的全部沙箱容器 ID。
+
+    供孤儿清理判断"Docker 里这个容器在 DB 是否有记录"——这是孤儿容器的
+    正确判据，而容器自身的 running/stopped 状态不能用来判断。
+    """
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT container_id
+            FROM deep_sandbox_sessions
+            WHERE container_id IS NOT NULL
+            """
+        )
+        return [r["container_id"] for r in rows]
+
+
 async def clear_sandbox_session(user_id: str, session_id: str) -> None:
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:

@@ -119,7 +119,12 @@ async def validate_skill_selection_for_ask(
     *,
     manager: Any = None,
 ) -> Optional[dict]:
-    """ask 前校验；若锁定返回 error payload，否则 None。"""
+    """ask 前校验；若锁定返回 error payload，否则 None。
+
+    注：全仓库当前无调用者（保留作为兼容入口）。生产路径由
+    `ensure_session_skill_mount` 内部的 `assert_skill_selection_change_allowed`
+    完成。
+    """
     from deep_agent_server.skills.session_mount import compute_selection_key
 
     try:

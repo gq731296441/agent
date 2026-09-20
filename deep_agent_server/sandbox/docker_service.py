@@ -281,22 +281,31 @@ class DockerSandboxService(SandboxService):
             )
             if found:
                 cid, docker_status = found
+                container_ready = True
                 if docker_status == "paused":
-                    await asyncio.to_thread(self._unpause_sync, cid)
+                    container_ready = await asyncio.to_thread(self._unpause_sync, cid)
                 elif docker_status in ("exited", "created"):
-                    await asyncio.to_thread(self._start_sync, cid)
-                old_cid = row.get("container_id") if row else None
-                if old_cid and old_cid != cid:
-                    await asyncio.to_thread(self._destroy_container_sync, old_cid)
-                ws_path = str(get_sandbox_workspace_dir(user_id, session_id))
-                await self._persist_container(user_id, session_id, cid, ws_path)
-                await self._touch(user_id, session_id)
-                await self._finalize_running_container(user_id, session_id, cid)
-                return SandboxHandle(
-                    user_id=user_id,
-                    session_id=session_id,
-                    container_id=cid,
-                    status=SandboxStatus.RUNNING,
+                    container_ready = await asyncio.to_thread(self._start_sync, cid)
+                if container_ready:
+                    old_cid = row.get("container_id") if row else None
+                    if old_cid and old_cid != cid:
+                        await asyncio.to_thread(self._destroy_container_sync, old_cid)
+                    ws_path = str(get_sandbox_workspace_dir(user_id, session_id))
+                    await self._persist_container(user_id, session_id, cid, ws_path)
+                    await self._touch(user_id, session_id)
+                    await self._finalize_running_container(user_id, session_id, cid)
+                    return SandboxHandle(
+                        user_id=user_id,
+                        session_id=session_id,
+                        container_id=cid,
+                        status=SandboxStatus.RUNNING,
+                    )
+                # 容器在但启不起来（已被外部删除/暂停等）：既不复用它，也不上报
+                # running —— 落到下面的重建分支。此前 `_start_sync` 的返回值被丢弃，
+                # "启动失败"会被当作 running 落库并返回给调用方。
+                logger.warning(
+                    f"[Sandbox] 已有容器无法启动，转重建 user={user_id} "
+                    f"session={session_id} container={cid[:12]} status={docker_status}"
                 )
 
             has_row = row is not None and bool(row.get("container_id"))
@@ -389,21 +398,44 @@ class DockerSandboxService(SandboxService):
             await self._set_stopped_ttl(user_id, session_id)
 
     async def stop_all_for_user(self, user_id: str) -> None:
+        """停止用户全部 session 沙箱。
+
+        逐 session 隔离异常：某个 session 失败不得中断后续 session 的停止。
+        否则首个失败之后的沙箱全部残留，DB 行留在 running 状态，用户随后
+        会被误报"已达沙箱并发上限"却没有任何活容器。
+        """
         rows = await deep_storage.list_sandbox_sessions_for_user(user_id)
         for row in rows:
             sid = row.get("session_id")
-            if sid:
+            if not sid:
+                continue
+            try:
                 await self.stop(user_id, sid)
+            except Exception as e:
+                logger.warning(
+                    f"[Sandbox] 停止会话沙箱失败 user={user_id} session={sid}: {e}"
+                )
 
     async def release(self, user_id: str, session_id: str) -> bool:
-        """用完即释：docker stop，status→stopped，写入 stopped TTL。"""
+        """用完即释：docker stop，status→stopped，写入 stopped TTL。
+
+        返回 False = 未释放（无沙箱记录，或 docker stop 失败）。
+        docker stop 失败时**不写** stopped TTL / 审计日志：否则 DB 与前端
+        都会显示已停止，而容器其实还在跑（这正是"释放仍扣配额"的成因）。
+        """
         row = await self._get_db_session(user_id, session_id)
         if not row or not row.get("container_id"):
             return False
         cid = row["container_id"]
         if row.get("status") == SandboxStatus.STOPPED.value:
             return True
-        await asyncio.to_thread(self._stop_sync, cid)
+        stopped = await asyncio.to_thread(self._stop_sync, cid)
+        if not stopped:
+            logger.warning(
+                f"[Sandbox] release 未生效（容器未能停止）user={user_id} "
+                f"session={session_id} container={cid[:12]}"
+            )
+            return False
         await asyncio.to_thread(purge_host_sandbox_skills_dir, user_id, session_id)
         await self._set_stopped_ttl(user_id, session_id)
         await deep_storage.insert_audit_log(
@@ -421,24 +453,46 @@ class DockerSandboxService(SandboxService):
             uid = row["user_id"]
             sid = row["session_id"]
             cid = row.get("container_id")
-            if cid:
-                await asyncio.to_thread(self._destroy_container_sync, cid)
-            await asyncio.to_thread(purge_host_sandbox_skills_dir, uid, sid)
-            await deep_storage.clear_sandbox_session(uid, sid)
-            await deep_storage.insert_audit_log(
-                uid, "sandbox_expired", target=(cid or "")[:12], session_id=sid
-            )
-            removed += 1
+            # 单行失败不得阻塞后续行：查询按 ttl_at ASC 排序，坏行会一直排在最前，
+            # 缺少 per-row 隔离时整个批次（含紧随其后的孤儿清理）每轮都被它饿死，
+            # 结果是容器只增不减。
+            try:
+                if cid:
+                    await asyncio.to_thread(self._destroy_container_sync, cid)
+                await asyncio.to_thread(purge_host_sandbox_skills_dir, uid, sid)
+                await deep_storage.clear_sandbox_session(uid, sid)
+                await deep_storage.insert_audit_log(
+                    uid, "sandbox_expired", target=(cid or "")[:12], session_id=sid
+                )
+                removed += 1
+            except Exception as e:
+                logger.warning(
+                    f"[Sandbox] 清理过期沙箱失败 user={uid} session={sid} "
+                    f"container={(cid or '')[:12]}: {e}"
+                )
 
         # 清理孤儿容器（Docker 中存在但 DB 无记录，且超过 1 小时）
-        orphan_removed = await asyncio.to_thread(self._cleanup_orphan_containers)
-        removed += orphan_removed
+        try:
+            known_ids = set(await deep_storage.list_all_sandbox_container_ids())
+            orphan_removed = await asyncio.to_thread(
+                self._cleanup_orphan_containers, known_ids
+            )
+            removed += orphan_removed
+        except Exception as e:
+            logger.warning(f"[Sandbox] 孤儿容器清理失败: {e}")
         return removed
 
-    def _cleanup_orphan_containers(self) -> int:
-        """清理 Docker 中存在但 DB 无记录的孤儿容器（已创建超过 1 小时）。"""
-        import time
+    def _cleanup_orphan_containers(self, known_container_ids: set) -> int:
+        """清理 Docker 中存在但 DB 无记录的孤儿容器（已创建超过 1 小时）。
 
+        `known_container_ids` 是 DB 中登记的全部容器 ID（由调用方在 async 侧查出）。
+        判据必须是"DB 是否有记录"，**不能用容器自身的状态**：
+          - 按状态判断会误删 DB 里合法的 stopped/paused 沙箱；
+          - 原先 `if status == "running": continue` 又让"DB 行已删但容器仍在跑"
+            这类真正需要回收的孤儿永远漏网。
+        保留 1 小时年龄门槛，保护 `_create_container` 与 `_persist_container`
+        之间尚未落库的窗口。
+        """
         try:
             containers = self._get_docker().containers.list(
                 all=True,
@@ -449,14 +503,11 @@ class DockerSandboxService(SandboxService):
             return 0
 
         removed = 0
-        now = time.time()
         orphan_max_age_seconds = 3600  # 1 小时
 
         for c in containers:
-            # 跳过正在运行的容器
-            if c.status == "running":
-                continue
-            # 跳过刚创建的容器（可能正在初始化中）
+            if c.id in known_container_ids:
+                continue  # DB 有记录 → 不是孤儿
             try:
                 created_ts = c.attrs.get("Created", "")
                 if created_ts:
@@ -464,8 +515,10 @@ class DockerSandboxService(SandboxService):
                     age = (datetime.now(timezone.utc) - created_dt).total_seconds()
                     if age < orphan_max_age_seconds:
                         continue
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(
+                    f"[Sandbox] 容器 {c.name} Created 时间解析失败，按超龄处理: {e}"
+                )
             try:
                 c.remove(force=True)
                 logger.info(
@@ -493,11 +546,21 @@ class DockerSandboxService(SandboxService):
         to_pause = running_count - max_n + 1
         rows = await deep_storage.list_running_sandboxes_by_lru(limit=to_pause)
         paused = 0
+        failed = 0
         for row in rows:
             uid = row["user_id"]
             sid = row["session_id"]
             if await self.pause(uid, sid):
                 paused += 1
+            else:
+                failed += 1
+        if failed:
+            # 驱逐没做成，全站并发会实际越过 SANDBOX_MAX_CONCURRENT —— 此前这里
+            # 静默忽略失败，调用方也无从知道"该驱逐但没驱逐成功"。
+            logger.warning(
+                f"[Sandbox] LRU 驱逐未完全生效：计划暂停 {to_pause} 个，"
+                f"成功 {paused} 个，失败 {failed} 个（全站并发可能超限）"
+            )
         return paused
 
     async def get_user_status(self, user_id: str) -> dict:
@@ -786,22 +849,45 @@ class DockerSandboxService(SandboxService):
     async def _container_running(self, container_id: str) -> bool:
         try:
             return await asyncio.to_thread(self._check_running, container_id)
-        except Exception:
+        except Exception as e:
+            # 注意：这里把"查询失败"（daemon 故障 / ssh 隧道断开）与"容器未运行"
+            # 归为同一结果 false，上层会因此走重建分支。记日志以便区分二者，
+            # 否则 Docker 故障会被伪装成"容器不存在"。
+            logger.warning(
+                f"[Sandbox] 查询容器状态失败（非容器不存在）"
+                f"container={container_id[:12]}: {e}"
+            )
             return False
 
     def _check_running(self, container_id: str) -> bool:
         c = self._get_docker().containers.get(container_id)
         return c.status == "running"
 
-    def _pause_sync(self, container_id: str):
-        c = self._get_docker().containers.get(container_id)
-        if c.status == "running":
-            c.pause()
+    def _pause_sync(self, container_id: str) -> bool:
+        """docker pause。返回是否成功——容器可能已被外部删除。"""
+        try:
+            c = self._get_docker().containers.get(container_id)
+            if c.status == "running":
+                c.pause()
+            return True
+        except Exception as e:
+            logger.warning(f"[Sandbox] docker pause: {e}")
+            return False
 
-    def _unpause_sync(self, container_id: str):
-        c = self._get_docker().containers.get(container_id)
-        if c.status == "paused":
-            c.unpause()
+    def _unpause_sync(self, container_id: str) -> bool:
+        """docker unpause。返回是否成功——容器可能已被外部删除。
+
+        此前无异常保护，容器被外部删除时会在 ensure_running 里硬失败，
+        绕过按名重建的兜底分支。
+        """
+        try:
+            c = self._get_docker().containers.get(container_id)
+            if c.status == "paused":
+                c.unpause()
+            return True
+        except Exception as e:
+            logger.warning(f"[Sandbox] docker unpause: {e}")
+            return False
 
     def _start_sync(self, container_id: str) -> bool:
         try:
@@ -817,19 +903,25 @@ class DockerSandboxService(SandboxService):
             logger.warning(f"[Sandbox] docker start: {e}")
             return False
 
-    def _stop_sync(self, container_id: str):
+    def _stop_sync(self, container_id: str) -> bool:
+        """docker stop。返回是否成功——调用方（release）据此判断真实结果。"""
         try:
             c = self._get_docker().containers.get(container_id)
             c.stop(timeout=10)
+            return True
         except Exception as e:
             logger.warning(f"[Sandbox] docker stop: {e}")
+            return False
 
-    def _destroy_container_sync(self, container_id: str):
+    def _destroy_container_sync(self, container_id: str) -> bool:
+        """docker rm -f。返回是否成功。"""
         try:
             c = self._get_docker().containers.get(container_id)
             c.remove(force=True)
+            return True
         except Exception as e:
             logger.warning(f"[Sandbox] docker rm: {e}")
+            return False
 
     def _exec_in_container(
         self,

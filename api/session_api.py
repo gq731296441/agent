@@ -278,6 +278,7 @@ async def permanent_delete_session(
     2. chat_history 表
     3. LangGraph checkpointer / store 数据
     4. Deep 工作区、artifacts、deep_* 表记录
+    5. 沙箱容器与 deep_sandbox_sessions 记录
     """
     try:
         success = await storage.delete_user_session(user_id, session_id)
@@ -292,6 +293,18 @@ async def permanent_delete_session(
 
         remove_session_workspace(user_id, session_id)
         await deep_storage.cleanup_deep_session_data(user_id, session_id)
+
+        # 回收沙箱：先停容器（尽力而为），再删 DB 行。少了这一步，会话虽已
+        # "永久删除"，容器仍在运行（其 /workspace 还 bind 着刚被删掉的宿主机
+        # 目录），deep_sandbox_sessions 行继续占用每用户配额与全站 LRU 计数，
+        # 直到 TTL 到期才被清理 —— 用户却已经看不到这个会话了。
+        try:
+            from deep_agent_server.sandbox import stop_session_sandbox
+
+            await stop_session_sandbox(user_id, session_id)
+        except Exception as e:
+            logger.warning(f"[Session API] 停止沙箱失败: {e}")
+        await deep_storage.clear_sandbox_session(user_id, session_id)
 
         return ApiResponse.success(msg="Session permanently deleted")
     except Exception as e:

@@ -9,6 +9,8 @@ from typing import Optional
 
 import asyncio
 
+from deep_agent_server.sandbox.exceptions import SandboxUnavailable
+
 
 @dataclass
 class DeepErrorClassification:
@@ -18,10 +20,37 @@ class DeepErrorClassification:
     user_message: str = ""
 
 
+def _looks_like_sandbox_failure(msg: str) -> bool:
+    """消息模式兜底：识别未被包装成 SandboxUnavailable 的沙箱基础设施故障。
+
+    覆盖 `containers.run` / `exec_run` 等处直接抛出的第三方 DockerException。
+    """
+    if "error while fetching server api version" in msg:
+        return True
+    if "docker" in msg or "sandbox" in msg:
+        return any(k in msg for k in (
+            "connection", "connect", "daemon", "timeout",
+            "refused", "aborted", "unavailable",
+        ))
+    return False
+
+
 def classify_deep_error(exc: Exception) -> DeepErrorClassification:
     """将异常映射为可重试/不可重试分类。"""
     msg = str(exc).lower()
     exc_name = type(exc).__name__
+
+    # 沙箱基础设施故障必须早于下面的 "connection" 规则判定：这类报错文本含
+    # "Connection aborted"，否则会被误判为可重试的网络错误。而 daemon 故障、
+    # ssh 隧道断开、远端账号过期都不会因重试而恢复 —— 重试只是白跑整轮 agent
+    # 并把用户引向"网络错误"这个错误方向。
+    if isinstance(exc, SandboxUnavailable) or _looks_like_sandbox_failure(msg):
+        return DeepErrorClassification(
+            False,
+            "sandbox_unavailable",
+            "沙箱服务暂时不可用，本次未执行代码。请稍后重试；若持续出现请联系管理员。",
+        )
+
     if isinstance(exc, asyncio.TimeoutError) or "timeout" in msg:
         return DeepErrorClassification(True, "timeout", "请求超时，正在重试…")
     if "rate limit" in msg or "429" in msg:

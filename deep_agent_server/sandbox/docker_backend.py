@@ -87,7 +87,15 @@ class _DockerExecBackend(SandboxBackendProtocol):
         return ExecuteResponse(output=text, exit_code=code, truncated=False)
 
     def _exec_sync(self, command: str, timeout: int) -> tuple[str, int]:
-        client = get_docker_client()
+        # 注：timeout 形参当前未生效（deepagents 侧的调用契约待确认），
+        # 命令挂起只能由全局 DEEP_TIMEOUT_SECONDS 兜底。
+        try:
+            client = get_docker_client()
+        except Exception as e:
+            # 与下方 containers.get 的错误处理保持一致：返回错误文本让模型感知。
+            # 若让它冒泡，会打断整轮 run 并被 classify_deep_error 误判为可重试的
+            # 网络错误（重试对基础设施故障无效）。
+            return f"沙箱服务不可用: {e}", 1
         try:
             c = client.containers.get(self.container_id)
         except Exception as e:
