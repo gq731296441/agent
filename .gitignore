@@ -130,6 +130,7 @@ ehthumbs.db
 Thumbs.db
 .github/copilot-instructions.md
 CLAUDE.md
+AGENTS.md
 /tests
 deploy
 /scripts
@@ -139,3 +140,4 @@ data/
 tiktoken_cache/
 .claude/
 !skill-repo/
+.icodemate/

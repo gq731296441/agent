@@ -345,7 +345,12 @@ async def create_deep_agent_for_session(
 
     # 合并内置工具（无需 MCP 配置，始终可用）
     from builtin_tools import get_builtin_tools
-    builtin_tools = get_builtin_tools(user_id=user_id, user_token=user_token, session_id=session_id)
+    builtin_tools = get_builtin_tools(
+        user_id=user_id,
+        user_token=user_token,
+        session_id=session_id,
+        capabilities={"mcp": mcp_list, "skills": selected_skill_ids},
+    )
     mcp_tools = builtin_tools + mcp_tools  # 内置工具排前面，LLM 优先看到
 
     try:

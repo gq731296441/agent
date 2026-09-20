@@ -128,6 +128,12 @@ class BaseConfig(BaseSettings):
     HITL_ENABLED: bool = Field(default=False, description="全局 HITL 开关。False 时 Agent 自动执行工具调用，无需人工审批")
     HITL_PENDING_TTL_MINUTES: int = Field(default=30, description="HITL 待审批超时（分钟），超时后自动终止 run")
     HITL_SWEEPER_INTERVAL_SECONDS: int = Field(default=60, description="HITL 过期扫描间隔（秒）；0=禁用")
+    SCHEDULED_TASK_SWEEPER_INTERVAL_SECONDS: int = Field(
+        default=60, description="定时任务调度轮询间隔（秒）；0=禁用"
+    )
+    SCHEDULED_TASK_RUN_TIMEOUT: int = Field(
+        default=900, description="定时任务单次执行超时（秒）"
+    )
     DEEP_GLOBAL_MAX_CONCURRENT: int = Field(default=20, description="全局 Deep 并发上限")
     DEEP_USER_MAX_CONCURRENT: int = Field(default=3, description="每用户 Deep 并发上限")
     REASONING_STREAM_ENABLED: bool = Field(

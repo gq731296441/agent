@@ -29,7 +29,7 @@ def _format_local_time(dt) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     local_dt = dt.astimezone(_CST)
-    return local_dt.strftime("%Y-%m-%d %H:%M:%S")
+    return local_dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -289,7 +289,13 @@ async def permanent_delete_session(
         await storage.delete_history_by_session(session_id)
 
         thread_id = f"{user_id}#{session_id}"
-        await _cleanup_langgraph_data(request, thread_id, user_id=user_id, session_id=session_id)
+        await _cleanup_langgraph_data(
+            getattr(request.app.state, "checkpointer", None),
+            getattr(request.app.state, "kv_store", None),
+            thread_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
 
         remove_session_workspace(user_id, session_id)
         await deep_storage.cleanup_deep_session_data(user_id, session_id)
@@ -427,7 +433,13 @@ async def new_context(
         return ApiResponse.error(msg="context_epoch 冲突，请刷新后重试", code=409)
 
     thread_id = f"{user_id}#{session_id}"
-    await _cleanup_langgraph_data(request, thread_id, user_id=user_id, session_id=session_id)
+    await _cleanup_langgraph_data(
+        getattr(request.app.state, "checkpointer", None),
+        getattr(request.app.state, "kv_store", None),
+        thread_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
 
     manager = getattr(request.app.state, "manager_agents", None)
     _clear_agent_cache_for_session(manager, session_id)
@@ -461,14 +473,18 @@ async def get_session_readiness(
 
 
 async def _cleanup_langgraph_data(
-    request: Request,
+    checkpointer,
+    kv_store,
     thread_id: str,
     *,
     user_id: str = None,
     session_id: str = None,
 ) -> None:
-    """清理 LangGraph checkpointer 和 store 中与 thread_id 关联的数据。"""
-    checkpointer = getattr(request.app.state, "checkpointer", None)
+    """清理 LangGraph checkpointer 和 store 中与 thread_id 关联的数据。
+
+    checkpointer / kv_store 由调用方从 request.app.state 或 AgentManager 注入，
+    以便定时任务（无 request 上下文）复用同一清理逻辑。
+    """
     if checkpointer:
         try:
             await checkpointer.adelete_thread(thread_id)
@@ -476,7 +492,6 @@ async def _cleanup_langgraph_data(
         except Exception as e:
             logger.error(f"[Session API] 清理 checkpointer 失败: {e}")
 
-    kv_store = getattr(request.app.state, "kv_store", None)
     if kv_store:
         from deep_agent_server.store import cleanup_session_store
         from db import deep_storage

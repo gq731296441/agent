@@ -147,6 +147,7 @@ class DatabaseManager:
             await self._init_deep_agent_tables(conn)
             await self._migrate_deep_columns(conn)
             await self._migrate_subscription_schema(conn)
+            await self._init_scheduled_tasks_table(conn)
 
     async def _migrate_tool_call_logs_columns(self, conn):
         """为 tool_call_logs 添加可观测性扩展列。"""
@@ -849,6 +850,50 @@ class DatabaseManager:
             )
         except Exception:
             pass
+
+    async def _init_scheduled_tasks_table(self, conn):
+        """初始化 scheduled_tasks 表（定时任务）。"""
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id     TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                skills      JSONB NOT NULL DEFAULT '[]',
+                mcp         JSONB NOT NULL DEFAULT '[]',
+                is_enabled  BOOLEAN NOT NULL DEFAULT TRUE,
+                cron_expr   TEXT NOT NULL,
+                prompt      TEXT NOT NULL DEFAULT '',
+                status      TEXT NOT NULL DEFAULT 'pending',
+                next_run_at TIMESTAMP WITH TIME ZONE,
+                last_run_at TIMESTAMP WITH TIME ZONE,
+                last_result JSONB NOT NULL DEFAULT '{}',
+                run_count   BIGINT NOT NULL DEFAULT 0,
+                is_deleted  BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at  TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                updated_at  TIMESTAMP WITH TIME ZONE DEFAULT now()
+            )
+        """)
+        # 迁移旧表：新增 skills/mcp 能力快照列与 agent_id（订阅智能体路径标识）列
+        for col_sql in (
+            "ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS skills JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS mcp JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS agent_id TEXT",
+        ):
+            try:
+                await conn.execute(col_sql)
+            except Exception:
+                pass
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_user
+            ON scheduled_tasks(user_id, created_at DESC)
+            WHERE is_deleted = FALSE
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due
+            ON scheduled_tasks(is_enabled, next_run_at)
+            WHERE is_deleted = FALSE AND is_enabled = TRUE
+        """)
 
     async def close(self):
         """关闭连接池。"""

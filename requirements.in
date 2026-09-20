@@ -49,3 +49,6 @@ charset-normalizer>=3.3.0
 
 # Observability (可选): Langfuse trace 可视化
 langfuse>=3.0,<5.0
+
+# 定时任务 cron 表达式解析
+croniter>=2.0

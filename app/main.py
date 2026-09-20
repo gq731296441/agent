@@ -38,6 +38,7 @@ from api import session_api, agent_api, mcp_api, search_api, stats_api
 from api import agent_run_api, artifact_api, user_agent_api, skill_api, skill_internal_api, workspace_api, sandbox_api
 from api import user_llm_api, subscription_agent_api, user_memory_api, logs_api
 from api import admin_api, skill_upload_api, upload_api
+from api import scheduled_task_api
 from api.search_api import process_agent_stream
 from deep_agent_server.session.readiness import SessionReadinessService
 from config import setup_logging, get_logger, app_config
@@ -227,6 +228,11 @@ async def lifespan(app: FastAPI):
         else:
             logger.info("【HITL】HITL_ENABLED=False，跳过 sweeper 启动")
 
+        from scheduler.sweeper import start_scheduled_sweeper
+
+        await start_scheduled_sweeper(app.state.manager_agents)
+        logger.info("【Scheduler】已启动定时任务 sweeper")
+
         # 会话标题在 ask 时按用户 LLM 配置生成
         app.state.title_llm = None
 
@@ -258,6 +264,13 @@ async def lifespan(app: FastAPI):
             logger.info("✅ HITL sweeper 已停止")
         except Exception as e:
             logger.warning(f"【app】⚠️ HITL sweeper 关闭失败: {e}")
+        try:
+            from scheduler.sweeper import stop_scheduled_sweeper
+
+            await stop_scheduled_sweeper()
+            logger.info("✅ 定时任务 sweeper 已停止")
+        except Exception as e:
+            logger.warning(f"【app】⚠️ 定时任务 sweeper 关闭失败: {e}")
         try:
             from deep_agent_server.sandbox.status_notify import set_sandbox_status_notifier
             from deep_agent_server.hitl.sweeper import set_hitl_ws_notifier
@@ -389,6 +402,8 @@ app.include_router(logs_api.router)
 app.include_router(workspace_api.router)
 app.include_router(upload_api.router)
 app.include_router(sandbox_api.router)
+# 注册定时任务路由
+app.include_router(scheduled_task_api.router)
 
 STATIC_DIR = ROOT_DIR / "static"
 app.mount("/css", StaticFiles(directory=str(STATIC_DIR / "css")), name="css")

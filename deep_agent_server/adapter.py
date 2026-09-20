@@ -1156,11 +1156,14 @@ class DeepEventAdapter:
 
             tool_calls = getattr(message_chunk, "tool_calls", None) or []
             if tool_calls:
-                self._pending_tool_calls = list(tool_calls)
-                for tc in tool_calls:
-                    tc_id = tc.get("id") if isinstance(tc, dict) else None
-                    if not tc_id:
-                        continue
+                # 模型可能先给出无 ID/名称的中间结构；只缓存可与后续结果关联的完整调用。
+                self._pending_tool_calls = [
+                    tc for tc in tool_calls
+                    if isinstance(tc, dict) and tc.get("id")
+                    and normalize_tool_call(tc)[0] != "unknown"
+                ]
+                for tc in self._pending_tool_calls:
+                    tc_id = tc["id"]
                     _name, tc_args = normalize_tool_call(tc)
                     if tc_args:
                         self._pending_tool_inputs[tc_id] = tc_args
@@ -1194,10 +1197,11 @@ class DeepEventAdapter:
     async def _emit_single_tool_start(
         self, tc: dict, tool_name: str, tool_input: dict
     ) -> AsyncGenerator[dict, None]:
-        tool_call_id = tc.get("id") or str(uuid.uuid4())
-        if tool_call_id in self._emitted_tool_starts:
+        tool_call_id = tc.get("id")
+        # 所有入口共用此发射边界，不能为不完整调用补造 ID 并写入 history。
+        if not tool_call_id or tool_name == "unknown":
             return
-        if tool_name == "unknown" and not tool_input:
+        if tool_call_id in self._emitted_tool_starts:
             return
 
         # stream_mode=tools 可能在 model 段 finalize 之前到达，先落库思考再 emit tool start
@@ -1465,6 +1469,9 @@ class DeepEventAdapter:
         tool_input: Optional[dict] = None,
     ) -> AsyncGenerator[dict, None]:
         """在 tool_result 前补发缺失的 tool_call（MCP 等工具与 task 同理）。"""
+        # 结果缺少调用 ID 时无法可靠关联原始调用，不补发孤立的 tool_call。
+        if not tool_call_id:
+            return
         if tool_call_id and tool_call_id in self._emitted_tool_starts:
             return
         if not tool_name or tool_name == "unknown":
@@ -1476,7 +1483,7 @@ class DeepEventAdapter:
         resolved_input = resolved_input or {}
 
         tc = {
-            "id": tool_call_id or str(uuid.uuid4()),
+            "id": tool_call_id,
             "name": tool_name,
             "args": resolved_input,
         }
