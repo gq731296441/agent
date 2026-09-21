@@ -1,0 +1,71 @@
+{
+  "default_keys": ["Team", "System_IterationPath", "System_AreaPath"],
+  "by_workspace_type": {
+    "PLM": {
+      "US": ["Team", "System_IterationPath", "System_AreaPath"],
+      "IssueTrack": ["Team", "System_IterationPath", "System_AreaPath"],
+      "PR": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Task": ["Team", "System_IterationPath", "System_AreaPath"],
+      "RDCquestion": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Bug": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestPlan": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestRecord": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Todo": ["Team", "System_IterationPath", "System_AreaPath"],
+      "caseKey_TestCase": ["Team", "System_IterationPath", "System_AreaPath"]
+    },
+    "iGPT": {
+      "Bug": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Task": ["Team", "System_IterationPath", "System_AreaPath"],
+      "US": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Todo": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestPlan": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestRecord": ["Team", "System_IterationPath", "System_AreaPath"],
+      "caseKey_TestCase": ["Team", "System_IterationPath", "System_AreaPath"]
+    },
+    "LCAP": {
+      "Bug": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Task": ["Team", "System_IterationPath", "System_AreaPath"],
+      "US": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Todo": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestPlan": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestRecord": ["Team", "System_IterationPath", "System_AreaPath"],
+      "caseKey_TestCase": ["Team", "System_IterationPath", "System_AreaPath"]
+    },
+    "DT_PP": {
+      "Bug": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Task": ["Team", "System_IterationPath", "System_AreaPath"],
+      "US": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Todo": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestPlan": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestRecord": ["Team", "System_IterationPath", "System_AreaPath"],
+      "caseKey_TestCase": ["Team", "System_IterationPath", "System_AreaPath"]
+    },
+    "DT_OA": {
+      "Bug": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Task": ["Team", "System_IterationPath", "System_AreaPath"],
+      "US": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Todo": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestPlan": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestRecord": ["Team", "System_IterationPath", "System_AreaPath"],
+      "caseKey_TestCase": ["Team", "System_IterationPath", "System_AreaPath"]
+    }
+    ,"DT_TP": {
+      "Bug": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Task": ["Team", "System_IterationPath", "System_AreaPath"],
+      "US": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Todo": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestPlan": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestRecord": ["Team", "System_IterationPath", "System_AreaPath"],
+      "caseKey_TestCase": ["Team", "System_IterationPath", "System_AreaPath"]
+    }
+    ,"DT_BO": {
+      "Bug": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Task": ["Team", "System_IterationPath", "System_AreaPath"],
+      "US": ["Team", "System_IterationPath", "System_AreaPath"],
+      "Todo": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestPlan": ["Team", "System_IterationPath", "System_AreaPath"],
+      "TestRecord": ["Team", "System_IterationPath", "System_AreaPath"],
+      "caseKey_TestCase": ["Team", "System_IterationPath", "System_AreaPath"]
+    }
+  }
+}

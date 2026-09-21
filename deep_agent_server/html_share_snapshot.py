@@ -11,6 +11,7 @@
 import hashlib
 import mimetypes
 import re
+import shutil
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -24,7 +25,8 @@ from deep_agent_server.html_inline import (
     _rewrite_css_urls,
     _script_tag_is_module,
 )
-from deep_agent_server.workspace import HTML_SHARE_SNAPSHOT_DIR
+from deep_agent_server.workspace import HTML_SHARE_SNAPSHOT_DIR, get_workspace_dir
+from deep_agent_server.workspace_service import read_file_bytes, resolve_virtual_path
 
 logger = get_logger(__name__)
 
@@ -263,3 +265,65 @@ def build_html_share_snapshot(
         )
 
     return new_html, copies
+
+
+async def write_share_snapshot(
+    *,
+    user_id: str,
+    html_text: str,
+    vpath: str,
+    session_id: str,
+    token: str,
+    agent_id: Optional[str] = None,
+) -> int:
+    """构建并写入分享快照（先清旧快照再写），返回复制的资源文件数。
+
+    分享创建（前端手动 / Agent 写入后自动）与访问时懒重建共用此入口，
+    保证快照内容与生命周期管理只有一份实现。
+
+    Args:
+        html_text: 源 HTML 当前内容
+        vpath: 源文件虚拟路径（资源相对引用的解析基准）
+        token: 分享 token（决定快照目录 workspace/{sid}/.html-share-assets/{token}/）
+        agent_id: 订阅智能体会话上下文（skills 资源解析用）
+    """
+    dir_vpath = vpath[: vpath.rfind("/") + 1]
+    snapshot_root = snapshot_root_vpath(session_id, token)
+
+    def read_source(src_vpath: str) -> Optional[bytes]:
+        try:
+            data, _ = read_file_bytes(user_id, src_vpath, agent_id=agent_id)
+            return data
+        except (FileNotFoundError, ValueError):
+            logger.warning(f"[HtmlShareSnapshot] 快照源读取失败 src={src_vpath}")
+            return None
+
+    new_html, copies = build_html_share_snapshot(
+        html_text=html_text,
+        dir_vpath=dir_vpath,
+        session_id=session_id,
+        snapshot_root=snapshot_root,
+        read_source=read_source,
+    )
+
+    # 写盘：先清旧快照（token 复用/内容更新时重建），再写入新快照
+    snap_dir = get_workspace_dir(user_id, session_id) / SNAPSHOT_DIR_NAME / token
+    if snap_dir.exists():
+        shutil.rmtree(snap_dir, ignore_errors=True)
+    snap_dir.mkdir(parents=True, exist_ok=True)
+
+    for _, dst_vpath, data in copies:
+        dst_abs, *_ = resolve_virtual_path(user_id, dst_vpath)
+        dst_abs.parent.mkdir(parents=True, exist_ok=True)
+        dst_abs.write_bytes(data)
+
+    index_abs, *_ = resolve_virtual_path(
+        user_id, f"{snapshot_root}/{SNAPSHOT_INDEX_NAME}"
+    )
+    index_abs.write_text(new_html, encoding="utf-8")
+
+    logger.info(
+        f"[HtmlShareSnapshot] 快照写入完成 token={token} path={vpath} "
+        f"copied={len(copies)}"
+    )
+    return len(copies)

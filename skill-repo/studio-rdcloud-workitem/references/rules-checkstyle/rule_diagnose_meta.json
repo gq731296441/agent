@@ -1,0 +1,339 @@
+{
+  "triggers": {
+    "WHEN_CREATED": {
+      "name": "创建工作项后",
+      "keywords": ["创建后", "刚创建", "刚新建"],
+      "api_field_name": "whenCreated"
+    },
+    "WHEN_CREATING": {
+      "name": "创建工作项时",
+      "keywords": ["创建工作项过程中", "正在创建"],
+      "api_field_name": "whenCreating"
+    },
+    "WHEN_STATE_IN": {
+      "name": "工作项状态包含",
+      "keywords": ["XX状态下", "状态下"],
+      "api_field_name": "whenStateIn"
+    },
+    "WHEN_STATE": {
+      "name": "工作项状态是",
+      "keywords": ["工作项状态是XX", "工作项状态包含XX"],
+      "api_field_name": "whenState"
+    },
+    "WHEN_STATE_CHANGE_TO": {
+      "name": "当状态变成",
+      "keywords": ["状态变为XX", "状态变成XX"],
+      "api_field_name": "whenStateChangeTo"
+    },
+    "WHEN_LEAVE_FROM_STATE": {
+      "name": "工作项状态从离开",
+      "keywords": ["工作项状态离开", "工作项状态退出", "工作项状态转出"],
+      "api_field_name": "whenLeaveFromState"
+    },
+    "WHEN_STATE_CHANGED": {
+      "name": "工作项状态发生变化",
+      "keywords": ["工作项状态发生变化", "工作项状态发生改变", "状态变了"],
+      "api_field_name": "whenStateChanged"
+    },
+    "WHEN_STATE_NOT_CHANGE": {
+      "name": "工作项状态未变化",
+      "keywords": ["工作项状态未变", "工作项状态不变", "工作项状态没变"],
+      "api_field_name": "whenStateNotChange"
+    },
+    "WHEN_STATE_NOT": {
+      "name": "工作项状态不是",
+      "keywords": ["工作项状态不是", "工作项状态不等于"],
+      "api_field_name": "whenStateNot"
+    },
+    "WHEN_UPDATED": {
+      "name": "修改工作项后",
+      "keywords": ["修改工作项后", "更新后"],
+      "api_field_name": "whenUpdated"
+    },
+    "WHEN_TRANSITION": {
+      "name": "执行步骤是",
+      "keywords": ["执行步骤是XX"],
+      "api_field_name": "whenTransition"
+    },
+    "WHEN_TRANSITION_CONTAIN": {
+      "name": "执行步骤包含",
+      "keywords": ["执行步骤包含", "流程包含"],
+      "api_field_name": "whenTransitionContain"
+    },
+    "WHEN_TRANSITION_NOT": {
+      "name": "执行步骤不是",
+      "keywords": ["执行步骤不是", "执行步骤不包含", "流程不包含"],
+      "api_field_name": "whenTransitionNot"
+    },
+    "WHEN_DELETED": {
+      "name": "删除工作项后",
+      "keywords": ["删除工作项后", "移除"],
+      "api_field_name": "whenDeleted"
+    },
+    "TIMER": {
+      "name": "定时触发",
+      "keywords": ["定时触发", "定时任务"],
+      "api_field_name": "timer"
+    },
+    "WHEN_EMPTY": {
+      "name": "字段值为空",
+      "keywords": ["为空", "空值", "没填"],
+      "api_field_name": "whenEmpty"
+    },
+    "WHEN_NOT_EMPTY": {
+      "name": "字段值不为空",
+      "keywords": ["不为空", "有值", "已填"],
+      "api_field_name": "whenNotEmpty"
+    },
+    "WHEN_VALUE": {
+      "name": "字段值等于",
+      "keywords": ["等于", "值为"],
+      "api_field_name": "whenValue"
+    },
+    "WHEN_CHANGED": {
+      "name": "字段值发生变更",
+      "keywords": ["变更", "变化", "改变"],
+      "api_field_name": "whenChanged"
+    },
+    "WHEN_NOT_CHANGED": {
+      "name": "字段值未发生变更",
+      "keywords": ["未变更", "未变化", "未改变"],
+      "api_field_name": "whenNotChanged"
+    },
+    "WHEN_RELATED_ALL": {
+      "name": "所有关联工作项",
+      "keywords": ["所有关联", "全部关联"],
+      "api_field_name": "whenRelatedAll"
+    },
+    "WHEN_RELATED_STATE_ANY": {
+      "name": "任一关联工作项状态",
+      "keywords": ["任一关联", "某个关联"],
+      "api_field_name": "whenRelatedStateAny"
+    },
+    "CONDITION_GROUP": {
+      "name": "条件组",
+      "keywords": ["条件组", "组合条件"],
+      "api_field_name": "conditionGroup"
+    },
+    "CURRENT_USER_IN_GROUP": {
+      "name": "当前用户在组内",
+      "keywords": ["用户在组内", "组成员"],
+      "api_field_name": "currentUserInGroup"
+    },
+    "CURRENT_USER_NOT_IN_GROUP": {
+      "name": "当前用户不在组内",
+      "keywords": ["用户不在组内", "非组成员"],
+      "api_field_name": "currentUserNotInGroup"
+    }
+  },
+  "actions": {
+    "REQUIRED": {
+      "name": "必填",
+      "keywords": ["必填", "不能为空", "要填"],
+      "api_field_name": "required"
+    },
+    "READ_ONLY": {
+      "name": "只读",
+      "keywords": ["只读", "不能改", "不能修改", "无法修改"],
+      "api_field_name": "readonly"
+    },
+    "HIDDEN": {
+      "name": "隐藏",
+      "keywords": ["隐藏", "看不到", "不显示", "看不见"],
+      "api_field_name": "hidden"
+    },
+    "FUNCTION": {
+      "name": "功能限制",
+      "keywords": ["功能不可用", "不能提交", "按钮置灰", "禁用"],
+      "api_field_name": "function"
+    },
+    "MANUAL_EDIT": {
+      "name": "手动编辑",
+      "keywords": ["手动修改", "手动编辑", "手动填写"],
+      "api_field_name": "manualEdit"
+    },
+    "COPY": {
+      "name": "复制字段",
+      "keywords": ["字段赋值", "自动赋值", "被赋值", "复制"],
+      "api_field_name": "copy"
+    },
+    "ASSIGN_TO": {
+      "name": "指派给",
+      "keywords": ["指派", "设为处理人"],
+      "api_field_name": "assignTo"
+    },
+    "EMPTY": {
+      "name": "清空字段",
+      "keywords": ["被清空", "变空了", "清空", "没了"],
+      "api_field_name": "empty"
+    },
+    "FREEZE": {
+      "name": "冻结",
+      "keywords": ["冻结", "设为冻结"],
+      "api_field_name": "freeze"
+    },
+    "SET_STATE": {
+      "name": "设置状态",
+      "keywords": ["设置状态为", "设置状态"],
+      "api_field_name": "setState"
+    },
+    "EMAIL": {
+      "name": "发送邮件",
+      "keywords": ["发送邮件通知", "发邮件"],
+      "api_field_name": "email"
+    },
+    "AUTO_APPEND": {
+      "name": "自动追加",
+      "keywords": ["自动追加"],
+      "api_field_name": "autoAppend"
+    },
+    "ONLY_ADD": {
+      "name": "允许追加",
+      "keywords": ["手工追加值"],
+      "api_field_name": "onlyAdd"
+    },
+    "ONLY_REMOVE": {
+      "name": "允许删除",
+      "keywords": ["手动删除", "手动剔除值"],
+      "api_field_name": "onlyRemove"
+    },
+    "CREATE_RELATED_WORK_ITEM": {
+      "name": "创建关联工作项",
+      "keywords": ["创建关联工作项"],
+      "api_field_name": "createRelatedWorkItem"
+    },
+    "CANCEL_RELATED_WORK_ITEM": {
+      "name": "取消关联工作项",
+      "keywords": ["取消关联工作项"],
+      "api_field_name": "cancelRelatedWorkItem"
+    },
+    "CALL_API": {
+      "name": "调用接口",
+      "keywords": ["调用接口", "调用API"],
+      "api_field_name": "callApi"
+    },
+    "BASELINE_CONTENT_SET": {
+      "name": "基线内容设置",
+      "keywords": ["基线内容设置"],
+      "api_field_name": "baselineContentSet"
+    },
+    "BASELINE_CONTENT_TO_UPDATE": {
+      "name": "基线内容更新",
+      "keywords": ["基线内容更新"],
+      "api_field_name": "baselineContentToUpdate"
+    },
+    "ADJUST_PAGE_ORDER": {
+      "name": "调整页面顺序",
+      "keywords": ["调整页面顺序"],
+      "api_field_name": "adjustPageOrder"
+    },
+    "LAND_PAGE": {
+      "name": "落地页",
+      "keywords": ["落地页"],
+      "api_field_name": "landPage"
+    },
+    "PAGE_RED_DOT_MARK": {
+      "name": "页面红点标记",
+      "keywords": ["页面红点标记"],
+      "api_field_name": "pageRedDotMark"
+    },
+    "POP_UP_NOTIFICATION": {
+      "name": "弹窗通知",
+      "keywords": ["弹窗通知", "弹窗提醒"],
+      "api_field_name": "popUpNotification"
+    }
+  },
+  "conditions": {
+    "NULL": {
+      "name": "无条件",
+      "description": "无条件限制，始终执行"
+    },
+    "WHEN_VALUE": {
+      "name": "值判断",
+      "description": "当字段值等于指定值时"
+    },
+    "WHEN_EMPTY": {
+      "name": "没有为...定义值",
+      "description": "当字段值为空时"
+    },
+    "WHEN_NOT_EMPTY": {
+      "name": "为...定义了值",
+      "description": "当字段值不为空时"
+    },
+    "WHEN_CHANGED": {
+      "name": "对...值进行了更改",
+      "description": "当字段值发生变更时"
+    },
+    "WHEN_NOT_CHANGED": {
+      "name": "对...值没有进行更改",
+      "description": "当字段值未发生变更时"
+    },
+    "WHEN_RELATED_STATE_ALL": {
+      "name": "当所有关联工作项状态都是...",
+      "description": "当所有关联工作项的状态都满足指定条件时触发（AND 关系）"
+    },
+    "WHEN_RELATED_STATE_ALL_USED_TOBE": {
+      "name": "当关联工作项状态都曾经是...",
+      "description": "兼容旧版格式：当所有关联工作项的状态都曾经是指定值时触发（历史状态检查）"
+    },
+    "WHEN_RELATED_STATE_ANY": {
+      "name": "当关联工作项状态包含...",
+      "description": "当任一关联工作项的状态满足条件时触发（OR 关系）"
+    },
+    "WHEN_RELATED_ALL": {
+      "name": "当所有关联工作项都是...",
+      "description": "当所有关联工作项（不限状态字段）都满足指定条件时触发（通用关联条件）"
+    },
+    "CURRENT_USER_IN_GROUP": {
+      "name": "当前用户在组内",
+      "description": "当当前用户在指定组内时"
+    },
+    "CURRENT_USER_NOT_IN_GROUP": {
+      "name": "当前用户不在组内",
+      "description": "当当前用户不在指定组内时"
+    },
+    "WHEN_CURRENT_USER_LOCALE": {
+      "name": "当前用户语言是...",
+      "description": "根据当前用户的语言环境"
+    },
+    "WHEN_CURRENT_USER_TERMINAL": {
+      "name": "当前用户终端是...",
+      "description": "根据当前用户使用的终端类型"
+    }
+  },
+  "problem_keywords": {
+    "必填": ["必填", "必须填", "不能为空", "为空", "不填", "得填", "要填"],
+    "只读": ["只读", "不能改", "不能修改", "无法修改", "改不了", "编辑不了"],
+    "隐藏": ["隐藏", "看不到", "不显示", "没看到", "看不见"],
+    "冻结": ["冻结", "锁死", "锁定", "冻住"],
+    "赋值": ["赋值", "自动填", "自动填写", "自动填充", "被赋值", "自动写"],
+    "必填校验失败": ["提示必填", "报错必填", "校验不通过", "验证失败"],
+    "状态流转": ["流转", "转不了", "无法流转", "不能提交", "提交不了", "流不动"],
+    "通知": ["通知", "邮件", "消息", "提醒", "提示"],
+    "保存": ["保存", "提交", "无法保存", "保存失败", "提交失败", "存不了"],
+    "指派": ["指派", "分配", "处理人", "负责人"],
+    "复制": ["复制", "拷贝", "从...复制"],
+    "清空": ["清空", "变空", "没了", "被清空"],
+    "关联工作项": ["关联工作项", "创建工作项", "取消关联", "删除关联"],
+    "调用接口": ["调用接口", "外部接口", "API调用", "接口失败"],
+    "功能限制": ["功能限制", "不可用", "禁用", "限制", "不能编辑", "不能手动", "不能修改", "只能自动"],
+    "手动编辑": ["手动编辑", "手动修改", "手动填写", "手动输入", "不能手动", "手动操作"],
+    "页面配置": ["页面顺序", "落地页", "页签顺序", "红点标记"],
+    "基线操作": ["基线设置", "基线更新", "被基线"],
+    "推送DAAS": ["推送DAAS", "数据推送", "DAAS"],
+    "权限用户组": ["权限", "用户组", "角色", "当前用户", "我在组内", "不在组内", "组成员"],
+    "关联状态": ["关联状态", "子任务状态", "父任务状态", "关联工作项状态", "所有关联", "任一关联", "子任务没完成", "子任务未完成", "父任务不能", "关联的没完成"],
+    "状态不是": ["状态不是", "状态不等于", "状态未变", "没有变化"],
+    "删除后": ["删除后", "删除之后"],
+    "条件组合": ["同时满足", "并且", "或者", "任一满足", "所有满足", "条件组合"]
+  },
+  "state_keywords": {
+    "comment": "注意：状态名是用户自定义的，无法预定义。此字段仅作占位，实际匹配时直接从规则中提取状态名做精确匹配"
+  },
+  "match_weights": {
+    "trigger": 0.25,
+    "state": 0.25,
+    "field": 0.25,
+    "action": 0.25
+  }
+}

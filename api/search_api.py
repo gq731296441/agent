@@ -321,11 +321,13 @@ async def process_agent_stream(
     
     elif action == ActionType.STOP or action == ActionType.STOP.value:
         # ==================== 处理停止请求 ====================
+        # 不向前端推送 "已停止生成"：该消息未经 adapter._enrich，没有 run_id/
+        # conversation_id 标识；而 stop 走 WS 是独立 asyncio 任务异步处理，若它
+        # 在新一轮会话开始后才到达，前端无法判别归属，会把新一轮的流式状态误置为
+        # "已停止生成"并提前 FINISH_STREAMING。
+        # 发起 stop 的客户端已在 handleStop 本地展示该反馈，其他客户端可通过被停止
+        # 轮次的 end(reason=stop) 得知。
         manager_agents.stop_task(session_id, user_id=user_id)
-        yield AgentMessage.status(
-            session_id=session_id, 
-            content="已停止生成"
-        ).to_frontend_dict()
     
     else:
         # ==================== 未知 action ====================

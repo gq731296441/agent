@@ -2099,37 +2099,18 @@ class DeepEventAdapter:
             )
 
     async def _do_create_html_share(self, virtual_path: str) -> str:
-        """创建分享 token 并返回 URL；文件不完整或不存在时返回空串。
+        """创建分享链接并返回 URL；文件不完整或不存在时返回空串。
 
-        与前端分享同一入口（create_or_reuse_share_token 复用链），
+        与前端分享、工具中间件共用 ensure_html_share 入口（复用链 + 快照），
         同一文件不重复创建 token；内容指纹参与"改名后复用"判定。
         """
-        import hashlib
+        from deep_agent_server.html_share_service import ensure_html_share
 
-        from config.config import app_config
-        from deep_agent_server.workspace_service import resolve_virtual_path
-        from db.html_share_store import create_or_reuse_share_token as do_create_share_token
-
-        abs_path, _rel_path, _, file_kind = resolve_virtual_path(
-            self.user_id, virtual_path
-        )
-        if file_kind != "workspace" or not abs_path.is_file():
-            return ""
-
-        # 仅完整 HTML（含闭合标签）才创建分享，避免骨架阶段误触发
-        content = abs_path.read_text(encoding="utf-8", errors="replace")
-        if "</body>" not in content and "</html>" not in content:
-            return ""
-
-        token, _reused, _reason = await do_create_share_token(
+        return await ensure_html_share(
             user_id=self.user_id,
             session_id=self.session_id,
-            file_path=virtual_path,
-            sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
-            expires_in_hours=None,
+            vpath=virtual_path,
         )
-        public_base = (app_config.AGENTA_PUBLIC_BASE_URL or "").rstrip("/")
-        return f"{public_base}/workspace/html-share/{token}"
 
     def status_message(self, text: str) -> dict:
         """生成 Deep 运行时状态通知（DEEP_STATUS，不存库）。"""

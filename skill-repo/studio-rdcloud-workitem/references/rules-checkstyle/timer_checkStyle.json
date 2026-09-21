@@ -1,0 +1,62 @@
+[
+  {
+    "trigger": "TIMER",
+    "rules": [
+      {
+        "condition": "WHEN_VALUE",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,CALL_API,SET_STATE,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ALL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,CALL_API,SET_STATE,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ALL_USED_TOBE",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,CALL_API,SET_STATE,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ANY",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,CALL_API,SET_STATE,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_ALL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,CALL_API,SET_STATE,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL"
+            },
+            "preCondition": "true"
+          }
+        ]
+      }
+    ]
+  }
+]

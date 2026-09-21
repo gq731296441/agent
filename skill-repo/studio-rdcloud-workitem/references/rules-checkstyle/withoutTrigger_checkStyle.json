@@ -1,0 +1,139 @@
+[
+  {
+    "trigger": "NULL",
+    "rules": [
+      {
+        "condition": "WHEN_VALUE",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,READ_ONLY,REQUIRED,HIDDEN,EMPTY,CALL_API,EMAIL,FREEZE,PAGE_RED_DOT_MARK,POP_UP_NOTIFICATION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_CHANGED",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,READ_ONLY,REQUIRED,HIDDEN,EMPTY,CALL_API,EMAIL,FREEZE,POP_UP_NOTIFICATION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_NOT_CHANGED",
+        "actionRules": [
+          {
+            "action": {
+              "support": "READ_ONLY,REQUIRED,HIDDEN,FREEZE"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_NOT_EMPTY",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,READ_ONLY,REQUIRED,HIDDEN,EMPTY,CALL_API,EMAIL,FREEZE,PAGE_RED_DOT_MARK,POP_UP_NOTIFICATION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_EMPTY",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,READ_ONLY,REQUIRED,HIDDEN,EMPTY,CALL_API,EMAIL,FREEZE,PAGE_RED_DOT_MARK,POP_UP_NOTIFICATION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ALL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,FUNCTION,SET_STATE,PAGE_RED_DOT_MARK"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ALL_USED_TOBE",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,FUNCTION,SET_STATE,PAGE_RED_DOT_MARK"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ANY",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,FUNCTION,SET_STATE,PAGE_RED_DOT_MARK,POP_UP_NOTIFICATION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_ALL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,FUNCTION,SET_STATE,PAGE_RED_DOT_MARK,POP_UP_NOTIFICATION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "CURRENT_USER_IN_GROUP",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,READ_ONLY,REQUIRED,HIDDEN,EMPTY,CALL_API,EMAIL,FREEZE,PAGE_RED_DOT_MARK,POP_UP_NOTIFICATION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "CURRENT_USER_NOT_IN_GROUP",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,READ_ONLY,REQUIRED,HIDDEN,EMPTY,CALL_API,EMAIL,FREEZE,PAGE_RED_DOT_MARK,POP_UP_NOTIFICATION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_CURRENT_USER_LOCALE",
+        "actionRules": [
+          {
+            "action": {
+              "support": "POP_UP_NOTIFICATION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      }
+    ]
+  }
+]

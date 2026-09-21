@@ -1,0 +1,106 @@
+[
+  {
+    "trigger": "WHEN_STATE_NOT_CHANGE",
+    "rules": [
+      {
+        "condition": "NULL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "READ_ONLY,REQUIRED,HIDDEN,FREEZE"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_VALUE",
+        "actionRules": [
+          {
+            "action": {
+              "support": "READ_ONLY,REQUIRED,HIDDEN,FREEZE"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_CHANGED",
+        "actionRules": [
+          {
+            "action": {
+              "support": "READ_ONLY,REQUIRED,HIDDEN,FREEZE"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_NOT_CHANGED",
+        "actionRules": [
+          {
+            "action": {
+              "support": "READ_ONLY,REQUIRED,HIDDEN,FREEZE"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_NOT_EMPTY",
+        "actionRules": [
+          {
+            "action": {
+              "support": "READ_ONLY,REQUIRED,HIDDEN,FREEZE"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_EMPTY",
+        "actionRules": [
+          {
+            "action": {
+              "support": "READ_ONLY,REQUIRED,HIDDEN,FREEZE"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "CURRENT_USER_IN_GROUP",
+        "actionRules": [
+          {
+            "action": {
+              "support": "READ_ONLY,REQUIRED,HIDDEN,FREEZE"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "CURRENT_USER_NOT_IN_GROUP",
+        "actionRules": [
+          {
+            "action": {
+              "support": "READ_ONLY,REQUIRED,HIDDEN,FREEZE"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_CURRENT_USER_LOCALE",
+        "actionRules": [
+          {
+            "action": {
+              "support": "READ_ONLY,REQUIRED,HIDDEN,FREEZE"
+            },
+            "preCondition": "true"
+          }
+        ]
+      }
+    ]
+  }
+]

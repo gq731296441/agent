@@ -1,0 +1,28 @@
+{
+  "api": {
+    "workspace": "PLM,CT,iChangesj,ZXMPH001",
+    "tenant_id": "ZTE",
+    "byPassRules": 0
+  },
+  "format": {
+    "as_markdown": true,
+    "filter_virtual_root_for_related": false,
+    "omit_large_children_for_display": true,
+    "children_display_limit": 20,
+    "one_hop_children_display_limit": 200
+  },
+  "create": {
+    "smart_complete": true,
+    "fallback_bypass_on_error": true,
+    "mr_plm_question07_no_force_false": false
+  },
+  "log": {
+    "enabled": true,
+    "response_body_max_length": 500,
+    "max_file_size_mb": 50,
+    "max_files_per_script": 10
+  },
+  "query": {
+    "send_notify_when_empty_result": false
+  }
+}

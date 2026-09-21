@@ -25,8 +25,7 @@ from deep_agent_server.html_inline import inline_html_references
 from deep_agent_server.html_share_snapshot import (
     SNAPSHOT_DIR_NAME,
     SNAPSHOT_INDEX_NAME,
-    build_html_share_snapshot,
-    snapshot_root_vpath,
+    write_share_snapshot,
 )
 from deep_agent_server.workspace import get_workspace_dir
 from deep_agent_server.workspace_service import (
@@ -309,43 +308,18 @@ async def _build_share_snapshot(
     token: str,
     agent_id: Optional[str],
 ) -> None:
-    """构建分享快照：复制图片到快照目录，快照 HTML 引用指向快照。"""
-    dir_vpath = vpath[:vpath.rfind("/") + 1]
-    snapshot_root = snapshot_root_vpath(sid, token)
+    """构建分享快照：复制图片到快照目录，快照 HTML 引用指向快照。
 
-    def read_source(src_vpath: str) -> Optional[bytes]:
-        try:
-            data, _ = read_file_bytes(user_id, src_vpath, agent_id=agent_id)
-            return data
-        except (FileNotFoundError, ValueError):
-            logger.warning(f"[HtmlShare] 快照源读取失败 src={src_vpath}")
-            return None
-
-    new_html, copies = build_html_share_snapshot(
+    实际实现见 deep_agent_server.html_share_snapshot.write_share_snapshot
+    （与 Agent 自动分享、访问时懒重建共用同一入口）。
+    """
+    await write_share_snapshot(
+        user_id=user_id,
         html_text=html_text,
-        dir_vpath=dir_vpath,
+        vpath=vpath,
         session_id=sid,
-        snapshot_root=snapshot_root,
-        read_source=read_source,
-    )
-
-    # 写盘：先清旧快照（token 复用/内容更新时重建），再写入新快照
-    snap_dir = get_workspace_dir(user_id, sid) / SNAPSHOT_DIR_NAME / token
-    if snap_dir.exists():
-        shutil.rmtree(snap_dir, ignore_errors=True)
-    snap_dir.mkdir(parents=True, exist_ok=True)
-
-    for _, dst_vpath, data in copies:
-        dst_abs, *_ = resolve_virtual_path(user_id, dst_vpath)
-        dst_abs.parent.mkdir(parents=True, exist_ok=True)
-        dst_abs.write_bytes(data)
-
-    index_abs, *_ = resolve_virtual_path(user_id, f"{snapshot_root}/{SNAPSHOT_INDEX_NAME}")
-    index_abs.write_text(new_html, encoding="utf-8")
-
-    logger.info(
-        f"[HtmlShare] 快照完成 token={token} path={vpath} "
-        f"copied={len(copies)}"
+        token=token,
+        agent_id=agent_id,
     )
 
 

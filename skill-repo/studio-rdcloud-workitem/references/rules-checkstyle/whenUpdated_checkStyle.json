@@ -1,0 +1,150 @@
+[
+  {
+    "trigger": "WHEN_UPDATED",
+    "rules": [
+      {
+        "condition": "NULL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_VALUE",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_CHANGED",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_NOT_CHANGED",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_NOT_EMPTY",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_EMPTY",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ALL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ALL_USED_TOBE",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ANY",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_ALL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "CURRENT_USER_IN_GROUP",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "CURRENT_USER_NOT_IN_GROUP",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_CURRENT_USER_LOCALE",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,EMPTY,CALL_API,CREATE_RELATED_WORK_ITEM,CANCEL_RELATED_WORK_ITEM,EMAIL,AUTO_APPEND,ADJUST_PAGE_ORDER"
+            },
+            "preCondition": "true"
+          }
+        ]
+      }
+    ]
+  }
+]

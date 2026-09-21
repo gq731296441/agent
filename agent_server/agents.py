@@ -11,6 +11,7 @@ from langgraph.constants import TAG_NOSTREAM
 from agent_server.llm import create_summary_llm, create_tool_judge_llm
 from agent_server.prompts import HISTORY_SUMMARY_PROMPT, TOOL_SELECTOR_MIDDLEWARE_PROMPT
 from config import get_logger
+from utils.context_size import DEFAULT_CONTEXT_WINDOW
 
 from mcp_server.tool.delete_mrm_doc import delete_mrm_doc
 
@@ -100,7 +101,8 @@ class LangGraphAgent:
                     ),
                     LoggingSummarizationMiddleware(
                         model=self.summary_llm or create_summary_llm(),
-                        max_input_tokens=256000,  # 主模型最大输入 token 数，用于动态计算压缩阈值
+                        # 主模型最大输入 token 数，用于动态计算压缩阈值（与上下文百分比同源）
+                        max_input_tokens=DEFAULT_CONTEXT_WINDOW,
                         keep=("tokens", 10000),
                         summary_prompt=HISTORY_SUMMARY_PROMPT
                     ),

@@ -18,12 +18,11 @@ import os
 from typing import Dict, Any, Optional
 from export_utils import export_table_to_csv, generate_filename
 from auth import get_auth_headers
+from workspace_paths import resolve_export_dir
 
-# 主工作区目录（用于导出文件）- 使用相对路径，支持多用户
-# 获取用户主目录下的 .openclaw/workspace
-WORKSPACE_DIR = os.path.join(os.path.expanduser('~'), '.openclaw', 'workspace')
-# 确保目录存在
-os.makedirs(WORKSPACE_DIR, exist_ok=True)
+# 导出文件输出目录：会话工作区 /workspace/exports/<skill_id>/（沙箱内技能只读挂载，
+# 产物必须写到工作区才能被用户看到与下载）；无工作区时回退到技能目录
+WORKSPACE_DIR = resolve_export_dir()
 
 
 def query_indicator_detail_data_by_url(

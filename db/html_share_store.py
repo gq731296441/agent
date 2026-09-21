@@ -175,15 +175,17 @@ async def create_or_reuse_share_token(
                 )
                 return hit["token"], True, "basename"
 
-        # ④ 新建
+        # ④ 新建（同事务/同连接写入内容指纹：改名后按 sha 找回源文件依赖此列，
+        #    自动创建路径不经过 update_share_source，必须在插入时就落库）
         token = _generate_token()
         await conn.execute(
             """
             INSERT INTO html_share_tokens
-                (token, user_id, session_id, file_path, file_key, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6)
+                (token, user_id, session_id, file_path, file_key,
+                 last_source_sha256, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             """,
-            token, user_id, session_id, file_path, file_path, expires_at,
+            token, user_id, session_id, file_path, file_path, sha256, expires_at,
         )
 
     logger.info(

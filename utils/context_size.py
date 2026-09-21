@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
@@ -22,14 +23,23 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+# 当前部署所用模型的上下文窗口（deepseek 为 384K）。
+# 这是全项目唯一的窗口规格来源：摘要触发阈值（factory/agents）、上下文百分比
+# 分母（本模块）都从这里取，避免各写一份常量后彼此漂移。
+# 不同部署模型规格不同时，用环境变量 MODEL_CONTEXT_WINDOW 覆盖。
+DEFAULT_CONTEXT_WINDOW = int(os.getenv("MODEL_CONTEXT_WINDOW") or 393216)
+
 # 常见模型的 max_input_tokens（tokenizer.json 未命中时使用）
 _MODEL_MAX_TOKENS: dict[str, int] = {
     "nebulacoder-cot-v8.0": 262144,
     "nebulacoder-v8.0": 262144,
+    "deepseek-v4-flash": DEFAULT_CONTEXT_WINDOW,
 }
 
-# 模型 max_input_tokens 的默认回退值
-_DEFAULT_MAX_INPUT_TOKENS = 131072
+# 模型名未命中映射表时的回退值
+_DEFAULT_MAX_INPUT_TOKENS = int(
+    os.getenv("CONTEXT_MAX_INPUT_TOKENS") or DEFAULT_CONTEXT_WINDOW
+)
 
 # 预警阈值
 WARNING_THRESHOLD = 0.70   # 70% 开始预警
@@ -265,7 +275,14 @@ def estimate_context_size_from_usage(
         model_name: 模型名称，用于推断 max_input_tokens。
         max_input_tokens: 手动指定最大输入 token 数；None 时从 model_name 推断。
     """
-    token_count = int((usage or {}).get("prompt_tokens") or 0)
+    # call_details[-1] 是最后一次 LLM 调用：它的 prompt_tokens 才是送入模型的
+    # 完整上下文（即当前上下文大小）。顶层 prompt_tokens 是本 run 内所有调用的
+    # 累加值（计费口径）——一次 run 可能有几十次调用，累加后可达窗口的数倍，
+    # 直接拿来当上下文会得到 >100% 的假值。
+    details_list = (usage or {}).get("call_details") or []
+    last_call = details_list[-1] if details_list else {}
+
+    token_count = int(last_call.get("prompt_tokens") or (usage or {}).get("prompt_tokens") or 0)
     if max_input_tokens is None:
         max_input_tokens = _resolve_max_input_tokens(model_name)
     percentage = get_context_percentage(token_count, max_input_tokens)
@@ -278,10 +295,7 @@ def estimate_context_size_from_usage(
         warning_level = "normal"
 
     # 消息数取最近一次调用的消息数（与 token 同源，均为最后一次调用）
-    message_count = 0
-    details_list = (usage or {}).get("call_details") or []
-    if details_list:
-        message_count = int(details_list[-1].get("messages_count") or 0)
+    message_count = int(last_call.get("messages_count") or 0)
 
     bd = (usage or {}).get("prompt_breakdown") or {}
     return ContextSizeResult(

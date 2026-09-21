@@ -1,0 +1,32 @@
+{
+  "work_item_type_mapping": {
+    "变更活动": "chgActivity",
+    "变更申请": "ChangeApply",
+    "变更记录": "ChgRecord",
+    "变更请求": "chgRequest",
+    "版本构建": "EcVersionBuild",
+    "测试申请": "ApplyForTest",
+    "二级签名": "EcSecondarySign",
+    "市场需求": "MR",
+    "市场需求包": "MR_Packet",
+    "产品需求": "PR",
+    "用户故事": "US",
+    "任务": "Task",
+    "缺陷": "Bug",
+    "故障": "Fault",
+    "外场故障": "FieldDefect",
+    "测试计划": "TestPlan",
+    "测试记录": "TestRecord",
+    "测试用例": "TestCase",
+    "计划": "Plan"
+  },
+  "overdue_date_field_map": {
+    "任务": "PlanFinishDate",
+    "用户故事": "PlanFinishDate",
+    "产品需求": "PlanFinishDate",
+    "变更请求": "ExpectedResolvedDate",
+    "缺陷": "PlanResolvedDate"
+  },
+  "default_overdue_date_field": "PlanFinishDate",
+  "all_overdue_date_fields": ["PlanFinishDate", "ExpectedResolvedDate", "PlanResolvedDate"]
+}

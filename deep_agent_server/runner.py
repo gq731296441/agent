@@ -377,7 +377,10 @@ async def run_deep_agent(
             messages = stream_input.get("messages", [])
             messages.append(HumanMessage(content=notice))
             stream_input["messages"] = messages
-            wrapper._announced_html_shares = announced.union(new_links.keys())
+            # 原地更新（勿重新赋值新 set）：该集合与 HtmlShareLinkMiddleware
+            # 共享同一引用，替换会断开共享 —— 中间件本轮注入的路径将不在
+            # 新集合中，导致下一轮重复回灌同一链接。
+            announced.update(new_links.keys())
             logger.info(
                 f"[DeepRunner] 已注入 HTML 分享链接 session={session_id} "
                 f"count={len(new_links)}"
@@ -449,10 +452,17 @@ async def run_deep_agent(
             # 送入的完整上下文）与模型窗口上限的比值
             from utils.context_size import _resolve_max_input_tokens, get_context_percentage
             max_input = _resolve_max_input_tokens(model_name or "")
-            session_summary["max_input_tokens"] = max_input
-            session_summary["percentage"] = get_context_percentage(
-                int(usage.get("prompt_tokens") or 0), max_input
+            # 分子取最后一次 LLM 调用的 prompt_tokens —— 顶层 prompt_tokens 是本 run
+            # 内所有调用的累加值（计费口径），一次 run 有几十次调用，用它算占比
+            # 会得到数倍于窗口的假值（与 utils.context_size 同一口径）
+            call_details = usage.get("call_details") or []
+            context_tokens = int(
+                (call_details[-1].get("prompt_tokens") if call_details else 0)
+                or usage.get("prompt_tokens")
+                or 0
             )
+            session_summary["max_input_tokens"] = max_input
+            session_summary["percentage"] = get_context_percentage(context_tokens, max_input)
         except Exception:
             logger.warning(
                 f"[DeepRunner] 聚合会话 token 汇总失败 run={run_id}", exc_info=True

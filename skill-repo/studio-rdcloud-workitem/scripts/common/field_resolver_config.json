@@ -1,0 +1,28 @@
+{
+  "fallback_map": [
+    { "name_contains": "描述", "map_to_key": "System_Description_html" }
+  ],
+  "dot_name_string_keys": [],
+  "field_recommended_names": [
+    {
+      "workspace": "PLM",
+      "work_item_type_key": "Bug",
+      "团队": ["团队", "所属团队"],
+      "故障": ["缺陷", "变更请求"]
+    },
+    {
+      "workspace": "PLM",
+      "团队": ["团队", "所属团队"],
+      "故障": ["缺陷", "变更请求"]
+    },
+    {
+      "版本": ["发布版本", "预规划发布版本", "发现版本", "构建版本", "发现版本_DT", "合入版本","版本号", "iChange发现版本号"]
+    },
+    {
+      "团队": ["团队", "所属团队"]
+    },
+    {
+      "故障": ["缺陷", "变更请求"]
+    }
+  ]
+}

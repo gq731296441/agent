@@ -1,0 +1,210 @@
+[
+  {
+    "trigger": "WHEN_TRANSITION_NOT",
+    "rules": [
+      {
+        "condition": "NULL",
+        "actionRules": [
+          {
+            "action": {
+              "unSupport": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE,ASSIGN_TO,SET_STATE,AUTO_APPEND,ONLY_REMOVE,ONLY_ADD,ADJUST_PAGE_ORDER,MANUAL_EDIT"
+            },
+            "preCondition": "true"
+          },
+          {
+            "action": {
+              "support": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE"
+            },
+            "preCondition": "baseLineType == true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_VALUE",
+        "actionRules": [
+          {
+            "action": {
+              "unSupport": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE,ASSIGN_TO,SET_STATE,AUTO_APPEND,ONLY_REMOVE,ONLY_ADD,ADJUST_PAGE_ORDER,MANUAL_EDIT"
+            },
+            "preCondition": "true"
+          },
+          {
+            "action": {
+              "support": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE"
+            },
+            "preCondition": "baseLineType == true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_CHANGED",
+        "actionRules": [
+          {
+            "action": {
+              "unSupport": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE,ASSIGN_TO,SET_STATE,AUTO_APPEND,ONLY_REMOVE,ONLY_ADD,ADJUST_PAGE_ORDER,LAND_PAGE,PAGE_RED_DOT_MARK,MANUAL_EDIT"
+            },
+            "preCondition": "true"
+          },
+          {
+            "action": {
+              "support": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE"
+            },
+            "preCondition": "baseLineType == true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_NOT_CHANGED",
+        "actionRules": [
+          {
+            "action": {
+              "support": "READ_ONLY,REQUIRED,HIDDEN,FREEZE,FUNCTION"
+            },
+            "preCondition": "true"
+          }
+
+        ]
+      },
+      {
+        "condition": "WHEN_NOT_EMPTY",
+        "actionRules": [
+          {
+            "action": {
+              "unSupport": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE,ASSIGN_TO,SET_STATE,AUTO_APPEND,ONLY_REMOVE,ONLY_ADD,ADJUST_PAGE_ORDER,MANUAL_EDIT"
+            },
+            "preCondition": "true"
+          },
+          {
+            "action": {
+              "support": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE"
+            },
+            "preCondition": "baseLineType == true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_EMPTY",
+        "actionRules": [
+          {
+            "action": {
+              "unSupport": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE,ASSIGN_TO,SET_STATE,AUTO_APPEND,ONLY_REMOVE,ONLY_ADD,ADJUST_PAGE_ORDER,MANUAL_EDIT"
+            },
+            "preCondition": "true"
+          },
+          {
+            "action": {
+              "support": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE"
+            },
+            "preCondition": "baseLineType == true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ALL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,SET_STATE,FUNCTION,LAND_PAGE,PAGE_RED_DOT_MARK"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ALL_USED_TOBE",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,SET_STATE,FUNCTION,LAND_PAGE,PAGE_RED_DOT_MARK"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_STATE_ANY",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,SET_STATE,FUNCTION,LAND_PAGE,PAGE_RED_DOT_MARK,POP_UP_NOTIFICATION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_RELATED_ALL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "COPY,SET_STATE,FUNCTION,LAND_PAGE,PAGE_RED_DOT_MARK,POP_UP_NOTIFICATION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "CURRENT_USER_IN_GROUP",
+        "actionRules": [
+          {
+            "action": {
+              "unSupport": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE,ASSIGN_TO,SET_STATE,AUTO_APPEND,ONLY_REMOVE,ONLY_ADD,ADJUST_PAGE_ORDER,MANUAL_EDIT"
+            },
+            "preCondition": "true"
+          },
+          {
+            "action": {
+              "support": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE"
+            },
+            "preCondition": "baseLineType == true"
+          }
+        ]
+      },
+      {
+        "condition": "CURRENT_USER_NOT_IN_GROUP",
+        "actionRules": [
+          {
+            "action": {
+              "unSupport": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE,ASSIGN_TO,SET_STATE,AUTO_APPEND,ONLY_REMOVE,ONLY_ADD,ADJUST_PAGE_ORDER,MANUAL_EDIT"
+            },
+            "preCondition": "true"
+          },
+          {
+            "action": {
+              "support": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE"
+            },
+            "preCondition": "baseLineType == true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_CURRENT_USER_LOCALE",
+        "actionRules": [
+          {
+            "action": {
+              "unSupport": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE,ASSIGN_TO,SET_STATE,AUTO_APPEND,ONLY_REMOVE,ONLY_ADD,ADJUST_PAGE_ORDER,MANUAL_EDIT"
+            },
+            "preCondition": "true"
+          },
+          {
+            "action": {
+              "support": "BASELINE_CONTENT_SET,BASELINE_CONTENT_TO_UPDATE"
+            },
+            "preCondition": "baseLineType == true"
+          }
+        ]
+      },
+      {
+        "condition": "WHEN_CURRENT_USER_TERMINAL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "FUNCTION"
+            },
+            "preCondition": "true"
+          }
+        ]
+      }
+    ]
+  }
+]

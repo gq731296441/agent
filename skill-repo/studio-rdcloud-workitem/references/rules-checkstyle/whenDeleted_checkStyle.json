@@ -1,0 +1,40 @@
+[
+  {
+    "trigger": "WHEN_DELETED",
+    "rules": [
+      {
+        "condition": "NULL",
+        "actionRules": [
+          {
+            "action": {
+              "support": "CALL_API,EMAIL"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "CURRENT_USER_IN_GROUP",
+        "actionRules": [
+          {
+            "action": {
+              "support": "CALL_API,EMAIL"
+            },
+            "preCondition": "true"
+          }
+        ]
+      },
+      {
+        "condition": "CURRENT_USER_NOT_IN_GROUP",
+        "actionRules": [
+          {
+            "action": {
+              "support": "CALL_API,EMAIL"
+            },
+            "preCondition": "true"
+          }
+        ]
+      }
+    ]
+  }
+]

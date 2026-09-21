@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 import requests
 import time
 
+from workspace_paths import resolve_export_dir
+
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -812,9 +814,8 @@ class ImapQueryOrchestrator:
                 
                 safe_name = re.sub(r'[^\w\u4e00-\u9fa5]', '_', indicator_name)[:50]
                 base_filename = f"{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                # 导出到 workspace 根目录（统一使用用户目录）
-                workspace_dir = os.path.join(os.path.expanduser('~'), '.openclaw', 'workspace')
-                os.makedirs(workspace_dir, exist_ok=True)
+                # 导出到会话工作区，用户可在前端看到并下载
+                workspace_dir = resolve_export_dir()
                 base_path = os.path.join(workspace_dir, base_filename)
                 
                 exported_files = []
@@ -1790,10 +1791,8 @@ class ImapQueryOrchestrator:
             CSV文件保存路径
         """
         try:
-            # 创建工作区目录（如果不存在）
-            # 使用用户全局工作区：C:\Users\00294192.WIN-EGGBPNLI8OF\.openclaw\workspace
-            workspace_dir = os.path.join(os.path.expanduser('~'), '.openclaw', 'workspace')
-            os.makedirs(workspace_dir, exist_ok=True)
+            # 导出到会话工作区，用户可在前端看到并下载
+            workspace_dir = resolve_export_dir()
             
             # 生成文件名：imap_detail_YYYYMMDD_HHMMSS_{column}_{url_part}.xlsx
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')

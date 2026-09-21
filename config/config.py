@@ -239,6 +239,14 @@ class BaseConfig(BaseSettings):
     TOOL_SPILL_MIN_CHARS: int = Field(default=2000, description="超过此字符数则 spill")
     TOOL_SPILL_VIRTUAL_DIR: str = Field(default=".tool-cache", description="workspace 内 spill 子目录")
 
+    # ==================== HTML 分享链接 ====================
+    # 工具写出完整 HTML 时同步创建分享链接（含资源快照）并注入工具结果文本，
+    # 使 Agent 在本轮即可于最终回复中告知用户。关闭后回退为跨轮次回灌
+    # （下一轮 run 开始时的 HumanMessage 通知）。
+    HTML_SHARE_AUTO_INJECT_ENABLED: bool = Field(
+        default=True, description="HTML 生成后实时注入分享链接到工具结果"
+    )
+
     # ==================== 工具结果 TTL ====================
     # 每次模型调用前零成本清理过期/超量的工具结果（替换为占位符），
     # 释放上下文窗口。已 spill 外置的结果（摘要+路径）不清理。
