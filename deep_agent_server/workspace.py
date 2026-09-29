@@ -11,8 +11,11 @@ import hashlib
 import os
 import re
 import shutil
+import stat
+import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from config.config import app_config
 from config import get_logger
@@ -156,8 +159,7 @@ def _sync_agent_skill_to_sandbox(agent_id: str, skill_id: str) -> bool:
     if not _workspace_roots_differ():
         return False
     if (app_config.SANDBOX_DOCKER_HOST or "").strip():
-        # 远程 dockerd：skill 数据已在虚机 NFS export 中，无需拷贝
-        return False
+        return _sync_skill_tree_to_remote_host(ws_skill, sandbox_skill)
 
     sandbox_skill.parent.mkdir(parents=True, exist_ok=True)
     if _skill_tree_has_files(sandbox_skill):
@@ -192,6 +194,83 @@ def _skill_tree_has_files(skill_dir: Path) -> bool:
     return False
 
 
+def _sync_skill_tree_to_remote_host(source: Path, destination: Path, *, force: bool = False) -> bool:
+    """通过 Docker SSH 主机的 SFTP 补齐 bind mount source。"""
+    docker_host = (app_config.SANDBOX_DOCKER_HOST or "").strip()
+    parsed = urlparse(docker_host)
+    if parsed.scheme != "ssh" or not source.is_dir():
+        return False
+
+    try:
+        import paramiko
+
+        client = paramiko.SSHClient()
+        client.load_system_host_keys()
+        client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        client.connect(
+            parsed.hostname,
+            port=parsed.port or 22,
+            username=parsed.username,
+            timeout=10,
+            allow_agent=True,
+            look_for_keys=True,
+        )
+        sftp = client.open_sftp()
+        remote_path = str(destination).replace("\\", "/")
+
+        def has_remote_files(path: str) -> bool:
+            try:
+                for entry in sftp.listdir_attr(path):
+                    if stat.S_ISREG(entry.st_mode):
+                        return True
+                    if stat.S_ISDIR(entry.st_mode) and has_remote_files(
+                        f"{path.rstrip('/')}/{entry.filename}"
+                    ):
+                        return True
+            except IOError:
+                return False
+            return False
+
+        if not force and has_remote_files(remote_path):
+            sftp.close()
+            client.close()
+            return True
+
+        parent = remote_path.rsplit("/", 1)[0]
+        parts = [part for part in parent.split("/") if part]
+        current = "/" if parent.startswith("/") else ""
+        for part in parts:
+            current = f"{current.rstrip('/')}/{part}" or "/"
+            try:
+                sftp.stat(current)
+            except IOError:
+                sftp.mkdir(current)
+
+        staging = f"{remote_path}.sync-{uuid.uuid4().hex}"
+        sftp.mkdir(staging)
+        for root, dirs, files in os.walk(source):
+            relative = Path(root).relative_to(source)
+            remote_root = staging if str(relative) == "." else f"{staging}/{relative.as_posix()}"
+            for directory in dirs:
+                sftp.mkdir(f"{remote_root}/{directory}")
+            for filename in files:
+                sftp.put(str(Path(root) / filename), f"{remote_root}/{filename}")
+        sftp.close()
+        _, stdout, stderr = client.exec_command(
+            f"rm -rf -- {remote_path} && mv -- {staging} {remote_path}"
+        )
+        exit_code = stdout.channel.recv_exit_status()
+        if exit_code:
+            raise OSError(stderr.read().decode(errors="replace").strip())
+        client.close()
+        return True
+    except Exception as exc:
+        logger.warning(
+            f"[Workspace] remote skill sync failed src={source} dst={destination}: {exc}"
+        )
+        return False
+
+
 def _skill_bind_path_candidates(user_id: str, skill_id: str) -> list:
     """Docker bind 候选宿主机路径（SANDBOX 根优先，其次 WORKSPACE 根）。"""
     sid = (skill_id or "").strip().strip("/\\")
@@ -207,7 +286,7 @@ def _skill_bind_path_candidates(user_id: str, skill_id: str) -> list:
     return out
 
 
-def sync_skill_to_sandbox_bind_path(user_id: str, skill_id: str) -> bool:
+def sync_skill_to_sandbox_bind_path(user_id: str, skill_id: str, *, force: bool = False) -> bool:
     """当 WORKSPACE_ROOT 与 SANDBOX_WORKSPACE_ROOT 分离时，将 skill 同步到 docker bind 路径。
 
     read_file 使用 get_skills_dir（WORKSPACE_ROOT）；容器 execute bind 使用 get_sandbox_skills_dir。
@@ -236,8 +315,7 @@ def sync_skill_to_sandbox_bind_path(user_id: str, skill_id: str) -> bool:
         return False
 
     if (app_config.SANDBOX_DOCKER_HOST or "").strip():
-        # 远程 dockerd：skill 已在虚机 NFS export，勿在 Agent 机伪造 agent-dev 目录
-        return False
+        return _sync_skill_tree_to_remote_host(ws_skill, sandbox_skill, force=force)
 
     sandbox_skill.parent.mkdir(parents=True, exist_ok=True)
     if _skill_tree_has_files(sandbox_skill):
@@ -414,11 +492,18 @@ def resolve_skill_bind_host_path(
                 f"user={user_id} skill={sid}"
             )
 
-    sync_skill_to_sandbox_bind_path(user_id, sid)
+    if not ((app_config.SANDBOX_DOCKER_HOST or "").strip() and _workspace_roots_differ()):
+        sync_skill_to_sandbox_bind_path(user_id, sid)
 
     # 远程 dockerd 时 Agent 进程 stat 不到虚机上的 SANDBOX 路径，
     # 直接信任 NFS 对齐，优先使用 SANDBOX 路径作为 Docker bind mount 源
     if (app_config.SANDBOX_DOCKER_HOST or "").strip() and _workspace_roots_differ():
+        if not sync_skill_to_sandbox_bind_path(user_id, sid):
+            logger.error(
+                f"[Workspace] remote skill unavailable, skip bind: "
+                f"user={user_id} skill={sid} path={sandbox_skill}"
+            )
+            return None
         logger.info(f"[Workspace] remote docker skill bind sandbox path: {sandbox_skill}")
         return sandbox_skill
 

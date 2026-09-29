@@ -70,7 +70,7 @@ async def install_skill_for_user(
     ensure_user_dirs(user_id)
     target = get_skills_dir(user_id) / sid
     _copy_skill_tree(repo_dir, target)
-    sync_skill_to_sandbox_bind_path(user_id, sid)
+    sync_skill_to_sandbox_bind_path(user_id, sid, force=True)
 
     version = catalog.get("version") or "1.0.0"
     record_id = await deep_storage.install_skill_record(
