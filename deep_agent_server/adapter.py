@@ -7,6 +7,7 @@ run_id、conversation_id、step_index 等 Deep 模式专有字段。
 
 import json
 import mimetypes
+import time
 import uuid
 from collections import deque
 from datetime import datetime
@@ -2006,6 +2007,9 @@ class DeepEventAdapter:
                 "agent_path": ap,
                 "tool_call_id": tool_call_id,
                 "tool_name": effective_tool,
+                # 最近一次写入时间：同一文件多次写入时定位「本轮最后生成的 HTML」
+                # （dict 的 key 位置不会因重复写入而更新，不能靠遍历顺序判断）
+                "updated_ts": time.time(),
             }
             self._schedule_conversation_file_index(virtual_path)
             self._schedule_html_share(virtual_path)
@@ -2111,6 +2115,39 @@ class DeepEventAdapter:
             session_id=self.session_id,
             vpath=virtual_path,
         )
+
+    async def latest_html_share_url(self) -> Optional[str]:
+        """本轮 run 最后生成的 HTML 文件的分享链接（无 HTML / 未生成链接则 None）。
+
+        供 run_metrics 消息的 html_url 字段使用。取本轮 conversation_files 中
+        最近写入（updated_ts 最大）的 .html/.htm：
+          ① 优先读 wrapper 共享缓存 —— HtmlShareLinkMiddleware 已在工具返回前写入，
+             正常路径零额外开销；
+          ② 缓存缺失（中间件关闭 / 异步创建尚未完成）时兜底创建一次，避免漏报。
+        """
+        candidates = [
+            (vpath, item.get("updated_ts") or 0.0)
+            for vpath, item in self._conversation_files.items()
+            if (vpath or "").rsplit(".", 1)[-1].lower() in ("html", "htm")
+        ]
+        if not candidates:
+            return None
+        vpath = max(candidates, key=lambda pair: pair[1])[0]
+
+        links = getattr(self._agent_wrapper, "html_share_links", None)
+        if isinstance(links, dict) and links.get(vpath):
+            return links[vpath]
+
+        from deep_agent_server.html_share_service import ensure_html_share
+
+        url = await ensure_html_share(
+            user_id=self.user_id,
+            session_id=self.session_id,
+            vpath=vpath,
+        )
+        if url and isinstance(links, dict):
+            links[vpath] = url
+        return url or None
 
     def status_message(self, text: str) -> dict:
         """生成 Deep 运行时状态通知（DEEP_STATUS，不存库）。"""

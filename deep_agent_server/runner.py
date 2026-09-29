@@ -55,11 +55,15 @@ def build_run_metrics_content(
     started_at: datetime,
     finished_at: datetime,
     session_summary: Optional[dict] = None,
+    html_url: Optional[str] = None,
 ) -> dict:
     """构造 run_metrics 消息 content（便于单测）。
 
     session_summary 为整轮会话的 token 汇总（含上下文占比），
     与 /sessions/run-metrics 接口的 summary 同源同构。
+
+    html_url 为本轮最后生成的 HTML 文件的免登录分享链接（无则不带该字段），
+    供调用方在流结束时就近取用，无需从回复文本里解析。
     """
     duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
     usage = {
@@ -84,6 +88,8 @@ def build_run_metrics_content(
     }
     if session_summary:
         content["session_summary"] = session_summary
+    if html_url:
+        content["html_url"] = html_url
     return content
 
 
@@ -153,6 +159,7 @@ def _run_metrics_message(
     token_usage: dict,
     started_at: datetime,
     finished_at: datetime,
+    html_url: Optional[str] = None,
 ) -> dict:
     content = build_run_metrics_content(
         run_id=run_id,
@@ -161,6 +168,7 @@ def _run_metrics_message(
         token_usage=token_usage,
         started_at=started_at,
         finished_at=finished_at,
+        html_url=html_url,
     )
     return adapter._enrich(
         AgentMessage.run_metrics(session_id=session_id, content=content),
@@ -502,7 +510,8 @@ async def run_deep_agent(
             session_summary=session_summary,
         )
 
-    def _yield_run_metrics(metrics: dict):
+    async def _yield_run_metrics(metrics: dict):
+        """推送 run_metrics（async：需先解析本轮 HTML 分享链接）。"""
         return _run_metrics_message(
             adapter,
             session_id,
@@ -512,6 +521,7 @@ async def run_deep_agent(
             metrics["token_usage"],
             run_started_at,
             datetime.fromisoformat(metrics["finished_at"]),
+            html_url=await adapter.latest_html_share_url(),
         )
 
     async def _yield_workspace_files_async(finished_at: Optional[str] = None):
@@ -533,7 +543,7 @@ async def run_deep_agent(
         while True:
             if stop_event and stop_event.is_set():
                 metrics = await _finalize_tokens("stopped")
-                yield _yield_run_metrics(metrics)
+                yield await _yield_run_metrics(metrics)
                 async for msg in _yield_run_end(EndReason.STOP, metrics["finished_at"]):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.STOP)
@@ -551,11 +561,11 @@ async def run_deep_agent(
 
                 if was_interrupted:
                     metrics = await _finalize_tokens("interrupted")
-                    yield _yield_run_metrics(metrics)
+                    yield await _yield_run_metrics(metrics)
                     return
 
                 metrics = await _finalize_tokens("completed")
-                yield _yield_run_metrics(metrics)
+                yield await _yield_run_metrics(metrics)
                 async for msg in _yield_run_end(EndReason.COMPLETED, metrics["finished_at"]):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.COMPLETED)
@@ -563,7 +573,7 @@ async def run_deep_agent(
 
             except DeepRunTimeoutError:
                 metrics = await _finalize_tokens("error", error="timeout")
-                yield _yield_run_metrics(metrics)
+                yield await _yield_run_metrics(metrics)
                 async for msg in _yield_run_end(EndReason.ERROR, metrics["finished_at"]):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.ERROR)
@@ -572,7 +582,7 @@ async def run_deep_agent(
             except asyncio.CancelledError:
                 logger.info(f"[DeepRunner] 会话 {session_id} 取消")
                 metrics = await _finalize_tokens("stopped")
-                yield _yield_run_metrics(metrics)
+                yield await _yield_run_metrics(metrics)
                 async for msg in _yield_run_end(EndReason.STOP, metrics["finished_at"]):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.STOP)
@@ -589,7 +599,7 @@ async def run_deep_agent(
                     ):
                         yield msg
                     metrics = await _finalize_tokens("interrupted")
-                    yield _yield_run_metrics(metrics)
+                    yield await _yield_run_metrics(metrics)
                     return
 
                 classification = classify_deep_error(e)
@@ -629,7 +639,7 @@ async def run_deep_agent(
                     continue
 
                 metrics = await _finalize_tokens("error", error=err_text)
-                yield _yield_run_metrics(metrics)
+                yield await _yield_run_metrics(metrics)
                 async for msg in _yield_run_end(EndReason.ERROR, metrics["finished_at"]):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.ERROR)
@@ -1078,6 +1088,7 @@ async def run_deep_agent_collect(
     subagent_runs = []
     error = ""
     token_usage = {}
+    html_url = ""
 
     async for msg in run_deep_agent(
         agent_wrapper, input_data, config, session_id, user_id,
@@ -1111,6 +1122,7 @@ async def run_deep_agent_collect(
         elif mt == MessageType.RUN_METRICS.value:
             c = content if isinstance(content, dict) else {}
             token_usage = c.get("token_usage") or token_usage
+            html_url = c.get("html_url") or html_url
 
     return {
         "status": status,
@@ -1127,6 +1139,7 @@ async def run_deep_agent_collect(
         "filesystem_ops": [],
         "skills_used": [],
         "token_usage": token_usage,
+        "html_url": html_url,
         "error": error,
         "interrupt": interrupt,
     }

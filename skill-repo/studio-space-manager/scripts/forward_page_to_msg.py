@@ -2,13 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 =================================================================
-studio-space-manager - 页面转发模块 (v2.8.0)
+studio-space-manager - 页面转发模块 (v2.9.0)
 =================================================================
 iCenter 空间页面转发技能
 
 将空间页面或页面链接转发到 iCenter 消息或邮件。默认转发到消息，可转发给本人或指定用户（工号或姓名）；
 使用 --to-email 时转发到邮件，需至少指定一名收件人，可选抄送、密送、附言与邮件主题。
 支持从完整页面链接中解析 space_id 与 content_id；若按姓名指定接收人且存在重名，会返回候选列表并提示使用 --to-emp-no 选择。
+v2.9.0 起支持转发到邮箱群组：使用 --to-group / --cc-group / --bcc-group 指定群组名称（多个逗号分隔，
+无需加 $ 前缀，脚本自动补 $ 并通过 spacegroup/docs/search 检索 ZMail 群组，多候选返回候选列表需用更精确名称指定）。
 
 跨平台支持：
 - ✅ Linux (Ubuntu/CentOS/Debian)
@@ -19,6 +21,7 @@ iCenter 空间页面转发技能
   # Linux / macOS
   python3 forward_page_to_msg.py --url "<页面链接>"
   python3 forward_page_to_msg.py --url "<页面链接>" --to-email --to-name "张三"
+  python3 forward_page_to_msg.py --url "<页面链接>" --to-email --to-group "兴云开发团队"
 
   # Windows
   python forward_page_to_msg.py --url "<页面链接>"
@@ -29,7 +32,7 @@ iCenter 空间页面转发技能
 
 作者：Co-Claw Team
 创建：2026-03-05
-更新：2026-03-07
+更新：2026-09-20
 """
 
 import argparse
@@ -51,6 +54,12 @@ from _platform_utils import configure_stdio_utf8
 USER_SEARCH_BY_NAME_URL = os.getenv(
     "FORWARD_USER_SEARCH_URL",
     build_icenter_api_url("/zte-km-icenter-addresearch/user/plain/docs/search"),
+)
+
+# 邮箱群组检索接口（spacegroup/docs/search，isIncludeZMailGroup=true 检索 ZMail 群组）
+GROUP_SEARCH_URL = os.getenv(
+    "FORWARD_GROUP_SEARCH_URL",
+    build_icenter_api_url("/zte-km-icenter-addresearch/spacegroup/docs/search"),
 )
 
 # 页面详情接口（用于获取页面标题，转发到邮件时作为邮件主题）
@@ -233,6 +242,109 @@ def resolve_recipients(
     return targets, None
 
 
+def search_groups_by_keyword(
+    keyword: str,
+    caller_emp_no: str,
+    token: str,
+    lang: str = "zh_CN",
+    limit: int = 30,
+) -> List[dict]:
+    """
+    根据群组名称关键字搜索邮箱群组，返回候选列表 [{groupId, groupName, routerName, ...}, ...]。
+    使用接口：zte-km-icenter-addresearch/spacegroup/docs/search（isIncludeZMailGroup=true）。
+    keyword 无需带 $ 前缀，脚本自动补 $（兼容已带 $ 的输入）。
+    """
+    if not keyword or not keyword.strip():
+        return []
+    keyword = keyword.strip()
+    if not keyword.startswith("$"):
+        keyword = f"${keyword}"
+    url = GROUP_SEARCH_URL
+    headers = {
+        "Accept": "application/json, text/plain",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "X-Auth-Value": token,
+        "X-Emp-No": caller_emp_no,
+        "X-Lang-Id": lang,
+        "Content-Type": "application/json;charset=UTF-8",
+    }
+    params = {
+        "employeeShortId": caller_emp_no,
+        "keyword": keyword,
+        "limit": limit,
+        "spaceId": "",
+        "isIncludeSpaceGroup": False,
+        "isIncludeZMailGroup": True,
+    }
+    try:
+        resp = requests.get(url, headers=headers, params=params, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[WARN] 搜索邮箱群组失败: {e}", file=sys.stderr)
+        return []
+    code_info = data.get("code") or {}
+    if isinstance(code_info, dict) and code_info.get("code") != "0000":
+        return []
+    items = data.get("bo") or []
+    if not isinstance(items, list):
+        return []
+    result = []
+    for g in items:
+        if not isinstance(g, dict):
+            continue
+        gid = g.get("groupId") or g.get("id") or ""
+        gname = (
+            g.get("chName") or g.get("enName") or g.get("groupName") or ""
+        )
+        router = g.get("routerName") or ""
+        if gid:
+            result.append(
+                {
+                    "groupId": str(gid).strip(),
+                    "groupName": (gname or str(gid)).strip(),
+                    "routerName": router.strip(),
+                }
+            )
+    return result
+
+
+def resolve_groups(
+    group_str: Optional[str],
+    caller_emp_no: str,
+    token: str,
+    lang: str,
+    space_id: str = "",
+    content_id: str = "",
+) -> Tuple[Optional[List[dict]], Optional[dict]]:
+    """
+    将「群组名串」解析为 [{groupId, groupName, routerName}, ...]。
+    用户无需加 $ 前缀；若某群组名多候选，返回 (None, need_choice_result)，调用方应打印并退出。
+    """
+    groups: List[dict] = []
+    for gname in [s.strip() for s in (group_str or "").split(",") if s.strip()]:
+        candidates = search_groups_by_keyword(gname, caller_emp_no, token, lang=lang)
+        if not candidates:
+            return None, {
+                "success": False,
+                "message": f"未找到邮箱群组「{gname}」，请确认群组名称是否正确。",
+                "search_group": gname,
+            }
+        if len(candidates) > 1:
+            return None, {
+                "success": False,
+                "need_choice": True,
+                "message": f"群组「{gname}」匹配到多个邮箱群组，请使用更精确的群组名称指定。",
+                "search_group": gname,
+                "candidates": candidates,
+                "page_link": f"https://i.zte.com.cn/#/shared/{space_id}/wiki/page/{content_id}/view"
+                if space_id and content_id
+                else "",
+            }
+        groups.append(candidates[0])
+    return groups, None
+
+
 def _is_permission_error(result: dict) -> bool:
     """根据接口返回判断是否为无权限类错误。"""
     code_info = result.get("code") or {}
@@ -371,17 +483,30 @@ def forward_page_to_email(
     receivers: Optional[List[Tuple[str, str]]] = None,
     cc_receivers: Optional[List[Tuple[str, str]]] = None,
     bcc_receivers: Optional[List[Tuple[str, str]]] = None,
+    group_receivers: Optional[List[dict]] = None,
+    group_cc_receivers: Optional[List[dict]] = None,
+    group_bcc_receivers: Optional[List[dict]] = None,
     postscript: str = "",
     email_title: Optional[str] = None,
     lang: str = "zh_CN",
 ) -> Tuple[bool, str, Optional[str]]:
     """
-    将页面转发到邮件。receivers/cc_receivers/bcc_receivers 至少一个非空即可。
+    将页面转发到邮件。个人（receivers/cc/bcc）与群组（group_receivers/group_cc/group_bcc）任一非空即可。
+    body 中 receivers/ccReceivers/bccReceivers 元素支持两种格式：
+      个人: {"employeeNo": e, "employeeName": n}
+      群组: {"groupId": g, "groupName": n, "routerName": r}
     email_title 为空时使用默认：Co-Claw转发自空间页面"页面标题"。
     Returns: (是否成功, jumpUrl, 失败原因；成功时第三项为 None)
     """
-    if not receivers and not cc_receivers and not bcc_receivers:
-        return False, "", "收件人、抄送人、密送人不能全部为空"
+    if not (
+        receivers
+        or cc_receivers
+        or bcc_receivers
+        or group_receivers
+        or group_cc_receivers
+        or group_bcc_receivers
+    ):
+        return False, "", "收件人、抄送人、密送人（含群组）不能全部为空"
     jump_url = f"https://i.zte.com.cn/#/shared/{space_id}/wiki/page/{content_id}/view"
     page_title = (
         get_page_title(space_id, content_id, caller_emp_no, token, lang)
@@ -407,16 +532,29 @@ def forward_page_to_email(
         "environmentType": "browser",
         "system": "space-1920484534",
     }
+
+    def _mix_recipients(
+        persons: Optional[List[Tuple[str, str]]],
+        groups: Optional[List[dict]],
+    ) -> list:
+        """合并个人与群组元素为 shareContent 的收件人数组（个人在前，群组在后）。"""
+        merged = [
+            {"employeeNo": e, "employeeName": n} for e, n in (persons or [])
+        ]
+        for g in groups or []:
+            merged.append(
+                {
+                    "groupId": g.get("groupId", ""),
+                    "groupName": g.get("groupName", ""),
+                    "routerName": g.get("routerName", ""),
+                }
+            )
+        return merged
+
     body = {
-        "receivers": [
-            {"employeeNo": e, "employeeName": n} for e, n in (receivers or [])
-        ],
-        "ccReceivers": [
-            {"employeeNo": e, "employeeName": n} for e, n in (cc_receivers or [])
-        ],
-        "bccReceivers": [
-            {"employeeNo": e, "employeeName": n} for e, n in (bcc_receivers or [])
-        ],
+        "receivers": _mix_recipients(receivers, group_receivers),
+        "ccReceivers": _mix_recipients(cc_receivers, group_cc_receivers),
+        "bccReceivers": _mix_recipients(bcc_receivers, group_bcc_receivers),
         "postscript": (postscript or "").strip(),
         "emailTitle": title,
         "iframeHeight": "800px",
@@ -503,6 +641,24 @@ def main():
         help="转发到邮件时的密送人姓名，多个用逗号分隔",
     )
     parser.add_argument(
+        "--to-group",
+        dest="to_group",
+        default=None,
+        help="转发到邮件时的邮箱群组名称，多个用逗号分隔；无需加 $ 前缀，脚本自动补 $ 并检索 ZMail 群组；若匹配到多个群组会返回候选列表，需用更精确的群组名称指定",
+    )
+    parser.add_argument(
+        "--cc-group",
+        dest="cc_group",
+        default=None,
+        help="转发到邮件时的抄送邮箱群组名称，多个用逗号分隔；无需加 $ 前缀",
+    )
+    parser.add_argument(
+        "--bcc-group",
+        dest="bcc_group",
+        default=None,
+        help="转发到邮件时的密送邮箱群组名称，多个用逗号分隔；无需加 $ 前缀",
+    )
+    parser.add_argument(
         "--postscript",
         dest="postscript",
         default="",
@@ -555,10 +711,34 @@ def main():
 
     # ---------- 转发到邮件 ----------
     if args.to_email:
+        # 姓名参数中以 $ 开头的值视为邮箱群组名（兼容复制带 $ 的场景），路由到群组解析
+        to_groups_str = args.to_group
+        to_name_str = args.to_name
+        if to_name_str:
+            g_parts = [s.strip() for s in to_name_str.split(",") if s.strip().startswith("$")]
+            p_parts = [s for s in to_name_str.split(",") if not s.strip().startswith("$")]
+            if g_parts:
+                to_groups_str = ",".join(
+                    [to_groups_str or ""] + g_parts
+                ).strip(",")
+                to_name_str = ",".join(p_parts) if p_parts else None
+
+        # 解析邮箱群组（自动补 $ 前缀检索 ZMail 群组）
+        group_receivers, err_g = resolve_groups(
+            to_groups_str,
+            caller_emp_no,
+            token,
+            args.lang,
+            space_id,
+            content_id,
+        )
+        if err_g:
+            print(json.dumps(err_g, ensure_ascii=False, indent=2))
+            sys.exit(1)
         # 解析收件人、抄送人、密送人（允许全部为空，后续统一校验）
         receivers, err = resolve_recipients(
             args.to_emp_no,
-            args.to_name,
+            to_name_str,
             caller_emp_no,
             token,
             args.lang,
@@ -568,9 +748,32 @@ def main():
         if err:
             print(json.dumps(err, ensure_ascii=False, indent=2))
             sys.exit(1)
+
+        # 抄送：群组 + 个人（$ 开头自动路由群组）
+        cc_groups_str = args.cc_group
+        cc_name_str = args.cc_name
+        if cc_name_str:
+            g_parts = [s.strip() for s in cc_name_str.split(",") if s.strip().startswith("$")]
+            p_parts = [s for s in cc_name_str.split(",") if not s.strip().startswith("$")]
+            if g_parts:
+                cc_groups_str = ",".join(
+                    [cc_groups_str or ""] + g_parts
+                ).strip(",")
+                cc_name_str = ",".join(p_parts) if p_parts else None
+        group_cc, err_gcc = resolve_groups(
+            cc_groups_str,
+            caller_emp_no,
+            token,
+            args.lang,
+            space_id,
+            content_id,
+        )
+        if err_gcc:
+            print(json.dumps(err_gcc, ensure_ascii=False, indent=2))
+            sys.exit(1)
         cc, err_cc = resolve_recipients(
             args.cc_emp_no,
-            args.cc_name,
+            cc_name_str,
             caller_emp_no,
             token,
             args.lang,
@@ -580,9 +783,32 @@ def main():
         if err_cc:
             print(json.dumps(err_cc, ensure_ascii=False, indent=2))
             sys.exit(1)
+
+        # 密送：群组 + 个人（$ 开头自动路由群组）
+        bcc_groups_str = args.bcc_group
+        bcc_name_str = args.bcc_name
+        if bcc_name_str:
+            g_parts = [s.strip() for s in bcc_name_str.split(",") if s.strip().startswith("$")]
+            p_parts = [s for s in bcc_name_str.split(",") if not s.strip().startswith("$")]
+            if g_parts:
+                bcc_groups_str = ",".join(
+                    [bcc_groups_str or ""] + g_parts
+                ).strip(",")
+                bcc_name_str = ",".join(p_parts) if p_parts else None
+        group_bcc, err_gbcc = resolve_groups(
+            bcc_groups_str,
+            caller_emp_no,
+            token,
+            args.lang,
+            space_id,
+            content_id,
+        )
+        if err_gbcc:
+            print(json.dumps(err_gbcc, ensure_ascii=False, indent=2))
+            sys.exit(1)
         bcc, err_bcc = resolve_recipients(
             args.bcc_emp_no,
-            args.bcc_name,
+            bcc_name_str,
             caller_emp_no,
             token,
             args.lang,
@@ -593,11 +819,18 @@ def main():
             print(json.dumps(err_bcc, ensure_ascii=False, indent=2))
             sys.exit(1)
 
-        # 校验：receivers/cc/bcc 至少有一个非空
-        if not receivers and not cc and not bcc:
+        # 校验：个人或群组任一非空（主送/抄送/密送合计）
+        if not (
+            receivers
+            or cc
+            or bcc
+            or group_receivers
+            or group_cc
+            or group_bcc
+        ):
             result = {
                 "success": False,
-                "message": "转发到邮件需至少指定一名收件人、抄送人或密送人，请使用 --to-emp-no/--to-name、--cc-emp-no/--cc-name 或 --bcc-emp-no/--bcc-name。",
+                "message": "转发到邮件需至少指定一名收件人、抄送人或密送人（个人或邮箱群组），请使用 --to-emp-no/--to-name/--to-group、--cc-emp-no/--cc-name/--cc-group 或 --bcc-emp-no/--bcc-name/--bcc-group。",
             }
             print(json.dumps(result, ensure_ascii=False, indent=2))
             sys.exit(1)
@@ -617,14 +850,20 @@ def main():
                 result["to_recipients"] = [
                     {"employeeNo": e, "employeeName": n} for e, n in receivers
                 ]
+            if group_receivers:
+                result["to_groups"] = list(group_receivers)
             if cc:
                 result["cc_recipients"] = [
                     {"employeeNo": e, "employeeName": n} for e, n in cc
                 ]
+            if group_cc:
+                result["cc_groups"] = list(group_cc)
             if bcc:
                 result["bcc_recipients"] = [
                     {"employeeNo": e, "employeeName": n} for e, n in bcc
                 ]
+            if group_bcc:
+                result["bcc_groups"] = list(group_bcc)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             sys.exit(0)
         success, jump_url, fail_reason = forward_page_to_email(
@@ -635,6 +874,9 @@ def main():
             receivers or [],
             cc or [],
             bcc or [],
+            group_receivers or [],
+            group_cc or [],
+            group_bcc or [],
             postscript,
             args.email_title,
             args.lang,
@@ -652,14 +894,20 @@ def main():
             result["to_recipients"] = [
                 {"employeeNo": e, "employeeName": n} for e, n in receivers
             ]
+        if group_receivers:
+            result["to_groups"] = list(group_receivers)
         if cc:
             result["cc_recipients"] = [
                 {"employeeNo": e, "employeeName": n} for e, n in cc
             ]
+        if group_cc:
+            result["cc_groups"] = list(group_cc)
         if bcc:
             result["bcc_recipients"] = [
                 {"employeeNo": e, "employeeName": n} for e, n in bcc
             ]
+        if group_bcc:
+            result["bcc_groups"] = list(group_bcc)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         sys.exit(0 if success else 1)
 

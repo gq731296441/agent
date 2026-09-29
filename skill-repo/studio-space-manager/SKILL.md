@@ -8,7 +8,7 @@ description: >-
   协作：评论与回复、@我、收藏列表与关键字翻页、我编辑/我浏览记录（支持日期/时段/区间筛选）、点赞查询与切换点赞（取消/补赞）、**页面统计数据**（阅读/评论/转发/点赞次数，时间范围内，`get_page_stat.py`，与热点页同源检索接口）、页面标签查询/贴标签/删标签/按标签搜索同标签页面；
   操作：页面复制（`--level 1` 时含当前页下**所有层级**子页面，即整棵子树）、更新标题、**页面正文编辑**（整页/章节/表格单元格，`studio_space_page_edit.py`，见 `subskills/page-edit/SKILL.md`）、子页面列表、空间最新页面、附件下载/上传（上传单文件 <=100MB）、**图片上传并插入页面**（将本地图片上传到空间并自动插入页面正文）。
   禁止对 iCenter 页面使用 web 抓取类工具。
-version: 4.0.8
+version: 4.0.10
 generator: co-skill-creator
 compatibility: Requires Python 3.x（建议 3.7+，与标准流 reconfigure 一致）。UTF-8 文本；支持 Linux / Windows / macOS。
 author: platform

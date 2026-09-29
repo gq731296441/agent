@@ -3,10 +3,10 @@ name: studio-space-page-content
 description: >-
   iCenter/Wiki 页面内容子技能：关键词搜索页面；按 URL 或 spaceId/pageId 读取正文；先读后由对话层总结；
   新建并保存 Markdown 或 HTML 页面；文档空间模板列表、模板正文、基于模板创建文档；
-  转发页面到 iCenter 消息、邮件（抄送密送、主题与附言）或群组（列群、群名匹配）；
+  转发页面到 iCenter 消息、邮件（抄送密送、主题与附言，含邮箱群组 --to-group/--cc-group/--bcc-group）或群组（列群、群名匹配）；
   指定页面的「页面浏览」宏数据（浏览记录表格，接口见 all/接口.md #58）。
   i.zte.com.cn 页面须走本仓库脚本，禁止 web 抓取类工具。
-version: 1.3.1
+version: 1.3.2
 ---
 # 页面内容子技能
 
@@ -44,6 +44,7 @@ version: 1.3.1
 - **保存/发布**：保存到空间、新建页面、发布、子页面、Markdown/HTML
 - **转发消息**：发消息、转发给我、转给某人（工号）
 - **转发邮件**：发邮件、抄送、密送、邮件主题、附言
+- **转发邮件群组**：发给群组邮箱、转发到邮箱群组、邮件发给某群、群组邮件
 - **转发群组**：发到群、项目群、列出群组、模糊匹配群名
 - **空间模板**：模板列表、模板内容、用模板新建、按模板建文档
 - **页面浏览数据**：谁浏览过这篇、页面浏览记录、浏览宏统计（与「我浏览的页面」个人列表不同，针对**当前页面**）
@@ -56,8 +57,9 @@ version: 1.3.1
 2. **空间模板**（“模板列表、查看模板、按模板创建文档”）→ `space_template_page.py`
 3. **页面转 Markdown（本地）**（“转 Markdown、导出 md、保存到本地文件”）→ `space_page_tomd.py`
 4. **转发邮件**（出现“邮件、邮箱、抄送、密送”或 `--to-email` 语义）→ `forward_page_to_msg.py --to-email ...`
-5. **转发群组**（出现“群、群组、发到群”且非邮件）→ `forward_page_to_group.py`
-6. **转发消息**（“转发、发消息、分享页面”）→ `forward_page_to_msg.py`（无 `--to-email`）
+5. **转发邮件群组**（“邮件发给某群、群组邮箱、转发到邮箱群组”且为邮件语义）→ `forward_page_to_msg.py --to-email --to-group "<群组名>"`（群组名**无需加 $ 前缀**，脚本自动补 $ 检索）
+6. **转发群组**（出现“群、群组、发到群”且非邮件）→ `forward_page_to_group.py`
+7. **转发消息**（“转发、发消息、分享页面”）→ `forward_page_to_msg.py`（无 `--to-email`）
 7. **读取/总结**（“打开、读取、总结、讲了什么”）→ `fetch_space_page.py`（总结在对话层）
 8. **页面浏览记录（单页）**（“这篇谁看过、页面浏览情况、浏览宏”）→ `space_get_macro_data.py`
 9. **搜索**（“搜、查找、关键词”且无明确 URL）→ `space_page_search.py`
@@ -76,7 +78,8 @@ version: 1.3.1
 | 模板内容 | `spaceId` + `templateId` | `data-type` | `space_template_page.py get` | 默认 `--data-type HTML` |
 | 按模板创建 | `spaceId` + `parentId` + `templateId` | `title`、`parent-url` | `space_template_page.py create` | 可不传 `--title`（沿用模板标题） |
 | 转发消息 | `url` | `to-emp-no` | `forward_page_to_msg.py` | 缺省可发给自己（见脚本） |
-| 转发邮件 | `url` + 收件人 | `cc`/`bcc`/`email-title`/`postscript`/`no-postscript` | `forward_page_to_msg.py --to-email` | 邮件模式**必须**有收件人 |
+| 转发邮件 | `url` + 收件人 | `cc`/`bcc`/`email-title`/`postscript`/`no-postscript` | `forward_page_to_msg.py --to-email` | 邮件模式**必须**有收件人（个人或群组） |
+| 转发邮件（群组） | `url` + 群组名 | `to-group`/`cc-group`/`bcc-group`、`email-title`/`postscript` | `forward_page_to_msg.py --to-email --to-group` | 群组名**无需加 $ 前缀**，脚本自动补 $ 检索 ZMail 群组；多候选时返回 `need_choice` 需用更精确名称指定 |
 | 转发群组 | `url` + 群名或匹配串 | `--list-groups` | `forward_page_to_group.py` | 多候选时返回 `need_choice` |
 | 内容总结 | 同读取 | — | 先 `fetch_space_page.py` | 再由对话层生成总结 |
 | 页面浏览宏数据 | `url` 或 `spaceId+pageId` | `limit`/`offset`、`level`、`scope`、`content-title` | `space_get_macro_data.py` | 对应接口文档 #58；返回 `macro_html` 表格，可用 `--json-output` |
@@ -90,6 +93,7 @@ version: 1.3.1
 - **空间模板**：对应 `all/接口.md` 内容管理子领域 **#8 模板列表、#9 模板内容、#10 基于模版创建文档**（路径前缀 `/studio-ispace/doc`）；脚本走 `icenterapi` 的 `zte-rdcloud-space-content` 路径。
 - **页面浏览宏**：对应 `all/接口.md` 内容管理（1.0）**#58 页面浏览宏数据**；脚本请求 `zte-rd-icenter-contents/macros/execute?spaceId=&mode=execute`（可用环境变量 `SPACE_MACRO_EXECUTE_URL` 覆盖），宏 `com.zte.wiki.macro.PageViewsMacro`。默认会先调标题接口补全 `contentTitle`，遇 `0001` 会对 `query.system` 做有限次重试；`--no-fetch-title` / `--system-query` 可关闭或固定该行为。
 - **邮件**：收件人支持工号列表或姓名（姓名可能重名 → 返回候选后改用工号）。
+- **邮件群组**：用户说“邮件发给某群/群组邮箱/转发到邮箱群组”时路由到 `--to-group`（抄送 `--cc-group`、密送 `--bcc-group`）；群组名直接取用户所说名称，**无需加 $ 前缀**，脚本自动补 $ 并通过 `spacegroup/docs/search` 检索 ZMail 群组；匹配到多个群组返回候选列表，需用户用更精确群组名重试（也可直接说带 $ 的完整群组名）。
 - **邮件附言**：若脚本返回 `need_postscript_prompt`，用户确认后再加 `--postscript` 或 `--no-postscript`。
 
 ### 4.4 澄清问题模板（缺参时必须询问）
@@ -103,7 +107,9 @@ version: 1.3.1
 - 页面转 Markdown 但无 URL 且无 ID：  
   “请提供页面链接，或提供 spaceId 与 pageId。”
 - 邮件转发无收件人：  
-  “请提供收件人工号（或姓名，可能需确认重名）。”
+  “请提供收件人工号（或姓名，可能需确认重名），或要转发的邮箱群组名称。”
+- 邮件转发群组无群名：  
+  “请提供要转发到的邮箱群组名称（无需加 $ 前缀）。”
 - 转发群组无群名：  
   “要发到哪个群？可说群名关键词；也可先 `--list-groups` 再选。”
 
@@ -134,6 +140,12 @@ python3 scripts/forward_page_to_msg.py --url "<页面链接>" --to-emp-no "<收�
 
 # 转发到邮件（须指定收件人）
 python3 scripts/forward_page_to_msg.py --url "<页面链接>" --to-email --to-emp-no "<工号1>,<工号2>"
+
+# 转发到邮件（邮箱群组，群组名无需加 $ 前缀，脚本自动补 $ 检索）
+python3 scripts/forward_page_to_msg.py --url "<页面链接>" --to-email --to-group "兴云开发团队"
+
+# 转发到邮件（群组 + 抄送/密送群组，个人与群组可混合）
+python3 scripts/forward_page_to_msg.py --url "<页面链接>" --to-email --to-group "兴云开发团队" --cc-group "项目A团队" --bcc-group "管理层"
 
 # 列出群组 / 转发到群组
 python3 scripts/forward_page_to_group.py --list-groups

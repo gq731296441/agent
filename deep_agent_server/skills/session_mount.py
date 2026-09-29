@@ -247,6 +247,7 @@ async def ensure_session_skill_mount(
     manifest = read_mount_manifest(user_id, session_id)
     stored_key = (row or {}).get("selection_key") or (manifest or {}).get("selection_key")
 
+    mount_mismatch = False
     if (
         not force_recreate
         and stored_key == selection_key
@@ -255,11 +256,31 @@ async def ensure_session_skill_mount(
     ):
         svc = get_sandbox_service()
         if await svc.health_check(user_id, session_id):
-            return MountResult(
-                skipped=True,
-                selection_key=selection_key,
-                mounted_count=len(skill_ids),
-                recreated=False,
+            cid = row.get("container_id")
+            # selection_key 一致不代表容器真的挂上了：技能源不可用导致的历史 bind
+            # 失败、技能增删都可能让容器缺项。此处核对容器实际 bind 的 skill 集合，
+            # 不一致则不再跳过，落到下面的重建分支自愈。
+            bound = (
+                await svc.resolve_verified_mounted_skill_ids(
+                    cid,
+                    user_id=user_id,
+                    mounted_skill_ids=skill_ids,
+                    agent_id=agent_id,
+                )
+                if cid
+                else None
+            )
+            if bound is not None:
+                return MountResult(
+                    skipped=True,
+                    selection_key=selection_key,
+                    mounted_count=len(bound),
+                    recreated=False,
+                )
+            mount_mismatch = True
+            logger.warning(
+                f"[SkillMount] 容器实际挂载与选择不一致，强制重建 "
+                f"user={user_id} session={session_id}"
             )
 
     prepare_mount_placeholder(user_id, session_id)
@@ -282,6 +303,7 @@ async def ensure_session_skill_mount(
         force_recreate=(
             force_recreate
             or skills_synced
+            or mount_mismatch
             or (stored_key is not None and stored_key != selection_key)
         ),
         agent_id=agent_id,

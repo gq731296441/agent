@@ -10,7 +10,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from config.config import app_config
 from config import get_logger
@@ -109,21 +109,45 @@ class DockerSandboxService(SandboxService):
                 if not force_recreate and stored_key == selection_key and row:
                     cid = row.get("container_id")
                     status = row.get("status") or "stopped"
+                    # 复用前必须核对容器实际 bind 的 skill 集合：selection_key 只由技能
+                    # id 集合决定，容器可能因历史 bind 失败/技能源当时不可用而缺项，
+                    # 此时仅比对 key 会把"缺挂载"的容器一直复用下去。
                     if status == SandboxStatus.PAUSED.value and cid:
                         await asyncio.to_thread(self._unpause_sync, cid)
-                        await self._update_status(user_id, session_id, SandboxStatus.RUNNING)
-                        await self._touch(user_id, session_id, selection_key, mounted_skill_ids)
-                        await self._finalize_running_container(user_id, session_id, cid)
-                        return False
-                    if cid and await self._container_running(cid):
-                        await self._touch(user_id, session_id, selection_key, mounted_skill_ids)
-                        await self._finalize_running_container(user_id, session_id, cid)
-                        return False
-                    if status == SandboxStatus.STOPPED.value and cid:
-                        if await asyncio.to_thread(self._start_sync, cid):
-                            await self._touch(user_id, session_id, selection_key, mounted_skill_ids)
+                        bound = await self.resolve_verified_mounted_skill_ids(
+                            cid,
+                            user_id=user_id,
+                            mounted_skill_ids=mounted_skill_ids,
+                            agent_id=agent_id,
+                        )
+                        if bound is not None:
+                            await self._update_status(user_id, session_id, SandboxStatus.RUNNING)
+                            await self._touch(user_id, session_id, selection_key, bound)
                             await self._finalize_running_container(user_id, session_id, cid)
                             return False
+                    elif cid and await self._container_running(cid):
+                        bound = await self.resolve_verified_mounted_skill_ids(
+                            cid,
+                            user_id=user_id,
+                            mounted_skill_ids=mounted_skill_ids,
+                            agent_id=agent_id,
+                        )
+                        if bound is not None:
+                            await self._touch(user_id, session_id, selection_key, bound)
+                            await self._finalize_running_container(user_id, session_id, cid)
+                            return False
+                    elif status == SandboxStatus.STOPPED.value and cid:
+                        if await asyncio.to_thread(self._start_sync, cid):
+                            bound = await self.resolve_verified_mounted_skill_ids(
+                                cid,
+                                user_id=user_id,
+                                mounted_skill_ids=mounted_skill_ids,
+                                agent_id=agent_id,
+                            )
+                            if bound is not None:
+                                await self._touch(user_id, session_id, selection_key, bound)
+                                await self._finalize_running_container(user_id, session_id, cid)
+                                return False
 
                 has_row = row is not None and bool(row.get("container_id"))
                 if not has_row:
@@ -143,7 +167,7 @@ class DockerSandboxService(SandboxService):
                     await asyncio.to_thread(self._destroy_container_sync, old_cid)
                 await asyncio.to_thread(purge_host_sandbox_skills_dir, user_id, session_id)
                 await ensure_session_dirs(user_id, session_id)
-                cid = await asyncio.to_thread(
+                cid, bound_skill_ids = await asyncio.to_thread(
                     self._create_container,
                     user_id,
                     session_id,
@@ -157,12 +181,12 @@ class DockerSandboxService(SandboxService):
                     cid,
                     ws_path,
                     selection_key=selection_key,
-                    mounted_skill_ids=mounted_skill_ids or [],
+                    mounted_skill_ids=bound_skill_ids,
                 )
                 await self._finalize_running_container(user_id, session_id, cid)
                 logger.info(
                     f"[Sandbox] recreated with skills user={user_id} session={session_id} "
-                    f"skills={mounted_skill_ids} key={selection_key[:12]}"
+                    f"skills={bound_skill_ids} key={selection_key[:12]}"
                 )
                 return True
             finally:
@@ -322,7 +346,7 @@ class DockerSandboxService(SandboxService):
             old_cid = row.get("container_id") if row else None
             await self.pause_oldest_if_at_capacity()
             await ensure_session_dirs(user_id, session_id)
-            cid = await asyncio.to_thread(
+            cid, bound_skill_ids = await asyncio.to_thread(
                 self._create_container,
                 user_id,
                 session_id,
@@ -337,7 +361,7 @@ class DockerSandboxService(SandboxService):
                 cid,
                 ws_path,
                 selection_key=selection_key,
-                mounted_skill_ids=mounted_skill_ids or [],
+                mounted_skill_ids=bound_skill_ids,
             )
             await self._finalize_running_container(user_id, session_id, cid)
             return SandboxHandle(
@@ -681,6 +705,53 @@ class DockerSandboxService(SandboxService):
             return None
         return None
 
+    def _resolve_skill_bind_volumes(
+        self,
+        user_id: str,
+        mounted_skill_ids: Optional[List[str]],
+        *,
+        agent_id: Optional[str] = None,
+        log: bool = True,
+    ) -> Tuple[Dict[str, Dict[str, str]], List[str]]:
+        """解析 skill 的 bind mount：返回 (volumes 片段, 实际挂载成功的 skill_id 列表)。
+
+        源目录不存在/为空（resolve_skill_bind_host_path 返回 None）时该技能被跳过，
+        只能出现在返回值里，调用方不得把请求列表原样回写 DB —— 否则 DB 记录与
+        容器实际挂载不一致，后续 selection_key 比对会误判成"已挂载"而永不重建。
+        """
+        volumes: Dict[str, Dict[str, str]] = {}
+        bound: List[str] = []
+        for raw in mounted_skill_ids or []:
+            sid = str(raw).strip().strip("/\\")
+            if not sid or ".." in sid:
+                continue
+            host_skill = resolve_skill_bind_host_path(user_id, sid, agent_id=agent_id)
+            if host_skill is None:
+                if log:
+                    logger.warning(
+                        f"[Sandbox] skill 目录不存在或为空，跳过 mount: "
+                        f"user={user_id} skill={sid}"
+                    )
+                continue
+            bind_src = str(host_skill.resolve())
+            destination = f"{CONTAINER_SKILL_MOUNT_PREFIX}/{sid}"
+            if bind_src in volumes:
+                # volumes 以源路径为 key，同一源只能挂一个 destination
+                if log:
+                    logger.warning(
+                        f"[Sandbox] skill bind 源已被占用，跳过 mount: "
+                        f"user={user_id} skill={sid} src={bind_src}"
+                    )
+                continue
+            volumes[bind_src] = {"bind": destination, "mode": "ro"}
+            bound.append(sid)
+            if log:
+                logger.info(
+                    f"[Sandbox] skill volume bind user={user_id} skill={sid} "
+                    f"src={bind_src} -> {destination}"
+                )
+        return volumes, bound
+
     def _build_container_run_kwargs(
         self,
         user_id: str,
@@ -688,7 +759,8 @@ class DockerSandboxService(SandboxService):
         mounted_skill_ids: Optional[List[str]] = None,
         *,
         agent_id: Optional[str] = None,
-    ) -> dict:
+    ) -> Tuple[dict, List[str]]:
+        """返回 (containers.run 参数, 实际挂载成功的 skill_id 列表)。"""
         ws_host = str(get_sandbox_workspace_dir(user_id, session_id))
         os.makedirs(ws_host, exist_ok=True)
 
@@ -696,28 +768,10 @@ class DockerSandboxService(SandboxService):
             ws_host: {"bind": "/workspace", "mode": "rw"},
         }
 
-        for sid in mounted_skill_ids or []:
-            sid = str(sid).strip().strip("/\\")
-            if not sid or ".." in sid:
-                continue
-            host_skill = resolve_skill_bind_host_path(
-                user_id, sid, agent_id=agent_id
-            )
-            if host_skill is not None:
-                bind_src = str(host_skill.resolve())
-                volumes[bind_src] = {
-                    "bind": f"{CONTAINER_SKILL_MOUNT_PREFIX}/{sid}",
-                    "mode": "ro",
-                }
-                logger.info(
-                    f"[Sandbox] skill volume bind user={user_id} skill={sid} "
-                    f"src={bind_src} -> {CONTAINER_SKILL_MOUNT_PREFIX}/{sid}"
-                )
-            else:
-                logger.warning(
-                    f"[Sandbox] skill 目录不存在或为空，跳过 mount: "
-                    f"user={user_id} skill={sid}"
-                )
+        skill_volumes, bound_skill_ids = self._resolve_skill_bind_volumes(
+            user_id, mounted_skill_ids, agent_id=agent_id
+        )
+        volumes.update(skill_volumes)
 
         pip_conf = app_config.SANDBOX_PIP_CONF_PATH
         if pip_conf is None:
@@ -770,7 +824,7 @@ class DockerSandboxService(SandboxService):
             kwargs["cap_drop"] = ["ALL"]
             kwargs["security_opt"] = kwargs.get("security_opt", []) + ["no-new-privileges:true"]
 
-        return kwargs
+        return kwargs, bound_skill_ids
 
     def _create_container(
         self,
@@ -778,7 +832,8 @@ class DockerSandboxService(SandboxService):
         session_id: str,
         mounted_skill_ids: Optional[List[str]] = None,
         agent_id: Optional[str] = None,
-    ) -> str:
+    ) -> Tuple[str, List[str]]:
+        """创建容器，返回 (container_id, 实际挂载成功的 skill_id 列表)。"""
         client = self._get_docker()
         name = self._container_name(user_id, session_id)
 
@@ -788,12 +843,22 @@ class DockerSandboxService(SandboxService):
         except Exception:
             pass
 
-        run_kwargs = self._build_container_run_kwargs(
+        run_kwargs, bound_skill_ids = self._build_container_run_kwargs(
             user_id, session_id, mounted_skill_ids,
             agent_id=agent_id,
         )
         container = client.containers.run(**run_kwargs)
-        return container.id
+        requested = [
+            s for s in (str(x).strip().strip("/\\") for x in (mounted_skill_ids or []))
+            if s and ".." not in s
+        ]
+        if len(bound_skill_ids) != len(requested):
+            logger.warning(
+                f"[Sandbox] 部分 skill 未能 bind，容器内 /mnt/skills 将缺项: "
+                f"user={user_id} session={session_id} "
+                f"请求={requested} 实际={bound_skill_ids}"
+            )
+        return container.id, bound_skill_ids
 
     def _destroy_named_container(self, user_id: str, session_id: str) -> None:
         name = self._container_name(user_id, session_id)
@@ -862,6 +927,59 @@ class DockerSandboxService(SandboxService):
     def _check_running(self, container_id: str) -> bool:
         c = self._get_docker().containers.get(container_id)
         return c.status == "running"
+
+    def _container_skill_mount_ids(self, container_id: str) -> Optional[set]:
+        """读回容器实际挂载的 skill id 集合（/mnt/skills/* 的 Destination）。
+
+        返回 None 表示查询失败（区别于"确实没有挂载"），调用方应视为不一致。
+        """
+        try:
+            container = self._get_docker().containers.get(container_id)
+            mounts = (container.attrs or {}).get("Mounts") or []
+        except Exception as e:
+            logger.warning(
+                f"[Sandbox] 读取容器挂载失败 container={container_id[:12]}: {e}"
+            )
+            return None
+        prefix = CONTAINER_SKILL_MOUNT_PREFIX + "/"
+        mounted = set()
+        for m in mounts:
+            dest = str(m.get("Destination") or "")
+            if not dest.startswith(prefix):
+                continue
+            sid = dest[len(prefix):].strip("/")
+            if sid:
+                mounted.add(sid)
+        return mounted
+
+    async def resolve_verified_mounted_skill_ids(
+        self,
+        container_id: str,
+        *,
+        user_id: str,
+        mounted_skill_ids: Optional[List[str]],
+        agent_id: Optional[str] = None,
+    ) -> Optional[List[str]]:
+        """校验容器 skill 挂载；一致时返回应持久化的实际挂载列表，不一致返回 None。
+
+        期望集合取"当前能解析出 bind 源的技能"（与 _resolve_skill_bind_volumes 同一
+        判定），因此源目录不可用的技能不会造成"重建后仍不一致"的重建抖动；而技能
+        新增/卸载、bind 丢失会被识别为不一致，由调用方重建容器自愈。
+        """
+        _, expected = self._resolve_skill_bind_volumes(
+            user_id, mounted_skill_ids, agent_id=agent_id, log=False
+        )
+        actual = await asyncio.to_thread(self._container_skill_mount_ids, container_id)
+        if actual is None:
+            return None
+        if actual == set(expected):
+            return expected
+        logger.warning(
+            f"[Sandbox] 容器 skill 挂载与当前选择不一致，需重建 "
+            f"container={container_id[:12]} user={user_id} "
+            f"实际={sorted(actual)} 期望={sorted(expected)}"
+        )
+        return None
 
     def _pause_sync(self, container_id: str) -> bool:
         """docker pause。返回是否成功——容器可能已被外部删除。"""
