@@ -134,6 +134,17 @@ async def lifespan(app: FastAPI):
         from deep_agent_server.sandbox import is_docker_sdk_available, start_sandbox_cleanup_loop
         from deep_agent_server.sandbox.docker_client import format_sandbox_docker_host_for_log
         from deep_agent_server.workspace import get_sandbox_workspace_root
+        from deep_agent_server.workspace_health import (
+            check_workspace_health,
+            log_workspace_health,
+        )
+
+        # 工作区挂载健康检查：NFS 未挂载/不可写时在启动阶段告警，避免"静默"降级到本地磁盘
+        try:
+            health = check_workspace_health()
+            log_workspace_health(health)
+        except Exception as e:
+            logger.warning(f"【Workspace】⚠️ 工作区健康检查异常: {e}")
 
         docker_host_log = format_sandbox_docker_host_for_log(
             app_config.SANDBOX_DOCKER_HOST or ""
