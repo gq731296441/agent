@@ -460,6 +460,69 @@ async def home():
 
 # ==================== Websocket ====================
 
+async def _handle_stop_request(
+    *,
+    manager_conn,
+    manager_agents,
+    stream_tasks: Dict[str, asyncio.Task],
+    websocket: WebSocket,
+    user_id: str,
+    session_id: str,
+) -> None:
+    """处理 WS 停止请求的独立快速路径。
+
+    stop 绝不允许流入「会话解析 → 首条消息（预热/去重）→ 队列」主流程：
+    新会话首条消息的 user 记录落库前 chat_history 为空，stop 会被误判为
+    is_first_message 而丢弃（还会触发无谓的重复预热、取消并重启正在执行的
+    流任务）。这里只按 session_id 定位运行中的任务并停止。
+    """
+    sid = (session_id or "").strip()
+    if not sid or sid.lower() == "null":
+        logger.warning(f"【WebSocket】stop 请求缺少有效 session_id，已忽略 user={user_id}")
+        return
+
+    try:
+        exists = await storage.session_exists(sid)
+    except Exception as e:
+        logger.warning(f"【WebSocket】stop 校验会话失败 session={sid}: {e}")
+        return
+    if not exists:
+        logger.warning(f"【WebSocket】stop 请求的会话不存在，已忽略 session={sid} user={user_id}")
+        return
+
+    if not await validate_session_access(user_id, sid):
+        await manager_conn.send(
+            AgentMessage.error(
+                session_id=sid, content=SESSION_ACCESS_DENIED_MSG
+            ).to_frontend_dict(),
+            sid,
+        )
+        return
+
+    manager_conn.bind_session(websocket, sid)
+
+    # 1) 清掉排队中的待处理消息：否则停止后它们仍会被 flush 重新拉起执行
+    try:
+        from db import deep_storage
+
+        await deep_storage.delete_pending_messages(sid)
+    except Exception as e:
+        logger.warning(f"【WebSocket】stop 清理排队消息失败 session={sid}: {e}")
+
+    # 2) 停止 agent_manager 中登记的本轮任务（set stop_event + 取消驱动任务；
+    #    内部带重复取消保护，重复点击不会打断 runner 的优雅收尾）
+    manager_agents.stop_task(sid, user_id=user_id)
+
+    # 3) 兜底：仅取消「尚未注册到 agent_manager」的流任务（早期阶段）。
+    #    已登记的任务由 stop_task 统一接管，这里不得再次 cancel，
+    #    否则重复点击停止会在收尾期间打断 end(stop) 的落库与推送。
+    task = stream_tasks.get(sid)
+    if task and not task.done() and not manager_agents.owns_task(sid, task):
+        task.cancel()
+
+    logger.info(f"【WebSocket】收到 stop，已请求停止 session={sid} user={user_id}")
+
+
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
     # ==================== 建立连接 ====================
@@ -523,8 +586,16 @@ async def ws_endpoint(websocket: WebSocket):
         与主接收循环解耦，避免阻塞 pong 处理。
         """
         end_reason = None
+        _self_task = asyncio.current_task()
         # 在流消费过程中积累助手 CHAT 文本，供标题生成直接使用（避免 DB 查询）
         _reply_parts: list = []
+
+        def _release_stream_slot():
+            # 只清理属于自己的槽位：新任务可能已覆盖 _stream_tasks[session_id]，
+            # 无条件 pop 会误删新任务，导致其后的停止/覆盖检查全部失效
+            if _self_task is not None and _stream_tasks.get(session_id) is _self_task:
+                _stream_tasks.pop(session_id, None)
+
         try:
             async for message in process_agent_stream(
                 manager_agents=_manager_agents,
@@ -551,7 +622,7 @@ async def ws_endpoint(websocket: WebSocket):
                     else:
                         end_reason = str(raw)
                     # 立即清理 _stream_tasks，避免下一条消息到达时误判旧任务仍在运行
-                    _stream_tasks.pop(session_id, None)
+                    _release_stream_slot()
                     # 收到 END 消息时立即启动标题生成（与收尾清理并行）
                     if _is_first_message and end_reason in ("completed", "stop", "error"):
                         reply_text = "\n".join(_reply_parts) if _reply_parts else None
@@ -570,7 +641,7 @@ async def ws_endpoint(websocket: WebSocket):
         except Exception as e:
             logger.error(f"【WebSocket】Agent 流任务异常, session_id: {session_id}, error: {e}")
         finally:
-            _stream_tasks.pop(session_id, None)
+            _release_stream_slot()
             # 兜底：如果 END 消息未被检测到（如中断/异常），仍尝试生成标题
             if _is_first_message and not end_reason:
                 reply_text = "\n".join(_reply_parts) if _reply_parts else None
@@ -615,6 +686,19 @@ async def ws_endpoint(websocket: WebSocket):
             manager.bind_user(websocket, user_id)
 
             logger.info(f"【WebSocket】📨 收到用户{user_id}聊天请求: {question[:50]}...")
+
+            # ==================== 停止请求：独立快速路径 ====================
+            # 不得进入会话解析 / 首条消息 / 预热等待流程（详见 _handle_stop_request）
+            if msg.get("action") in (ActionType.STOP, ActionType.STOP.value):
+                await _handle_stop_request(
+                    manager_conn=manager,
+                    manager_agents=_manager_agents,
+                    stream_tasks=_stream_tasks,
+                    websocket=websocket,
+                    user_id=user_id,
+                    session_id=msg.get("session_id"),
+                )
+                continue
 
             # 获取或创建 session_id
             resolved_agent_kind = "default"

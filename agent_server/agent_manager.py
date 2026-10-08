@@ -74,6 +74,9 @@ class AgentManager:
 
         self._active_tasks: Dict[str, asyncio.Task] = {}
         self._stop_events: Dict[str, asyncio.Event] = {}
+        # 已发出过停止请求（cancel）的任务：同一任务只取消一次，
+        # 避免用户重复点击停止时二次 cancel 打断 runner 的优雅收尾（end 消息落库）
+        self._stop_requested: Dict[str, asyncio.Task] = {}
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._agent_cache: Dict[str, Tuple[Any, str, str, str]] = {}
 
@@ -130,6 +133,8 @@ class AgentManager:
             self._stop_events.pop(session_id, None)
         if task is not None and self._active_tasks.get(session_id) is task:
             self._active_tasks.pop(session_id, None)
+        if task is not None and self._stop_requested.get(session_id) is task:
+            self._stop_requested.pop(session_id, None)
 
         lock = self._session_locks.get(session_id)
         if lock is not None and lock.locked():
@@ -323,6 +328,8 @@ class AgentManager:
         is_resume = bool(input_data.get("command"))
         initial_step_index = 0
         turn_interrupted = False
+        # runner 是否已自行产出 end 消息（用于取消兜底去重）
+        end_emitted = False
 
         if self.is_deep_runtime:
             if is_resume:
@@ -447,6 +454,9 @@ class AgentManager:
                     continue
 
                 msg_type = message.get("type")
+                if msg_type == MessageType.END or msg_type == MessageType.END.value:
+                    # runner 的优雅收尾已自行产出 end 记录
+                    end_emitted = True
                 if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
                     continue
                 if msg_type == MessageType.REASONING_FINAL or msg_type == MessageType.REASONING_FINAL.value:
@@ -485,7 +495,24 @@ class AgentManager:
                     conversation_id=conversation_id,
                     event_type="stopped",
                 )
-            yield AgentMessage.end(session_id=session_id, reason=EndReason.STOP).to_frontend_dict()
+            if not end_emitted:
+                # runner 的优雅收尾被打断（未产出 end）：补写一条 end(stop) 并落库，
+                # 保证「停止」在 DB 与前端都有明确记录，避免停止无痕、无法排查
+                fallback_end = {
+                    "type": MessageType.END.value,
+                    "sender": SenderType.SYSTEM.value,
+                    "session_id": session_id,
+                    "content": EndReason.STOP.value,
+                    "conversation_id": conversation_id,
+                    "group_id": 0,
+                    "step_index": 0,
+                    "run_id": run_id,
+                }
+                try:
+                    await self._save_message_to_db(dict(fallback_end), user_id)
+                except Exception as _e:
+                    run_logger.error(f"[AgentManager] 补写 end(stop) 失败: {_e}")
+                yield fallback_end
         except Exception as e:
             run_logger.error(f"[AgentManager] 会话 {session_id} 出错: {e}")
             if self.is_deep_runtime:
@@ -717,10 +744,26 @@ class AgentManager:
     def stop_task(self, session_id: str, user_id: str = None):
         if session_id in self._stop_events:
             self._stop_events[session_id].set()
-        if session_id in self._active_tasks:
-            task = self._active_tasks[session_id]
-            if not task.done():
-                task.cancel()
+        task = self._active_tasks.get(session_id)
+        if task is None or task.done():
+            return
+        # 同一任务只发一次 cancel：runner 收到取消后会进入"优雅收尾"
+        # （finalize → 落库并推送 end(stop) → 释放沙箱）。重复 cancel 会
+        # 在收尾的 await 期间再次抛入 CancelledError，打断收尾，导致
+        # end(stop) 既不落库也不推送（用户重复点击停止时尤易触发）。
+        if self._stop_requested.get(session_id) is task:
+            return
+        self._stop_requested[session_id] = task
+        task.cancel()
+
+    def owns_task(self, session_id: str, task: asyncio.Task) -> bool:
+        """该 task 是否为 session 已登记的运行任务。
+
+        调用方（WS stop 快速路径）以此判断是否需要对流任务补发 cancel：
+        已登记的任务由 stop_task 统一接管（且带重复取消保护），
+        只有尚未登记的早期阶段任务才需要单独取消。
+        """
+        return task is not None and self._active_tasks.get(session_id) is task
 
     def disconnect_connection(self, session_id: str = None):
         """WS 物理断开时清理路由映射，不终止 agent 任务。
