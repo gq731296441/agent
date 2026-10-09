@@ -1,5 +1,5 @@
 from datetime import timezone, timedelta
-from fastapi import APIRouter, HTTPException, Request, Query
+from fastapi import APIRouter, Body, HTTPException, Request, Query
 from typing import List, Dict, Any
 from pydantic import BaseModel, Field
 from db import storage, deep_storage
@@ -263,6 +263,66 @@ async def soft_delete_session(
     except Exception as e:
         logger.error(f"[Session API] 软删除会话失败: {e}")
         return ApiResponse.error(msg=f"软删除会话失败: {str(e)}")
+
+
+@router.post("/rename", response_model=ApiResponse)
+async def rename_session(
+    user_id: str = Query(..., description="用户ID"),
+    session_id: str = Query(..., description="会话ID"),
+    payload: Any = Body(None),
+):
+    """重命名用户会话。
+
+    仅支持默认智能体会话：订阅智能体会话标题跟随智能体名称，不可单独改名
+    （名称在「创建/编辑订阅智能体」处修改，改名后由
+    storage.sync_agent_session_titles 同步到其会话）。
+
+    1. 新名称写入 DB 并标记为用户自定义（此后自动标题不再覆盖）；
+    2. 终止该会话尚未完成的延迟标题生成任务，停止生成与推送，
+       避免旧标题顶着用户的新名称推给前端。
+    """
+    title = ""
+    if isinstance(payload, dict):
+        title = str(payload.get("title") or "").strip()
+    if not title:
+        return ApiResponse.error(msg="会话名称不能为空", code=400)
+    if len(title) > 30:
+        title = title[:30]
+    try:
+        meta = await storage.get_session_meta(session_id)
+        if (
+            not meta
+            or str(meta.get("user_id")) != str(user_id)
+            or meta.get("is_deleted")
+        ):
+            return ApiResponse.error(msg="会话不存在或无权修改", code=404)
+        if meta.get("agent_kind") == "subscription":
+            return ApiResponse.error(
+                msg="订阅智能体会话名称跟随智能体，请在「创建/编辑订阅智能体」中修改",
+                code=403,
+            )
+        # 先落库并置自定义标记：即使延迟标题任务正在收尾，其
+        # only_if_auto 条件更新也会失败，不会覆盖用户的新名称
+        ok = await storage.update_session_title(
+            user_id, session_id, title, as_custom=True
+        )
+        if not ok:
+            logger.warning(
+                f"[Session API] 重命名失败，会话不存在: "
+                f"user_id={user_id}, session_id={session_id}"
+            )
+            return ApiResponse.error(msg="会话不存在或无权修改", code=404)
+        # 再取消未完成的延迟标题任务（停止生成与推送）
+        from utils.session_utils import cancel_deferred_title_task
+
+        cancel_deferred_title_task(session_id)
+        return ApiResponse.success(
+            data={"session_id": session_id, "session_title": title},
+            msg="已更新会话名称",
+        )
+    except Exception as e:
+        logger.error(f"[Session API] 重命名会话失败: {e}")
+        return ApiResponse.error(msg=f"重命名会话失败: {str(e)}")
 
 
 @router.delete("/delete/permanent", response_model=ApiResponse)

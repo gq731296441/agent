@@ -2,8 +2,10 @@
 """
 会话工具函数，供 WebSocket 和 SSE 接口共用。
 """
+import asyncio
 import json
 import uuid
+from typing import Dict, Optional
 from uuid import UUID
 
 from db import storage
@@ -12,6 +14,38 @@ from config import get_logger
 logger = get_logger(__name__)
 
 SESSION_ACCESS_DENIED_MSG = "无权访问该会话或会话不存在"
+
+# 各会话进行中的「延迟标题生成」任务：用户手动重命名后可据此取消生成与推送。
+# 仅存活于进程内（竞态窗口只有数秒）；标题不被覆盖的最终防线是 DB 的
+# title_is_custom 标记（见 storage.update_session_title 的 only_if_auto）。
+_deferred_title_tasks: Dict[str, asyncio.Task] = {}
+
+
+def spawn_deferred_title_task(session_id: str, coro) -> asyncio.Task:
+    """创建延迟标题任务并登记，供用户手动重命名时取消。"""
+    task = asyncio.create_task(coro)
+    _deferred_title_tasks[session_id] = task
+
+    def _cleanup(t, sid=session_id):
+        if _deferred_title_tasks.get(sid) is t:
+            _deferred_title_tasks.pop(sid, None)
+
+    task.add_done_callback(_cleanup)
+    return task
+
+
+def cancel_deferred_title_task(session_id: str) -> bool:
+    """取消该会话尚未完成的延迟标题任务（停止生成与推送）。
+
+    用户重命名时调用。即使任务已跑过取消点，DB 的 title_is_custom 标记
+    也会让自动标题回写失败并跳过推送，双重保底。
+    """
+    task = _deferred_title_tasks.pop(session_id, None)
+    if task is not None and not task.done():
+        task.cancel()
+        logger.info(f"【会话】已取消延迟标题任务（用户重命名） session={session_id}")
+        return True
+    return False
 
 
 async def validate_session_access(
@@ -205,11 +239,14 @@ async def deferred_generate_and_update_title(
     user_id: str,
     question: str,
     reply: str | None = None,
-) -> str:
+) -> Optional[str]:
     """首轮 Agent 完成后延迟生成会话标题。
 
     优先使用调用方传入的 reply（已在流消费过程中积累，避免 DB 查询），
     未传入时回退到从 chat_history 提取。全程异常安全，失败时返回兜底标题。
+
+    用户已手动重命名过的会话（title_is_custom）不再生成/覆盖标题，返回 None，
+    调用方应跳过标题推送。
 
     Args:
         session_id: 会话 ID
@@ -218,17 +255,19 @@ async def deferred_generate_and_update_title(
         reply: 助手首轮回复文本（可选，由调用方在流消费过程中积累）
 
     Returns:
-        str: 新标题（生成失败时返回兜底标题）
+        str | None: 新标题（生成失败时返回兜底标题）；用户自定义标题时返回 None
     """
     from agent_server.llm import create_title_llm_for_user, create_title_llm
     from db import storage
 
     fallback = _build_fallback_session_title(session_id)
 
-    # 订阅智能体会话标题固定为智能体名称，不做 LLM 生成；
-    # 同时自愈此前被 LLM / fallback 标题覆盖的记录
     try:
         meta = await storage.get_session_meta(session_id) or {}
+
+        # 订阅智能体会话标题始终跟随智能体名称（改名入口在「创建/编辑订阅
+        # 智能体」，会话列表不提供改名），不参与"用户自定义标题"逻辑；
+        # 同时自愈此前被 LLM / fallback 标题覆盖的记录
         if meta.get("agent_kind") == "subscription":
             agent_name = ""
             if meta.get("agent_id"):
@@ -242,6 +281,15 @@ async def deferred_generate_and_update_title(
                 f"session={session_id} title={fixed_title}"
             )
             return fixed_title
+
+        # 用户已手动重命名（仅默认智能体会话可改名）：不得覆盖，也不得推送
+        # （此为生成开始前的检查，生成期间的竞态由
+        #   update_session_title(only_if_auto=True) 兜底）
+        if meta.get("title_is_custom"):
+            logger.info(
+                f"【会话】标题已由用户自定义，跳过自动标题 session={session_id}"
+            )
+            return None
     except Exception as e:
         logger.warning(
             f"【会话】订阅会话标题处理失败，回退常规流程 session={session_id}: {e}"
@@ -296,8 +344,16 @@ async def deferred_generate_and_update_title(
             title_llm, question, session_id, reply=reply
         )
 
-        # 4. 更新 DB
-        await storage.update_session_title(user_id, session_id, new_title)
+        # 4. 更新 DB：仅当标题仍为自动生成。若生成期间用户手动重命名，
+        #    条件更新失败 → 放弃回写并返回 None（调用方跳过推送）
+        updated = await storage.update_session_title(
+            user_id, session_id, new_title, only_if_auto=True
+        )
+        if not updated:
+            logger.info(
+                f"【会话】标题已被用户自定义，放弃自动标题回写 session={session_id}"
+            )
+            return None
 
         logger.info(
             f"【会话】延迟标题生成完成 session={session_id} title={new_title}"

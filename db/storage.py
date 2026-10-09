@@ -37,7 +37,12 @@ async def upsert_user_session(
             DO UPDATE SET
                 last_active_at = CURRENT_TIMESTAMP,
                 is_deleted = FALSE,
-                session_name = COALESCE(EXCLUDED.session_name, user_sessions.session_name),
+                -- 用户手动重命名过的标题（title_is_custom）不被兜底/自愈标题覆盖
+                session_name = CASE
+                    WHEN COALESCE(user_sessions.title_is_custom, FALSE)
+                        THEN user_sessions.session_name
+                    ELSE COALESCE(EXCLUDED.session_name, user_sessions.session_name)
+                END,
                 agent_id = COALESCE(EXCLUDED.agent_id, user_sessions.agent_id),
                 agent_kind = COALESCE(EXCLUDED.agent_kind, user_sessions.agent_kind)
             RETURNING session_id
@@ -52,17 +57,36 @@ async def upsert_user_session(
         return str(result)
 
 
-async def update_session_title(user_id: str, session_id: str, new_title: str) -> bool:
-    """仅更新会话标题（用于延迟标题生成），不影响其他字段。"""
+async def update_session_title(
+    user_id: str,
+    session_id: str,
+    new_title: str,
+    *,
+    only_if_auto: bool = False,
+    as_custom: bool = False,
+) -> bool:
+    """仅更新会话标题（用于延迟标题生成 / 用户重命名），不影响其他字段。
+
+    only_if_auto: 仅当标题仍是自动生成的（用户未手动重命名过）时才更新。
+        延迟标题生成使用该模式，避免覆盖用户手动修改的名称（原子条件更新，
+        即使生成期间用户刚好重命名，也不会被自动标题回写）。
+    as_custom: 将标题标记为用户自定义，此后自动标题生成不再覆盖/推送。
+    """
+    set_parts = ["session_name = $1", "updated_at = CURRENT_TIMESTAMP"]
+    if as_custom:
+        set_parts.append("title_is_custom = TRUE")
+    where_parts = ["session_id = $2", "user_id = $3", "is_deleted = FALSE"]
+    if only_if_auto:
+        where_parts.append("COALESCE(title_is_custom, FALSE) = FALSE")
+    sql = (
+        f"UPDATE user_sessions SET {', '.join(set_parts)} "
+        f"WHERE {' AND '.join(where_parts)}"
+    )
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         try:
             result = await conn.execute(
-                """
-                UPDATE user_sessions
-                SET session_name = $1, updated_at = CURRENT_TIMESTAMP
-                WHERE session_id = $2 AND user_id = $3 AND is_deleted = FALSE
-                """,
+                sql,
                 new_title,
                 UUID(session_id) if isinstance(session_id, str) else session_id,
                 user_id,
@@ -73,14 +97,40 @@ async def update_session_title(user_id: str, session_id: str, new_title: str) ->
             return False
 
 
+async def sync_agent_session_titles(agent_id: str, new_name: str) -> int:
+    """订阅智能体改名后，同步其全部订阅会话的标题。
+
+    订阅智能体会话标题始终跟随智能体名称（不允许在会话列表单独改名），
+    因此智能体改名后需批量同步，避免历史会话一直显示旧名称。
+    返回同步的会话数。
+    """
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.execute(
+                """
+                UPDATE user_sessions
+                SET session_name = $1, updated_at = CURRENT_TIMESTAMP
+                WHERE agent_id = $2 AND agent_kind = 'subscription' AND is_deleted = FALSE
+                """,
+                new_name,
+                UUID(agent_id) if isinstance(agent_id, str) else agent_id,
+            )
+            return int(result.split()[-1]) if result.startswith("UPDATE") else 0
+        except Exception as e:
+            logger.error(f"【会话】同步智能体会话标题失败 agent={agent_id} error={e}")
+            return 0
+
+
 async def get_session_meta(session_id: str) -> Optional[Dict[str, Any]]:
-    """获取会话元数据（含 agent_kind / frozen / epoch）。"""
+    """获取会话元数据（含 agent_kind / frozen / epoch / 自定义标题标记）。"""
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             SELECT session_id, user_id, session_name, agent_id, agent_kind,
-                   context_epoch, subscription_frozen, is_deleted, last_active_at
+                   context_epoch, subscription_frozen, is_deleted, last_active_at,
+                   title_is_custom
             FROM user_sessions WHERE session_id = $1
             """,
             UUID(session_id) if isinstance(session_id, str) else session_id,

@@ -550,6 +550,12 @@ async def ws_endpoint(websocket: WebSocket):
                 question=question,
                 reply=reply,
             )
+            if not new_title:
+                # 用户已手动重命名：中止生成/覆盖，也不推送，避免顶掉自定义名称
+                logger.info(
+                    f"【WebSocket】跳过标题推送（用户已自定义标题） session={session_id}"
+                )
+                return
             # 推送标题更新到前端
             await manager.send(
                 AgentMessage.session_title_updated(
@@ -623,16 +629,20 @@ async def ws_endpoint(websocket: WebSocket):
                         end_reason = str(raw)
                     # 立即清理 _stream_tasks，避免下一条消息到达时误判旧任务仍在运行
                     _release_stream_slot()
-                    # 收到 END 消息时立即启动标题生成（与收尾清理并行）
+                    # 收到 END 消息时立即启动标题生成（与收尾清理并行）；
+                    # 通过 spawn 登记任务，用户重命名时可取消生成与推送
                     if _is_first_message and end_reason in ("completed", "stop", "error"):
+                        from utils.session_utils import spawn_deferred_title_task
+
                         reply_text = "\n".join(_reply_parts) if _reply_parts else None
-                        asyncio.create_task(
+                        spawn_deferred_title_task(
+                            session_id,
                             _deferred_title_update(
                                 session_id=session_id,
                                 user_id=user_id,
                                 question=_user_first_question,
                                 reply=reply_text,
-                            )
+                            ),
                         )
 
                 await manager.send(message, session_id)
@@ -644,14 +654,17 @@ async def ws_endpoint(websocket: WebSocket):
             _release_stream_slot()
             # 兜底：如果 END 消息未被检测到（如中断/异常），仍尝试生成标题
             if _is_first_message and not end_reason:
+                from utils.session_utils import spawn_deferred_title_task
+
                 reply_text = "\n".join(_reply_parts) if _reply_parts else None
-                asyncio.create_task(
+                spawn_deferred_title_task(
+                    session_id,
                     _deferred_title_update(
                         session_id=session_id,
                         user_id=user_id,
                         question=_user_first_question,
                         reply=reply_text,
-                    )
+                    ),
                 )
 
     try:

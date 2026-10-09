@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from api.mcp_api import _resolve_mcp_source_list
 from common.schemas import ApiResponse, ListApiResponse
-from db import deep_storage
+from db import deep_storage, storage
 from deep_agent_server.skills.installer import sync_skills_to_agent
 from deep_agent_server.workspace import remove_agent_directory
 
@@ -302,6 +302,9 @@ async def update_agent(
         sync_skills_to_agent(agent_id, market_ids)
     if not ok and body.mcp_ids is None and body.mcps is None and body.skill_ids is None and body.skills is None:
         return ApiResponse.error(msg="无更新或 Agent 不存在", code=404)
+    # 订阅会话标题跟随智能体名称：改名后同步到该智能体的全部订阅会话
+    if ok and body.name:
+        await storage.sync_agent_session_titles(agent_id, body.name)
     # 切换为私有时冻结所有订阅者
     if body.visibility == "private":
         await deep_storage.freeze_agent_subscribers(agent_id, user_id)

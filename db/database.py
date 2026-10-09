@@ -286,6 +286,8 @@ class DatabaseManager:
             "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS subagent_run_id UUID",
             "ALTER TABLE chat_history ADD COLUMN IF NOT EXISTS run_id UUID",
             "ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS agent_id UUID",
+            # 用户手动重命名的会话标题标记：置位后自动标题生成不再覆盖/推送
+            "ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS title_is_custom BOOLEAN DEFAULT FALSE",
         ]
         for col_sql in alter_columns:
             try:

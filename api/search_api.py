@@ -718,14 +718,20 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
                         user_id=user_id,
                         question=question,
                     )
-                    title_msg = AgentMessage.session_title_updated(
-                        session_id=session_id,
-                        content={
-                            "session_id": session_id,
-                            "session_title": new_title,
-                        }
-                    ).to_frontend_dict()
-                    yield f"data: {json.dumps(title_msg, ensure_ascii=False)}\n\n"
+                    if new_title:
+                        title_msg = AgentMessage.session_title_updated(
+                            session_id=session_id,
+                            content={
+                                "session_id": session_id,
+                                "session_title": new_title,
+                            }
+                        ).to_frontend_dict()
+                        yield f"data: {json.dumps(title_msg, ensure_ascii=False)}\n\n"
+                    else:
+                        logger.info(
+                            f"[Session] 跳过标题推送（用户已自定义标题） "
+                            f"session={session_id}"
+                        )
 
             except Exception as e:
                 error_msg = AgentMessage.error(
@@ -792,15 +798,20 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
         "result": result,
     }
 
-    # 首条消息后台延迟生成标题（非流式路径，不阻塞响应）
+    # 首条消息后台延迟生成标题（非流式路径，不阻塞响应）；
+    # 通过 spawn 登记任务，用户重命名时可取消生成与推送
     if is_first_message:
-        from utils.session_utils import deferred_generate_and_update_title
-        asyncio.create_task(
+        from utils.session_utils import (
+            deferred_generate_and_update_title,
+            spawn_deferred_title_task,
+        )
+        spawn_deferred_title_task(
+            session_id,
             deferred_generate_and_update_title(
                 session_id=session_id,
                 user_id=user_id,
                 question=question,
-            )
+            ),
         )
 
     return JSONResponse(content=response_data)
