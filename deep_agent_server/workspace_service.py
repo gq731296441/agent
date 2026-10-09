@@ -1,23 +1,23 @@
 """工作区文件与配额服务（磁盘为准，DB 索引为辅）。"""
 
+import asyncio
 import mimetypes
 import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from stat import S_ISDIR
 from typing import Any, Dict, List, Optional, Tuple
 
 from db import deep_storage
 from deep_agent_server.quota_service import (
     get_workspace_limit,
-    measure_workspace_bytes,
     refresh_workspace_usage,
 )
 from deep_agent_server.skills.session_mount import MANIFEST_FILENAME
 from deep_agent_server.workspace import (
     HTML_SHARE_SNAPSHOT_DIR,
     compute_sha256,
-    dir_size_bytes,
     get_agent_skills_dir,
     get_artifacts_dir,
     get_skills_dir,
@@ -102,40 +102,71 @@ def _scan_tree(base: Path, prefix: str, file_kind: str) -> List[Dict[str, Any]]:
     return items
 
 
-def _session_workspace_sizes(user_root: Path) -> List[Dict[str, Any]]:
-    ws_root = user_root / "workspace"
-    if not ws_root.exists():
-        return []
-    sessions = []
-    for child in ws_root.iterdir():
-        if child.is_dir():
-            sessions.append({
-                "session_id": child.name,
-                "bytes": dir_size_bytes(child),
-            })
-    sessions.sort(key=lambda x: x["bytes"], reverse=True)
-    return sessions
+def _scan_user_usage(user_root: Path) -> Dict[str, Any]:
+    """单次遍历用户根目录，产出总占用 / 顶层目录分布 / 各会话大小。
+
+    原实现分别调用 measure_workspace_bytes + dir_size_bytes×4 +
+    _session_workspace_sizes，同一棵树要走上 3~5 遍；工作区在 NFS 上，
+    每次 stat 都是网络往返，这里合并为一次遍历。
+    口径与 dir_size_bytes 保持一致：跳过 HTML 分享快照目录。
+    """
+    total = 0
+    breakdown: Dict[str, int] = {
+        "workspace": 0, "skills": 0, "uploads": 0, "artifacts": 0,
+    }
+    sessions: Dict[str, int] = {}
+    if not user_root.is_dir():
+        return {"total": 0, "breakdown": breakdown, "sessions": []}
+
+    for root, dirs, files in os.walk(user_root):
+        # 分享快照目录不占用户配额（与 dir_size_bytes 同口径）
+        dirs[:] = [d for d in dirs if d != HTML_SHARE_SNAPSHOT_DIR]
+        try:
+            rel_parts = Path(root).relative_to(user_root).parts
+        except ValueError:
+            continue
+        top = rel_parts[0] if rel_parts else ""
+        sid = rel_parts[1] if top == "workspace" and len(rel_parts) >= 2 else ""
+        if sid:
+            sessions.setdefault(sid, 0)
+
+        for name in files:
+            try:
+                size = (Path(root) / name).stat().st_size
+            except OSError:
+                continue
+            total += size
+            if top in breakdown:
+                breakdown[top] += size
+            if sid:
+                sessions[sid] += size
+
+    return {
+        "total": total,
+        "breakdown": breakdown,
+        "sessions": sorted(
+            ({"session_id": k, "bytes": v} for k, v in sessions.items()),
+            key=lambda x: x["bytes"],
+            reverse=True,
+        ),
+    }
 
 
 async def get_quota_detail(user_id: str) -> Dict[str, Any]:
     uid = validate_user_id(user_id)
     root = get_user_root(uid)
     await deep_storage.ensure_user_quota(uid)
-    used = measure_workspace_bytes(uid)
+    # 磁盘扫描放线程池：NFS 上可能耗时数秒，不得阻塞事件循环
+    usage = await asyncio.to_thread(_scan_user_usage, root)
     limit = get_workspace_limit()
-    workspace_total = dir_size_bytes(root / "workspace")
+    used = usage["total"]
     return {
         "user_id": uid,
         "limit_bytes": limit,
         "used_bytes": used,
         "remaining_bytes": max(0, limit - used),
-        "breakdown": {
-            "workspace": workspace_total,
-            "skills": dir_size_bytes(root / "skills"),
-            "uploads": dir_size_bytes(root / "uploads"),
-            "artifacts": dir_size_bytes(root / "artifacts"),
-        },
-        "sessions": _session_workspace_sizes(root),
+        "breakdown": usage["breakdown"],
+        "sessions": usage["sessions"],
     }
 
 
@@ -149,12 +180,16 @@ def _scan_tree_nodes(
     """递归扫描目录树，返回文件 + 文件夹混合节点列表（树状结构）。
 
     每层节点先按类型分组（文件夹在前），再按 sort_by 排序。
+    性能注意：工作区在 NFS 上，stat 是网络往返——每个条目只 stat 一次，
+    目录/文件判定复用 stat 结果，不要再用 Path.is_dir()/stat() 重复探测。
     """
-    if not base.exists() or not base.is_dir():
+    if not base.is_dir():
         return []
     nodes: List[Dict[str, Any]] = []
     try:
-        entries = sorted(base.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        # 预排序仅按名称（无文件系统调用）：为末级排序提供稳定的并列次序，
+        # 与历史实现输出保持一致；不要在预排序里调用 is_dir()/stat()
+        entries = sorted(base.iterdir(), key=lambda p: p.name.lower())
     except OSError:
         return nodes
 
@@ -165,14 +200,15 @@ def _scan_tree_nodes(
         if entry.name == HTML_SHARE_SNAPSHOT_DIR:
             continue
         try:
-            stat = entry.stat()
+            entry_stat = entry.stat()
         except OSError:
             continue
+        is_dir = S_ISDIR(entry_stat.st_mode)
 
-        rel = entry.relative_to(base).as_posix()
+        rel = entry.name
         virtual = f"{prefix}/{rel}" if rel else prefix
 
-        if entry.is_dir():
+        if is_dir:
             kind = file_kind
             if file_kind == "workspace" and (
                 rel.startswith(".sandbox/") or "/.sandbox/" in f"/{rel}/"
@@ -188,7 +224,7 @@ def _scan_tree_nodes(
             # mtime 取最新子节点（含自身目录 mtime）
             child_times = [c["updated_at"] for c in children]
             child_times.append(
-                datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+                datetime.fromtimestamp(entry_stat.st_mtime, tz=timezone.utc).isoformat()
             )
             latest_time = max(child_times)
             nodes.append({
@@ -214,9 +250,9 @@ def _scan_tree_nodes(
                 "name": entry.name,
                 "type": "file",
                 "path": virtual,
-                "size_bytes": stat.st_size,
+                "size_bytes": entry_stat.st_size,
                 "updated_at": datetime.fromtimestamp(
-                    stat.st_mtime, tz=timezone.utc
+                    entry_stat.st_mtime, tz=timezone.utc
                 ).isoformat(),
                 "mime_type": _mime_for_path(entry),
                 "file_kind": kind,

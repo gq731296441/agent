@@ -84,8 +84,11 @@ async def workspace_files(
         raise HTTPException(status_code=400, detail="sort_order 须为 asc / desc")
     tree_mode = format == "tree"
     try:
+        # 磁盘扫描放线程池执行：工作区在 NFS 上，全量扫描可能耗时数秒，
+        # 直接同步执行会阻塞事件循环（拖垮同进程其它请求与 WS 心跳）
         if tree_mode:
-            tree = list_files_tree(
+            tree = await asyncio.to_thread(
+                list_files_tree,
                 user_id, session_id=session_id, scope=scope,
                 sort_by=sort_by, sort_order=sort_order,
             )
@@ -96,7 +99,8 @@ async def workspace_files(
                 "format": "tree",
                 "tree": tree,
             }
-        files = list_files(
+        files = await asyncio.to_thread(
+            list_files,
             user_id, session_id=session_id, scope=scope,
             sort_by=sort_by, sort_order=sort_order,
         )
