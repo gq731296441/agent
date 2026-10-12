@@ -1,6 +1,7 @@
 # app/main.py
 import asyncio
 import sys
+import uuid
 
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -576,6 +577,61 @@ async def ws_endpoint(websocket: WebSocket):
                 f"【WebSocket】延迟标题推送失败 session={session_id} error={e}"
             )
 
+    async def _persist_first_message_blocked(
+        session_id: str,
+        user_id: str,
+        question: str,
+        err_msg: str,
+    ):
+        """首条消息被拦截（如未配置模型导致预热失败）时，仍将用户消息与错误落库。
+
+        正常情况下用户消息与助手消息由 agent_manager 消费 stream_fn 时统一
+        `_save_message_to_db` 落库。但新会话首条消息在等待预热阶段就因 warmup
+        失败（如 create_agent 检查 LLM 配置抛错）被短路返回，消息直接 send 给
+        前端，不经 agent_manager 消费循环，导致 chat_history 为空 —— 会话列表
+        （EXISTS chat_history）会过滤掉该会话，/history 也返回空，用户刷新后
+        会话凭空消失。此处补齐落库，保证被拦截的会话至少有
+        「用户消息 + 错误回复」两条记录，刷新后仍可从列表/历史恢复。
+        """
+        try:
+            from common.enums import MessageType, SenderType
+
+            conv_id = str(uuid.uuid4())
+            run_id = str(uuid.uuid4())
+            msgs = []
+
+            if (question or "").strip():
+                msgs.append(
+                    {
+                        "type": MessageType.CHAT.value,
+                        "sender": SenderType.USER.value,
+                        "session_id": session_id,
+                        "content": {"text": question},
+                        "conversation_id": conv_id,
+                        "run_id": run_id,
+                        "group_id": 0,
+                        "step_index": 0,
+                    }
+                )
+            msgs.append(
+                {
+                    "type": MessageType.ERROR.value,
+                    "sender": SenderType.SYSTEM.value,
+                    "session_id": session_id,
+                    "content": {"text": err_msg},
+                    "conversation_id": conv_id,
+                    "run_id": run_id,
+                    "group_id": 0,
+                    "step_index": len(msgs),
+                }
+            )
+            for m in msgs:
+                await _manager_agents._save_message_to_db(m, user_id)
+        except Exception as e:
+            logger.warning(
+                f"【WebSocket】首条消息拦截场景落库失败 session={session_id}: {e}"
+            )
+
     async def _run_agent_stream(
         session_id: str,
         action: str,
@@ -851,6 +907,27 @@ async def ws_endpoint(websocket: WebSocket):
                 if not ready:
                     logger.warning(
                         f"【WebSocket】新会话 {session_id} 预热超时，跳过"
+                    )
+                    # 落库用户首条消息 + 错误回复，避免会话因 chat_history 为空
+                    # 而从列表/历史中消失（见 _persist_first_message_blocked）
+                    blocked_err = "会话预热超时，请稍后重试"
+                    try:
+                        from db import deep_storage
+                        from deep_agent_server.session.models import SessionStartStatus
+
+                        task = await deep_storage.get_session_start_task(session_id)
+                        if (
+                            task
+                            and (task.get("status") or "") == SessionStartStatus.ERROR.value
+                            and task.get("error")
+                        ):
+                            blocked_err = f"会话预热失败: {task['error'][:200]}"
+                    except Exception as _e:
+                        logger.debug(
+                            f"【WebSocket】读取预热失败原因失败 session={session_id}: {_e}"
+                        )
+                    await _persist_first_message_blocked(
+                        session_id, user_id, question, blocked_err
                     )
                     await manager.send(
                         AgentMessage.error(
