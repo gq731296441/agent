@@ -1,0 +1,1149 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>家庭网络项目V3.0 项目2026-08配置审核报告</title>
+  <style>
+/* 设计系统变量 */
+:root {
+  --primary-color: #1e40af;
+  --primary-light: #3b82f6;
+  --secondary-color: #0891b2;
+  --success-color: #10b981;
+  --warning-color: #f59e0b;
+  --danger-color: #ef4444;
+  --bg-color: #f8fafc;
+  --card-bg: #ffffff;
+  --text-primary: #1e293b;
+  --text-secondary: #64748b;
+  --border-color: #e2e8f0;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.1);
+  --shadow-md: 0 4px 6px rgba(0,0,0,0.1);
+  --shadow-lg: 0 10px 15px rgba(0,0,0,0.1);
+}
+
+/* 全局重置 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background-color: var(--bg-color);
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+/* 头部样式 */
+.report-header {
+  background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+  color: white;
+  padding: 32px 24px;
+  box-shadow: var(--shadow-md);
+}
+
+.header-content {
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.report-title {
+  font-size: 28px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.report-subtitle {
+  font-size: 16px;
+  opacity: 0.9;
+}
+
+/* 主内容区 */
+.main-content {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+/* TAB导航 */
+.tabs-container {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+  background: var(--card-bg);
+  padding: 8px;
+  border-radius: 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.tab-button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px 20px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.tab-button:hover {
+  background-color: var(--bg-color);
+  color: var(--text-primary);
+}
+
+.tab-button.active {
+  background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+  color: white;
+  box-shadow: var(--shadow-sm);
+}
+
+.tab-icon {
+  width: 20px;
+  height: 20px;
+}
+
+/* TAB内容 */
+.tab-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+
+.tab-content.active {
+  display: block;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 章节标题 */
+.section-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 2px solid var(--border-color);
+}
+
+/* 统计卡片区域 */
+.stats-section {
+  margin-bottom: 32px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 20px;
+}
+
+.stat-card {
+  background: var(--card-bg);
+  border-radius: 12px;
+  padding: 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.stat-card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-md);
+}
+
+.stat-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.stat-icon svg {
+  width: 28px;
+  height: 28px;
+}
+
+.stat-icon.audit {
+  background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+  color: white;
+}
+
+.stat-icon.nonconforming {
+  background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+  color: white;
+}
+
+.stat-icon.compliant {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  color: white;
+}
+
+.stat-icon.ratio {
+  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
+  color: white;
+}
+
+.stat-icon.rejected {
+  background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+  color: white;
+}
+
+.stat-info {
+  flex: 1;
+}
+
+.stat-value {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.stat-label {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+/* 饼图区域 */
+.chart-section {
+  margin-bottom: 32px;
+  background: var(--card-bg);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: var(--shadow-sm);
+}
+
+.chart-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 32px;
+  align-items: center;
+  justify-content: center;
+}
+
+.pie-chart-wrapper {
+  position: relative;
+  width: 420px;
+  height: 420px;
+}
+
+.pie-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-color);
+  border-radius: 8px;
+  min-width: 280px;
+}
+
+.legend-color {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.legend-label {
+  flex: 1;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.legend-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* 按期关闭率区域 */
+.closure-section {
+  background: var(--card-bg);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: var(--shadow-sm);
+}
+
+.closure-card {
+  background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+  border-radius: 12px;
+  padding: 24px;
+  color: white;
+}
+
+.closure-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 24px;
+}
+
+.closure-item {
+  text-align: center;
+}
+
+.closure-label {
+  font-size: 16px;
+  opacity: 0.9;
+  margin-bottom: 8px;
+}
+
+.closure-value {
+  font-size: 30px;
+  font-weight: 700;
+}
+
+.closure-item.highlight .closure-value {
+  font-size: 38px;
+  color: #fbbf24;
+}
+
+.closure-item.highlight .closure-value.rate {
+  font-size: 44px;
+}
+
+/* 多月份按期关闭率表格 */
+.closure-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 16px;
+  color: white;
+}
+
+.closure-table th {
+  padding: 12px 16px;
+  text-align: center;
+  font-weight: 600;
+  border-bottom: 2px solid rgba(255,255,255,0.3);
+  opacity: 0.9;
+}
+
+.closure-table td {
+  padding: 12px 16px;
+  text-align: center;
+  border-bottom: 1px solid rgba(255,255,255,0.15);
+}
+
+.closure-table tr.closure-total {
+  background: rgba(255,255,255,0.12);
+  font-weight: 700;
+}
+
+.closure-table tr.closure-total td {
+  border-top: 2px solid rgba(255,255,255,0.3);
+  color: #fbbf24;
+}
+
+/* 表格区域 */
+.table-section {
+  background: var(--card-bg);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: var(--shadow-sm);
+}
+
+.table-wrapper {
+  overflow: visible;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+  table-layout: auto;
+}
+
+.data-table thead {
+  background: var(--bg-color);
+}
+
+.data-table th {
+  padding: 14px 12px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 2px solid var(--border-color);
+  white-space: normal;
+  word-break: break-word;
+}
+
+.data-table tbody tr {
+  border-bottom: 1px solid var(--border-color);
+  transition: background-color 0.2s ease;
+}
+
+.data-table tbody tr:hover {
+  background-color: var(--bg-color);
+}
+
+.data-table td {
+  padding: 14px 12px;
+  color: var(--text-secondary);
+  vertical-align: top;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  white-space: normal;
+}
+
+.data-table td:first-child {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+/* 状态徽章 */
+.status-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.status-badge.status-new {
+  background-color: #dbeafe;
+  color: #1e40af;
+}
+
+.status-badge.status-rejected {
+  background-color: #fef3c7;
+  color: #92400e;
+}
+
+.status-badge.status-executing {
+  background-color: #d1fae5;
+  color: #065f46;
+}
+
+.status-badge.status-pending {
+  background-color: #ede9fe;
+  color: #5b21b6;
+}
+
+.status-badge.status-done {
+  background-color: #dcfce7;
+  color: #166534;
+}
+
+.status-badge.status-pending-reject {
+  background-color: #fee2e2;
+  color: #991b1b;
+}
+
+/* 标识超链接 */
+.work-item-link {
+  color: var(--primary-color);
+  text-decoration: none;
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.work-item-link:hover {
+  color: var(--primary-light);
+  text-decoration: underline;
+}
+
+/* 月份筛选 */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--bg-color);
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.month-filter {
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 14px;
+  background: var(--card-bg);
+  color: var(--text-primary);
+  cursor: pointer;
+  min-width: 160px;
+}
+
+.month-filter:focus {
+  outline: none;
+  border-color: var(--primary-light);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+/* 状态统计摘要（标题下方另起一行） */
+.status-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.status-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+/* 页脚 */
+.site-footer {
+  text-align: center;
+  padding: 32px 24px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  border-top: 1px solid var(--border-color);
+  margin-top: 48px;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .report-header {
+    padding: 24px 16px;
+  }
+
+  .report-title {
+    font-size: 22px;
+  }
+
+  .main-content {
+    padding: 16px;
+  }
+
+  .tabs-container {
+    flex-direction: column;
+  }
+
+  .tab-button {
+    justify-content: flex-start;
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chart-container {
+    flex-direction: column;
+  }
+
+  .closure-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .data-table {
+    font-size: 13px;
+  }
+
+  .data-table th,
+  .data-table td {
+    padding: 10px 8px;
+  }
+}
+
+  </style>
+</head>
+<body>
+  <header class="report-header">
+    <div class="header-content">
+      <h1 class="report-title">家庭网络项目V3.0 项目配置审核报告</h1>
+      <p class="report-subtitle">审核范围：2026-08</p>
+    </div>
+  </header>
+
+  <main class="main-content">
+    <!-- TAB导航 -->
+    <nav class="tabs-container">
+      <button class="tab-button active" data-tab="overview">
+        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M3 3h18v18H3zM9 3v18M15 3v18M3 9h18M3 15h18"/>
+        </svg>
+        概览
+      </button>
+      <button class="tab-button" data-tab="checklist">
+        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M9 11l3 3L22 4M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/>
+        </svg>
+        配置管理领域检查单
+      </button>
+      <button class="tab-button" data-tab="improvement">
+        <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 20h9M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/>
+        </svg>
+        改进计划
+      </button>
+    </nav>
+
+    <!-- TAB页1：概览 -->
+    <div class="tab-content active" id="overview">
+      <!-- 统计卡片 -->
+      <section class="stats-section">
+        <div class="stats-grid" id="stats-grid">
+          <!-- 由JS动态生成 -->
+        </div>
+      </section>
+
+      <!-- 审核条目按研发活动分布（饼图） -->
+      <section class="chart-section">
+        <h2 class="section-title">审核条目按研发活动分布</h2>
+        <div class="chart-container">
+          <div class="pie-chart-wrapper">
+            <canvas id="auditPieChart" width="420" height="420"></canvas>
+          </div>
+          <div class="pie-legend" id="audit-legend"></div>
+        </div>
+      </section>
+
+      <!-- 改进任务按研发活动分布（饼图） -->
+      <section class="chart-section">
+        <h2 class="section-title">改进任务按研发活动分布</h2>
+        <div class="chart-container">
+          <div class="pie-chart-wrapper">
+            <canvas id="pieChart" width="420" height="420"></canvas>
+          </div>
+          <div class="pie-legend" id="task-legend"></div>
+        </div>
+      </section>
+
+      <!-- 改进任务按期关闭率 -->
+      <section class="closure-section">
+        <h2 class="section-title">改进任务按期关闭率详情</h2>
+        <div class="closure-card">
+          <div class="closure-grid" id="closure-grid">
+            <!-- 由JS动态生成 -->
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- TAB页2：配置管理领域检查单 -->
+    <div class="tab-content" id="checklist">
+      <section class="table-section">
+        <h2 class="section-title" id="checklist-title">配置管理领域检查单</h2>
+        <div class="status-summary" id="checklist-status"></div>
+        <div class="filter-bar" id="checklist-filter" style="display:none;margin-bottom:16px;">
+          <label for="checklist-month-filter">审核月份筛选：</label>
+          <select id="checklist-month-filter" class="month-filter">
+            <option value="all">全部月份</option>
+          </select>
+        </div>
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="min-width:90px;">审核月份</th>
+                <th style="min-width:110px;">标识</th>
+                <th style="min-width:120px;">所属项目</th>
+                <th>审核分类</th>
+                <th>研发活动</th>
+                <th>审核项</th>
+                <th>检查要点</th>
+                <th>审核时机</th>
+                <th>审核依据</th>
+                <th>审核结果</th>
+                <th>典型问题</th>
+                <th>改进建议</th>
+              </tr>
+            </thead>
+            <tbody id="checklist-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <!-- TAB页3：改进计划 -->
+    <div class="tab-content" id="improvement">
+      <section class="table-section">
+        <h2 class="section-title" id="tasks-title">改进任务明细</h2>
+        <div class="status-summary" id="tasks-status"></div>
+        <div class="filter-bar" id="tasks-filter" style="display:none;margin-bottom:16px;">
+          <label for="tasks-month-filter">审核月份筛选：</label>
+          <select id="tasks-month-filter" class="month-filter">
+            <option value="all">全部月份</option>
+          </select>
+        </div>
+        <div class="table-wrapper">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="min-width:90px;">审核月份</th>
+                <th style="min-width:110px;">标识</th>
+                <th style="min-width:90px;">状态</th>
+                <th>标题</th>
+                <th>所属项目</th>
+                <th>审核项</th>
+                <th>典型问题</th>
+                <th>审核说明</th>
+                <th>改进建议</th>
+                <th>计划完成日期</th>
+                <th>责任人</th>
+                <th>是否超期</th>
+              </tr>
+            </thead>
+            <tbody id="tasks-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <span>由 <strong style="color:#475569;">智搭 AI助手</strong> 生成 · 中兴通讯有线技术部 · 2026年09月14日</span>
+  </footer>
+
+  <script>
+const REPORT_DATA = {"stats": {"total": 28, "notPass": 5, "notInvolved": 0, "passed": 23, "notPassRatio": 17.9, "taskTotal": 5}, "auditDist": [{"label": "版本管理_版本发布", "value": 12, "percentage": 42.9, "color": "#3b82f6"}, {"label": "产品数据管理", "value": 6, "percentage": 21.4, "color": "#10b981"}, {"label": "版本管理_版本规划", "value": 2, "percentage": 7.1, "color": "#f59e0b"}, {"label": "基线管理", "value": 2, "percentage": 7.1, "color": "#8b5cf6"}, {"label": "建立并管理DevSecOps", "value": 1, "percentage": 3.6, "color": "#06b6d4"}, {"label": "配置审核", "value": 1, "percentage": 3.6, "color": "#ec4899"}, {"label": "DevSecOps硬件环境", "value": 1, "percentage": 3.6, "color": "#14b8a6"}, {"label": "DevSecOps工具", "value": 1, "percentage": 3.6, "color": "#f97316"}, {"label": "配置库备份", "value": 1, "percentage": 3.6, "color": "#84cc16"}, {"label": "DevSecOps系统", "value": 1, "percentage": 3.6, "color": "#6366f1"}], "taskDist": [{"label": "版本管理_版本发布", "value": 2, "percentage": 40.0, "color": "#3b82f6"}, {"label": "建立并管理DevSecOps", "value": 1, "percentage": 20.0, "color": "#10b981"}, {"label": "版本管理_版本规划", "value": 1, "percentage": 20.0, "color": "#f59e0b"}, {"label": "配置审核", "value": 1, "percentage": 20.0, "color": "#8b5cf6"}], "closure": {"months": [{"月份": "2026-08", "不符合项数": 5, "按期关闭数": 0, "按期关闭率": 0.0}], "total": {"月份": "总计", "不符合项数": 5, "按期关闭数": 0, "按期关闭率": 0.0}, "month": "2026-08", "notPassCount": 5, "onTimeCount": 0, "onTimeRate": 0.0}, "checklist": [{"审核月份": "2026-08", "标识": "YXCA-105728", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "建立并管理DevSecOps", "审核项": "DevSecOps系统的配套支持-AEI", "检查要点": "项目启动后，及时建立和维护项目DevSecOps系统，能有效支持项目日常运作。\nAEI系统配置审核操作指南(配置管理员使用):\nhttps://i.zte.com.cn/#/space/bc84bedc68074c9588b8b6848919c96c/wiki/page/9ba07ac92caa4cd2bde5e4fa073669ce/view\n相关数据明细见：https://udm.zte.com.cn/udm/Application/DocManage/FrmDocumentView.aspx?DocId=31464413", "审核时机": "立项关注&计划决策前一次&每年至少两次", "审核依据": "《HPPD产品研发 配置管理规程》《HPPD产品研发 代码管理指导书》", "审核结果": "不通过", "典型问题": "020401-002DevOps基础数据不准确", "改进建议": "新项目立项后，AEI中使用的版本号还是前项目的发布版本号，造成问题集中出现。请项目及时更新AEI任务配置中的版本号。"}, {"审核月份": "2026-08", "标识": "YXCA-107382", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本规划", "审核项": "版本规划-版本命名", "检查要点": "1、符合配置管理计划中的版本命名规范。\n2、不符合公司/各线院命名规范的，需要进行版本命名TS特批（有对应TS单）。", "审核时机": "每年至少四次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "不通过", "典型问题": "020701-001不符合配置管理计划中约定的版本命名规则", "改进建议": "按系统产品或有线的版本命名规范修改。(有线现行版本命名规则)。"}, {"审核月份": "2026-08", "标识": "YXCA-107890", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "版本发布准入控制-设置规范性", "检查要点": "检查版本发布DoD检查清单选择是否符合DoD检查清单的适用范围。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "不通过", "典型问题": "020801-001版本发布DoD设置不合理", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-107897", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "研发版本发布-发布评审", "检查要点": "版本发布前有发布评审机制（如版本决策会，形式不限）。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "不通过", "典型问题": "020809-001版本发布前未进行有效的发布评审", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110264", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "配置审核", "审核项": "配置审核-问题跟踪", "检查要点": "审核问题是否及时关闭，审核问题解决情况是否符合", "审核时机": "定期审核(每月至少一次)", "审核依据": "《HPPD产品研发 配置管理规程》", "审核结果": "不通过", "典型问题": "021101-001配置审核问题没有及时关闭", "改进建议": "项目组把问题单在项目例会跟踪，直至关闭"}, {"审核月份": "2026-08", "标识": "YXCA-105676", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "基线管理", "审核项": "基线管理-部件、文档基线", "检查要点": "需求类(含产品安全需求，数据保护需求)基线<br/>1、按配置管理计划中约定的时间点（例如：系统方案里程碑点、迭代计划会后）进行基线并发布基线。<br/>2、命名符合配置管理计划中的基线命名规则。", "审核时机": "计划决策前一次&每年至少两次", "审核依据": "《HPPD产品研发 配置管理规程》《需求开发与管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-107887", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "研发版本发布-产品安全加固工具", "检查要点": "2019年6月30日后新发布的商用版本要求提供。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-107888", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "质量-数据保护", "检查要点": "数据保护相关需求：涉及客户个人数据，已制定数据保护策略并执行。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-107889", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "研发版本发布-open_source_software_notice", "检查要点": "1、与开源软件BOM清单是否一致。\n2、是否引用了其依赖版本、下属发布版本。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-107891", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "研发版本发布-要素表", "检查要点": "1.软件构成要素表有相应的评审记录（参评角色及评审记录完整），可借用iversion配置项会签评审记录。 2.iversion版本构成要素表与版本配置项清单一致", "审核时机": "每年至少四次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-107892", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "研发版本发布-制品存放", "检查要点": "版本发布路径为制品库，且版本包、交付文档、version_meta文件按要求存放相应目录。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-107893", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "研发版本发布-交付文档", "检查要点": "\"是否包含应随版本提取交付给下游的文档、工具等。\nCMQ-020805-002 版本发布相关文档没有使用最新文档模板：只查看版本发布说明。\nhttps://i.zte.com.cn/#/space/bc84bedc68074c9588b8b6848919c96c/wiki/page/995e3d30d7054c39b44596dd7a286829/view  \nCMQ-020809-002 版本发布评审记录非最新模板\nhttps://i.zte.com.cn/#/space/bc84bedc68074c9588b8b6848919c96c/wiki/page/968dfa8957cc4715a37e2e9a1fbf521b/view\n对于未使用版本发布说明最新模板的项目，询问原因并对原因进行分类，给出的改进建议与后续的举措。\"\n", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-107894", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "研发版本发布-版本发布4个0报告-上传规范性", "检查要点": "1、各类报告的模板是否正确。是否按模板内容填写。\n2、各类报告的标签设置是否正确（文档标识、是否通过的结论）。\n3、各类报告与版本的吻合程度（仅就报告展现的内容与版本已知情况对比）。\n4、各类备案通过的，备案手续是否齐备（例如：产品安全按要求备案，病毒扫描疑似的通过TS备案）。\n5、报告的输出时效符合版本发布准入检查单的要求。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-107895", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "版本发布准入检查单-填写规范性", "检查要点": "1、是否有效填写了自检结果、自评说明（例如：告警情况下的说明）等。\n2、与版本设置中的、版本实际情况符合。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-107896", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "质量-需求和故障", "检查要点": "版本发布满足质量要求：交付需求的版本发布前完成市场需求关联，RDCloud-iChange变更请求的遗留故障单与发布材料吻合。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-107898", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本发布", "审核项": "研发版本发布-开源软件BOM清单", "检查要点": "1、与hub扫描结果是否一致。\n2、与配置项清单是否一致。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110252", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "产品数据管理", "审核项": "产品数据管理-部件名称", "检查要点": "1、部件命名是否与《产品组成部分命名》保持一致\n2、部件命名是否符合管理要求002 自制件和定制件命名规范详解\n3、半成品板下必须有定制件\n4、BOM属性中PCB编号填写是否正确，是否和引用的定制件版本一致", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 配置管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110254", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "基线管理", "审核项": "基线管理-需求基线", "检查要点": "需求类(含产品安全需求，数据保护需求)基线\n1、按配置管理计划中约定的时间点（例如：系统方案里程碑点、迭代计划会后）进行基线并发布基线。\n2、命名符合配置管理计划中的基线命名规则。", "审核时机": "计划决策前一次&每年至少两次", "审核依据": "《HPPD产品研发 配置管理规程》《需求开发与管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110256", "所属项目": "家庭网络项目V3.0", "审核分类": "物理审核", "研发活动": "DevSecOps硬件环境", "审核项": "DevSecOps硬件环境（机器性能及网络环境）", "检查要点": "1、检查机器是否上电正常。\n2、检查是否CPU平均使用百分比在70％以下。\n3、检查是否内存平均使用百分比在80％以下。\n4、是否服务器数据盘的剩余空间在10%以上。\n5、是否磁阵的剩余空间保证在10%以上。\n6、是否服务器系统盘的剩余空间保证在5G以上。", "审核时机": "定期审核(每月至少一次)", "审核依据": "《HPPD产品研发 配置管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110258", "所属项目": "家庭网络项目V3.0", "审核分类": "物理审核", "研发活动": "DevSecOps工具", "审核项": "DevSecOps工具运行状态", "检查要点": "检查、分析DevSecOps系统的日志文件以及性能数据，是否有出现问题的征兆。", "审核时机": "定期审核(每月至少一次)", "审核依据": "《HPPD产品研发 配置管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110260", "所属项目": "家庭网络项目V3.0", "审核分类": "物理审核", "研发活动": "配置库备份", "审核项": "配置库的是否有备份", "检查要点": "检查DevSecOps系统是否按照指定的要求如期备份，备份日志是否异常。", "审核时机": "定期审核(每月至少一次)", "审核依据": "《HPPD产品研发 配置管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110262", "所属项目": "家庭网络项目V3.0", "审核分类": "物理审核", "研发活动": "DevSecOps系统", "审核项": "DevSecOps系统运行环境", "检查要点": "检查是否自动/定期升级服务器的操作系统补丁以及杀毒软件补丁。", "审核时机": "定期审核(每月至少一次)", "审核依据": "《HPPD产品研发 配置管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110266", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "版本管理_版本规划", "审核项": "版本规划-版本作废", "检查要点": "检查已作废的构建版本，在iChange或EC中是否有关联未关闭的变更请求。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 版本管理指导书》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110268", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "产品数据管理", "审核项": "产品数据管理-制造视图", "检查要点": "依据制造视图模型检查成品整机以及下层部件上下层是否完整，关联关系是否正确。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 配置管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110270", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "产品数据管理", "审核项": "产品数据管理-系统软件", "检查要点": "涉及版本发布的项目需要创建系统软件部件，版本、GBOM、成品整机关联正确。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 配置管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110272", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "产品数据管理", "审核项": "产品数据管理-产品结构创建", "检查要点": "产品结构创建依据《产品组成部分命名》、《文档齐套清单》或《项目过程定义》、《单板清单》等，需经过评审，形式不限。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 配置管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110274", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "产品数据管理", "审核项": "产品数据管理-设计视图", "检查要点": "检查设计视图是否完整，系统的硬件下面是否关联了项目所有单板。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 配置管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}, {"审核月份": "2026-08", "标识": "YXCA-110276", "所属项目": "家庭网络项目V3.0", "审核分类": "功能审核", "研发活动": "产品数据管理", "审核项": "产品数据管理-部件属性", "检查要点": "半成品板，BOM属性页面填写了PCB版本号，属性中填写的PCB版本号与BOM内容中的PCB实物版本，以及PCB采购属性中的“规格型号”后的版本一致。", "审核时机": "每年至少两次", "审核依据": "《HPPD产品研发 配置管理规程》", "审核结果": "通过", "典型问题": "", "改进建议": null}], "tasks": [{"审核月份": "2026-08", "标识": "YXCA-110548", "状态": "新建", "标题": "2026-8月-家庭网络项目V3.0-功能审核_DevSecOps系统的配套支持-AEI", "所属项目": "家庭网络项目V3.0", "所属中心": "FM产品研发中心", "研发活动": "建立并管理DevSecOps", "审核项": "DevSecOps系统的配套支持-AEI", "典型问题": "020401-002DevOps基础数据不准确", "审核说明": "AEI基础数据不正确，版本和关联项目不一致", "改进建议": "新项目立项后，AEI中使用的版本号还是前项目的发布版本号，造成问题集中出现。请项目及时更新AEI任务配置中的版本号。", "计划开始日期": "2026-09-01", "计划完成日期": "-", "责任人": "王玲00040012", "是否超期": "未超期"}, {"审核月份": "2026-08", "标识": "YXCA-110689", "状态": "新建", "标题": "2026-8月-家庭网络项目V3.0-功能审核_版本规划-版本命名", "所属项目": "家庭网络项目V3.0", "所属中心": "FM产品研发中心", "研发活动": "版本管理_版本规划", "审核项": "版本规划-版本命名", "典型问题": "020701-001不符合配置管理计划中约定的版本命名规则", "审核说明": "ZXHN E2637V3 V1.0.0.0D2.3000_0820wZXHN E2637V3 V1.0.0.0D2.3000_0818wMMC233Z-A-V1_V2.0_SOS V3.0.0.3B1_1000不符合版本命名规范", "改进建议": "按系统产品或有线的版本命名规范修改。(有线现行版本命名规则)。", "计划开始日期": "2026-09-02", "计划完成日期": "-", "责任人": "钱淑冰00107438", "是否超期": "未超期"}, {"审核月份": "2026-08", "标识": "YXCA-110763", "状态": "新建", "标题": "2026-8月-家庭网络项目V3.0-功能审核_研发版本发布-发布评审", "所属项目": "家庭网络项目V3.0", "所属中心": "FM产品研发中心", "研发活动": "版本管理_版本发布", "审核项": "研发版本发布-发布评审", "典型问题": "020809-001版本发布前未进行有效的发布评审", "审核说明": "MMC233Z-A-V1_V2.0 V3.0.0.4B2_1000评审记录加密，无法检查", "改进建议": "建议按照规范要求，开展发布评审活动，具体的评审形式不限，如有关键角色无法参加，需要明确其授权人，并根据版本实际情况填写《版本发布评审记录》。", "计划开始日期": "2026-09-02", "计划完成日期": "-", "责任人": "钱淑冰00107438", "是否超期": "未超期"}, {"审核月份": "2026-08", "标识": "YXCA-110813", "状态": "新建", "标题": "2026-8月-家庭网络项目V3.0-功能审核_版本发布准入控制-设置规范性", "所属项目": "家庭网络项目V3.0", "所属中心": "FM产品研发中心", "研发活动": "版本管理_版本发布", "审核项": "版本发布准入控制-设置规范性", "典型问题": "020801-001版本发布DoD设置不合理", "审核说明": "ZXHN Z3720 V1.0.0.0D2_1000应使用公司版本发布通用检查单-内部管理版本", "改进建议": "启动版本发布时，应根据研发版本发布-DoD检查单选择原则进行版本发布DoD检查单的选择。", "计划开始日期": "2026-09-03", "计划完成日期": "-", "责任人": "钱淑冰00107438", "是否超期": "未超期"}, {"审核月份": "2026-08", "标识": "YXCA-111184", "状态": "新建", "标题": "2026-8月-家庭网络项目V3.0-功能审核-配置审核-问题跟踪", "所属项目": "家庭网络项目V3.0", "所属中心": "FM产品研发中心", "研发活动": "配置审核", "审核项": "配置审核-问题跟踪", "典型问题": "021101-001配置审核问题没有及时关闭", "审核说明": "有前几月改进单未关闭", "改进建议": "项目组把问题单在项目例会跟踪，直至关闭", "计划开始日期": "2026-09-08", "计划完成日期": "-", "责任人": "夏蕾00004444", "是否超期": "未超期"}], "checklistMonths": ["2026-08"], "taskMonths": ["2026-08"], "checklistStatus": {"不通过": 5, "通过": 23}, "taskStatus": {"新建": 5}};
+
+// ===== 配置审核报告 - 动态渲染逻辑 =====
+// 数据来源：全局变量 REPORT_DATA（由生成脚本注入）
+// REPORT_DATA = {
+//   projectName, auditMonth, generateDate,
+//   stats: { total, notPass, notInvolved, passed, notPassRatio, taskTotal },
+//   auditDist: [{label, value, percentage, color}],
+//   taskDist: [{label, value, percentage, color}],
+//   closure: { month, notPassCount, onTimeCount, onTimeRate },
+//   checklist: [{标识,所属项目,审核分类,研发活动,审核项,检查要点,审核时机,审核依据,审核结果,典型问题,改进建议}],
+//   tasks: [{标识,状态,标题,所属项目,所属中心,研发活动,审核项,典型问题,审核说明,改进建议,计划开始日期,计划完成日期,责任人,是否超期}]
+// }
+
+document.addEventListener('DOMContentLoaded', function () {
+  const D = REPORT_DATA;
+
+  // 渲染统计卡片
+  renderStats(D.stats);
+
+  // 渲染饼图
+  drawAuditPieChart(D.auditDist, D.stats.total);
+  drawTaskPieChart(D.taskDist, D.stats.taskTotal);
+
+  // 渲染图例
+  renderLegend('audit-legend', D.auditDist);
+  renderLegend('task-legend', D.taskDist);
+
+  // 渲染按期关闭率
+  renderClosure(D.closure);
+
+  // 渲染TAB标题状态统计
+  renderChecklistTitle(D.checklistStatus, D.checklist.length);
+  renderTasksTitle(D.taskStatus, D.tasks.length);
+
+  // 渲染月份筛选
+  initMonthFilter('checklist', D.checklistMonths);
+  initMonthFilter('tasks', D.taskMonths);
+
+  // 渲染表格
+  renderChecklistTable(D.checklist);
+  renderTasksTable(D.tasks);
+
+  // TAB切换
+  initTabs();
+});
+
+// ===== TAB切换 =====
+function initTabs() {
+  const tabButtons = document.querySelectorAll('.tab-button');
+  const tabContents = document.querySelectorAll('.tab-content');
+
+  tabButtons.forEach(button => {
+    button.addEventListener('click', function () {
+      const targetTab = this.getAttribute('data-tab');
+      tabButtons.forEach(btn => btn.classList.remove('active'));
+      tabContents.forEach(content => content.classList.remove('active'));
+      this.classList.add('active');
+      document.getElementById(targetTab).classList.add('active');
+      if (targetTab === 'overview') {
+        drawAuditPieChart(REPORT_DATA.auditDist, REPORT_DATA.stats.total);
+        drawTaskPieChart(REPORT_DATA.taskDist, REPORT_DATA.stats.taskTotal);
+      }
+    });
+  });
+}
+
+// ===== 统计卡片 =====
+function renderStats(stats) {
+  const grid = document.getElementById('stats-grid');
+  const cards = [
+    { icon: 'audit', value: stats.total, label: '审核项总数', svg: '<path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10,9 9,9 8,9"/>' },
+    { icon: 'nonconforming', value: stats.notPass, label: '不符合项数', svg: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>' },
+    { icon: 'rejected', value: stats.notInvolved, label: '不涉及项数', svg: '<circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>' },
+    { icon: 'compliant', value: stats.passed, label: '通过项数', svg: '<path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><polyline points="22,4 12,14.01 9,11.01"/>' },
+    { icon: 'ratio', value: stats.notPassRatio + '%', label: '不符合项占比', svg: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>' },
+  ];
+  let html = '';
+  cards.forEach(c => {
+    html += '<div class="stat-card">' +
+      '<div class="stat-icon ' + c.icon + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' + c.svg + '</svg></div>' +
+      '<div class="stat-info"><div class="stat-value">' + c.value + '</div><div class="stat-label">' + c.label + '</div></div>' +
+      '</div>';
+  });
+  grid.innerHTML = html;
+}
+
+// ===== 图例 =====
+function renderLegend(containerId, data) {
+  const container = document.getElementById(containerId);
+  let html = '';
+  data.forEach(item => {
+    html += '<div class="legend-item">' +
+      '<span class="legend-color" style="background-color:' + item.color + ';"></span>' +
+      '<span class="legend-label">' + item.label + '</span>' +
+      '<span class="legend-value">' + item.value + '项 · ' + item.percentage + '%</span>' +
+      '</div>';
+  });
+  container.innerHTML = html;
+}
+
+// ===== 饼图绘制 =====
+function drawPie(canvasId, data, centerValue, centerLabel, centerColor) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const width = canvas.width;
+  const height = canvas.height;
+  const centerX = width / 2;
+  const centerY = height / 2;
+  const radius = Math.min(width, height) / 2 - 20;
+
+  ctx.clearRect(0, 0, width, height);
+  let startAngle = -Math.PI / 2;
+
+  data.forEach(item => {
+    const sliceAngle = (item.percentage / 100) * 2 * Math.PI;
+    ctx.beginPath();
+    ctx.moveTo(centerX, centerY);
+    ctx.arc(centerX, centerY, radius, startAngle, startAngle + sliceAngle);
+    ctx.closePath();
+    ctx.fillStyle = item.color;
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    const labelAngle = startAngle + sliceAngle / 2;
+    const labelRadius = radius * 0.7;
+    const labelX = centerX + Math.cos(labelAngle) * labelRadius;
+    const labelY = centerY + Math.sin(labelAngle) * labelRadius;
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(item.percentage + '%', labelX, labelY);
+
+    startAngle += sliceAngle;
+  });
+
+  // 中心圆
+  ctx.beginPath();
+  ctx.arc(centerX, centerY, radius * 0.5, 0, 2 * Math.PI);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+
+  ctx.fillStyle = centerColor;
+  ctx.font = 'bold 24px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(centerValue), centerX, centerY - 10);
+  ctx.fillStyle = '#64748b';
+  ctx.font = '14px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+  ctx.fillText(centerLabel, centerX, centerY + 12);
+}
+
+function drawAuditPieChart(data, total) {
+  drawPie('auditPieChart', data, total, '项审核', '#3b82f6');
+}
+
+function drawTaskPieChart(data, total) {
+  drawPie('pieChart', data, total, '项任务', '#1e40af');
+}
+
+// ===== 按期关闭率 =====
+function renderClosure(closure) {
+  const grid = document.getElementById('closure-grid');
+  const months = closure.months || [];
+  const hasTotal = closure.total && months.length > 1;
+
+  // 单个月份：使用卡片展示
+  if (months.length <= 1) {
+    const items = [
+      { label: '月份', value: closure.month },
+      { label: '不符合项数', value: closure.notPassCount },
+      { label: '按期关闭数', value: closure.onTimeCount },
+      { label: '按期关闭率', value: closure.onTimeRate, highlight: true, rate: true },
+    ];
+    let html = '';
+    items.forEach(item => {
+      const cls = item.highlight ? 'closure-item highlight' : 'closure-item';
+      const valCls = item.rate ? 'closure-value rate' : 'closure-value';
+      html += '<div class="' + cls.trim() + '">' +
+        '<div class="closure-label">' + item.label + '</div>' +
+        '<div class="' + valCls.trim() + '">' + item.value + '</div>' +
+        '</div>';
+    });
+    grid.innerHTML = html;
+    return;
+  }
+
+  // 多个月份：使用表格展示（含总计行）
+  let html = '<table class="closure-table">' +
+    '<thead><tr>' +
+    '<th>月份</th><th>不符合项数</th><th>按期关闭数</th><th>按期关闭率</th>' +
+    '</tr></thead><tbody>';
+  months.forEach(m => {
+    html += '<tr>' +
+      '<td>' + esc(m['月份']) + '</td>' +
+      '<td>' + esc(m['不符合项数']) + '</td>' +
+      '<td>' + esc(m['按期关闭数']) + '</td>' +
+      '<td>' + esc(m['按期关闭率']) + formatRate(m['按期关闭率']) + '</td>' +
+      '</tr>';
+  });
+  if (hasTotal) {
+    const t = closure.total;
+    html += '<tr class="closure-total">' +
+      '<td>' + esc(t['月份']) + '</td>' +
+      '<td>' + esc(t['不符合项数']) + '</td>' +
+      '<td>' + esc(t['按期关闭数']) + '</td>' +
+      '<td>' + esc(t['按期关闭率']) + formatRate(t['按期关闭率']) + '</td>' +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+  grid.innerHTML = html;
+}
+
+// 按期关闭率格式化：数值加%，NA不加
+function formatRate(rate) {
+  if (rate === 'NA' || rate === null || rate === undefined || rate === '') return '';
+  return '%';
+}
+
+// ===== 转义 =====
+function esc(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ===== 去除HTML标签 =====
+function stripHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/<[^>]*>/g, '')   // 去除所有HTML标签
+    .replace(/&nbsp;/g, ' ')   // 替换 &nbsp; 为空格
+    .replace(/&amp;/g, '&')    // 还原 &amp;
+    .replace(/&lt;/g, '<')     // 还原 &lt;
+    .replace(/&gt;/g, '>')     // 还原 &gt;
+    .replace(/&quot;/g, '"')   // 还原 &quot;
+    .replace(/&#39;/g, "'")    // 还原 &#39;
+    .replace(/\s+/g, ' ')      // 合并多余空白
+    .trim();
+}
+
+// ===== 标识超链接 =====
+const WORK_ITEM_BASE_URL = 'https://rdcloud.zte.com.cn/uportal/rd-uportal/workspaces/YXCA/apps/wim/allWorkItems/';
+
+function idLink(id) {
+  if (!id) return '-';
+  const url = WORK_ITEM_BASE_URL + encodeURIComponent(String(id));
+  return '<a href="' + url + '" target="_blank" rel="noopener" class="work-item-link">' + esc(id) + '</a>';
+}
+
+// ===== 审核结果徽章 =====
+function resultBadge(result) {
+  if (result === '通过') return '<span class="status-badge status-new">通过</span>';
+  if (result === '不通过') return '<span class="status-badge status-rejected">不通过</span>';
+  return esc(result) || '-';
+}
+
+// ===== 状态徽章 =====
+function stateBadge(state) {
+  if (state === '新建') return '<span class="status-badge status-new">新建</span>';
+  if (state === '执行中') return '<span class="status-badge status-executing">执行中</span>';
+  if (state === '待人工验收') return '<span class="status-badge status-pending">待人工验收</span>';
+  if (state === '已完成') return '<span class="status-badge status-done">已完成</span>';
+  if (state === '待确认拒绝') return '<span class="status-badge status-pending-reject">待确认拒绝</span>';
+  if (state === '已确认拒绝') return '<span class="status-badge status-rejected">已确认拒绝</span>';
+  return esc(state) || '-';
+}
+
+// ===== 检查单表格 =====
+function renderChecklistTable(data) {
+  const tbody = document.getElementById('checklist-tbody');
+  if (!data || data.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#94a3b8;padding:24px;">暂无数据</td></tr>';
+    return;
+  }
+  let html = '';
+  data.forEach(r => {
+    html += '<tr>' +
+      '<td>' + esc(r['审核月份']) + '</td>' +
+      '<td>' + idLink(r['标识']) + '</td>' +
+      '<td>' + esc(r['所属项目']) + '</td>' +
+      '<td>' + esc(r['审核分类']) + '</td>' +
+      '<td>' + esc(r['研发活动']) + '</td>' +
+      '<td>' + esc(r['审核项']) + '</td>' +
+      '<td>' + esc(r['检查要点']) + '</td>' +
+      '<td>' + esc(r['审核时机']) + '</td>' +
+      '<td>' + esc(r['审核依据']) + '</td>' +
+      '<td>' + resultBadge(r['审核结果']) + '</td>' +
+      '<td>' + esc(r['典型问题']) + '</td>' +
+      '<td>' + esc(r['改进建议']) + '</td>' +
+      '</tr>';
+  });
+  tbody.innerHTML = html;
+}
+
+// ===== 改进任务表格 =====
+function renderTasksTable(data) {
+  const tbody = document.getElementById('tasks-tbody');
+  if (!data || data.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#94a3b8;padding:24px;">暂无数据</td></tr>';
+    return;
+  }
+  let html = '';
+  data.forEach(r => {
+    html += '<tr>' +
+      '<td>' + esc(r['审核月份']) + '</td>' +
+      '<td>' + idLink(r['标识']) + '</td>' +
+      '<td>' + stateBadge(r['状态']) + '</td>' +
+      '<td>' + esc(r['标题']) + '</td>' +
+      '<td>' + esc(r['所属项目']) + '</td>' +
+      '<td>' + esc(r['审核项']) + '</td>' +
+      '<td>' + esc(r['典型问题']) + '</td>' +
+      '<td>' + esc(stripHtml(r['审核说明'])) + '</td>' +
+      '<td>' + esc(r['改进建议']) + '</td>' +
+      '<td>' + esc(r['计划完成日期']) + '</td>' +
+      '<td>' + esc(r['责任人']) + '</td>' +
+      '<td>' + esc(r['是否超期']) + '</td>' +
+      '</tr>';
+  });
+  tbody.innerHTML = html;
+}
+
+// ===== TAB标题状态统计 =====
+// 状态颜色映射
+const STATUS_COLORS = {
+  '总计': '#1e40af',
+  '不通过': '#ef4444',
+  '通过': '#10b981',
+  '部分通过': '#f59e0b',
+  '不涉及': '#8b5cf6',
+  '-': '#94a3b8',
+  '新建': '#3b82f6',
+  '执行中': '#f59e0b',
+  '待人工验收': '#8b5cf6',
+  '已完成': '#10b981',
+  '待确认拒绝': '#ef4444',
+  '已确认拒绝': '#92400e',
+};
+
+// 状态颜色回退（未定义时按顺序分配）
+const STATUS_COLOR_PALETTE = [
+  '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#06b6d4',
+  '#ec4899', '#14b8a6', '#f97316', '#84cc16', '#6366f1',
+];
+
+function statusColor(name, index) {
+  if (STATUS_COLORS[name] !== undefined) return STATUS_COLORS[name];
+  return STATUS_COLOR_PALETTE[index % STATUS_COLOR_PALETTE.length];
+}
+
+function renderStatusSummary(containerId, status, total) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  let html = '';
+  // 总计放最前面
+  html += '<span class="status-item">' +
+    '<span class="status-dot" style="background:' + statusColor('总计', 0) + ';"></span>' +
+    '总计：' + total + '</span>';
+  // 各状态（容错：status 可能为 undefined/null）
+  let idx = 1;
+  const statusObj = status || {};
+  Object.keys(statusObj).forEach(k => {
+    html += '<span class="status-item">' +
+      '<span class="status-dot" style="background:' + statusColor(k, idx) + ';"></span>' +
+      k + '：' + statusObj[k] + '</span>';
+    idx++;
+  });
+  container.innerHTML = html;
+}
+
+function renderChecklistTitle(status, total) {
+  renderStatusSummary('checklist-status', status, total);
+}
+
+function renderTasksTitle(status, total) {
+  renderStatusSummary('tasks-status', status, total);
+}
+
+// ===== 月份筛选 =====
+function initMonthFilter(type, months) {
+  const filterBar = document.getElementById(type + '-filter');
+  const select = document.getElementById(type + '-month-filter');
+  if (!filterBar || !select) return;
+
+  // 只有多个月份时才显示筛选
+  if (!months || months.length <= 1) {
+    filterBar.style.display = 'none';
+    return;
+  }
+  filterBar.style.display = 'flex';
+
+  // 填充月份选项（已由后端升序排列）
+  months.forEach(m => {
+    const opt = document.createElement('option');
+    opt.value = m;
+    opt.textContent = m;
+    select.appendChild(opt);
+  });
+
+  // 监听筛选变化
+  select.addEventListener('change', function () {
+    const month = this.value;
+    const allData = REPORT_DATA[type === 'checklist' ? 'checklist' : 'tasks'];
+    const filtered = month === 'all' ? allData : allData.filter(r => String(r['审核月份']) === month);
+    if (type === 'checklist') {
+      renderChecklistTable(filtered);
+    } else {
+      renderTasksTable(filtered);
+    }
+  });
+}
+
+  </script>
+</body>
+</html>
