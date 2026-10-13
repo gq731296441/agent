@@ -51,6 +51,21 @@ def classify_deep_error(exc: Exception) -> DeepErrorClassification:
             "沙箱服务暂时不可用，本次未执行代码。请稍后重试；若持续出现请联系管理员。",
         )
 
+    if (
+        "authentication" in exc_name.lower()
+        or "auth" in exc_name.lower()
+        or "401" in msg
+        or "403" in msg
+        or "permission" in msg
+        or "unauthorized" in msg
+        or "token check" in msg
+        or "令牌校验失败" in msg
+        or "认证失败" in msg
+    ):
+        return DeepErrorClassification(
+            False, "auth_error", "认证或权限失败，请检查凭据与访问权限后重试。"
+        )
+
     if isinstance(exc, asyncio.TimeoutError) or "timeout" in msg:
         return DeepErrorClassification(True, "timeout", "请求超时，正在重试…")
     if "rate limit" in msg or "429" in msg:
@@ -71,26 +86,12 @@ def classify_deep_error(exc: Exception) -> DeepErrorClassification:
                 True, "mcp_param_error",
                 "MCP 工具调用参数有误，正在让模型修正后重试…",
             )
-        # 通用 MCP/Tool 错误（非认证类）
+        # 未知工具故障缺少可靠的修正路径，整轮重跑只会重复相同调用。
         return DeepErrorClassification(
-            True, "mcp_tool_error",
-            "MCP 工具调用异常，正在重试…",
+            False, "mcp_tool_error",
+            "工具调用失败，当前没有可靠的自动修正路径。",
         )
 
-    # 认证/鉴权错误（错误的 API Key / Base URL / 模型名）
-    if (
-        "authentication" in exc_name.lower()
-        or "auth" in exc_name.lower()
-        or "401" in msg
-        or "403" in msg
-        or "permission" in msg
-        or "unauthorized" in msg
-    ):
-        return DeepErrorClassification(
-            False, "auth_error",
-            "模型认证失败，请检查 API Key、Base URL 和模型名称是否正确。"
-            "可在「模型设置」中修改后重试。",
-        )
     return DeepErrorClassification(False, "unknown", str(exc)[:200])
 
 

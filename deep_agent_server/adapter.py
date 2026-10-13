@@ -764,6 +764,23 @@ class DeepEventAdapter:
         async for msg in self.flush_assistant_text(persist=persist):
             yield msg
 
+    def discard_model_segment(self) -> None:
+        """Discard buffered text after a repetition circuit break."""
+        self._current_llm_text = ""
+        self._current_reasoning_text = ""
+        self._chat_streamed = False
+        self._reasoning_notified = False
+        self._reasoning_segment_flushed = False
+        self._think_parser.reset()
+        self._pending_tool_calls.clear()
+        self._pending_tool_inputs.clear()
+        self._tool_call_accumulator._accumulated.clear()
+        self._streamed_tool_args.clear()
+        self._tool_progress_emitted.clear()
+        self._ns_accumulator_backup.clear()
+        self._last_node = None
+        self._last_model_namespace = ()
+
     def _enrich(self, msg: AgentMessage, *, track_step: bool = True) -> dict:
         """为 AgentMessage 附加 Deep 模式元数据；track_step=False 时不递增 step_index。"""
         d = msg.to_dict()

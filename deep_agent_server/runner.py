@@ -5,6 +5,7 @@
 """
 
 import asyncio
+from contextlib import aclosing
 import random
 import traceback
 import uuid
@@ -23,6 +24,7 @@ from db import storage as chat_storage
 from deep_agent_server.adapter import DeepEventAdapter, normalize_tool_call, task_call_args_ready
 from deep_agent_server.artifact import truncate_summary
 from deep_agent_server.memory.middleware import inject_user_memory_into_stream_input
+from deep_agent_server.repetition_guard import ModelTextGuard, RepetitionDetected
 from deep_agent_server.concurrency import DeepConcurrencyGuard
 from deep_agent_server.errors.recovery import classify_deep_error, should_retry
 from deep_agent_server.events.bus import publish_event
@@ -44,6 +46,17 @@ _BUILTIN_TOOL_NAMES = {
 
 class DeepRunTimeoutError(Exception):
     """Deep Agent 单次 run 超时。"""
+
+
+def build_repetition_recovery_message() -> HumanMessage:
+    return HumanMessage(content=(
+        "系统检测到你刚才连续重复了相同的说明，当前生成已中止。"
+        "请继续完成用户原任务，并换一种执行路径：先依据已有工具结果确认已完成的步骤。"
+        "若已有认证或权限失败，立即停止该服务的所有重试，向用户报告。"
+        "若文件、模块、接口或可靠实现不存在，最多核查一次替代路径；没有就报告无法完成。"
+        "不要猜测协议或宏格式，不要重复已失败的操作。"
+        "若有可执行的下一步，直接调用工具；否则明确说明阻碍并结束本轮。"
+    ))
 
 
 def build_run_metrics_content(
@@ -366,8 +379,6 @@ async def run_deep_agent(
             if vp not in announced
         }
         if new_links:
-            from langchain_core.messages import HumanMessage
-
             lines = []
             for vp, url in new_links.items():
                 filename = vp.split("/")[-1]
@@ -395,7 +406,8 @@ async def run_deep_agent(
             )
     timeout_sec = app_config.DEEP_TIMEOUT_SECONDS
     retry_count = 0
-    max_retries = 2
+    max_retries = 1
+    repetition_retries = 0
     run_config, token_acc = attach_token_callback(config)
     # ── Langfuse 观测（可选）：凭据同步 + 挂载 CallbackHandler ──
     from deep_agent_server.langfuse_integration import (
@@ -420,7 +432,6 @@ async def run_deep_agent(
             "请重新确认可用的工具列表，不要依赖之前的记忆。"
         )
     if change_notices:
-        from langchain_core.messages import HumanMessage
         notice = "\n\n".join(change_notices)
         messages = stream_input.get("messages", [])
         messages.append(HumanMessage(content=notice))
@@ -569,6 +580,42 @@ async def run_deep_agent(
                 async for msg in _yield_run_end(EndReason.COMPLETED, metrics["finished_at"]):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.COMPLETED)
+                return
+
+            except RepetitionDetected as error:
+                logger.warning(
+                    "[DeepRunner] repetition detected session=%s run=%s period=%s retry=%s",
+                    session_id, run_id, error.hit.period_chars, repetition_retries,
+                )
+                adapter.discard_model_segment()
+                await deep_storage.insert_audit_log(
+                    user_id, "model_repetition_detected",
+                    session_id=session_id, run_id=run_id,
+                    detail={
+                        "period_chars": error.hit.period_chars,
+                        "repeat_count": error.hit.repeat_count,
+                        "attempt": repetition_retries + 1,
+                    },
+                )
+                if repetition_retries == 0 and not (stop_event and stop_event.is_set()):
+                    repetition_retries += 1
+                    yield adapter._enrich(AgentMessage.status(
+                        session_id=session_id,
+                        content="检测到模型重复输出，正在尝试其他执行路径。",
+                        save=False,
+                    ), track_step=False)
+                    stream_input = {"messages": [build_repetition_recovery_message()]}
+                    continue
+                yield adapter._enrich(AgentMessage.error(
+                    session_id=session_id,
+                    content="模型再次重复输出，已停止本轮执行。此前已完成的工具操作仍保留。",
+                    save=True,
+                ))
+                metrics = await _finalize_tokens("error", error="model_repetition_detected")
+                yield await _yield_run_metrics(metrics)
+                async for msg in _yield_run_end(EndReason.ERROR, metrics["finished_at"]):
+                    yield msg
+                await _maybe_release_sandbox(user_id, session_id, EndReason.ERROR)
                 return
 
             except DeepRunTimeoutError:
@@ -743,13 +790,44 @@ async def _stream(
             ):
                 yield out
 
-    async for item in compiled.astream(
+    guard = ModelTextGuard()
+    stream = compiled.astream(
         stream_input,
         config=config,
         stream_mode=["messages", "updates", "tools", "custom"],
         subgraphs=True,
         version="v2",
-    ):
+    )
+    async with aclosing(stream):
+        async for item in stream:
+            async for output in _process_stream_item(
+                item, guard, adapter, compiled, config, agent_wrapper, store,
+                stop_event, _flush_state_tools,
+            ):
+                yield output
+            if adapter.interrupted:
+                break
+
+    if not adapter.interrupted:
+        async for msg in adapter.finalize_model_segment():
+            async for out in _yield_adapter_messages(
+                msg, adapter, compiled, config, agent_wrapper, store
+            ):
+                yield out
+
+    if not adapter.interrupted:
+        state = await compiled.aget_state(config)
+        async for msg in adapter.build_interrupt_from_state(state):
+            async for out in _yield_adapter_messages(
+                msg, adapter, compiled, config, agent_wrapper, store
+            ):
+                yield out
+
+
+async def _process_stream_item(
+    item, guard, adapter, compiled, config, agent_wrapper, store,
+    stop_event, flush_state_tools,
+) -> AsyncGenerator[dict, None]:
         if stop_event and stop_event.is_set():
             raise asyncio.CancelledError("User stop")
 
@@ -757,6 +835,7 @@ async def _stream(
         mode: str = item["type"]
         namespace: tuple = item["ns"]
         chunk: Any = item["data"]
+        guard.inspect(mode, namespace, chunk)
 
         # 诊断日志：记录每次 astream yield 的 mode 和 chunk 大小
         # from config import get_logger as _runner_get_logger
@@ -820,7 +899,7 @@ async def _stream(
                     msg, adapter, compiled, config, agent_wrapper, store
                 ):
                     yield out
-            continue
+            return
 
         if mode == "custom":
             async for msg in adapter.adapt_custom_event(chunk):
@@ -828,7 +907,7 @@ async def _stream(
                     msg, adapter, compiled, config, agent_wrapper, store
                 ):
                     yield out
-            continue
+            return
 
         async for msg in adapter.adapt_astream_chunk(mode, chunk, namespace=namespace):
             async for out in _yield_adapter_messages(
@@ -844,26 +923,9 @@ async def _stream(
                 yield out
 
         if adapter.interrupted:
-            async for out in _flush_state_tools():
+            async for out in flush_state_tools():
                 yield out
-            break
-
-    if not adapter.interrupted:
-        async for msg in adapter.finalize_model_segment():
-            async for out in _yield_adapter_messages(
-                msg, adapter, compiled, config, agent_wrapper, store
-            ):
-                yield out
-
-    # 流结束后补检 state.interrupts（部分 HITL 场景 updates 模式未捕获）
-    if not adapter.interrupted:
-        state = await compiled.aget_state(config)
-        async for msg in adapter.build_interrupt_from_state(state):
-            async for out in _yield_adapter_messages(
-                msg, adapter, compiled, config, agent_wrapper, store
-            ):
-                yield out
-
+            return
 
 def _publish_agent_message(msg: dict, adapter: DeepEventAdapter) -> None:
     """将 AgentMessage 规范化后发布到内部 EventBus（审计 / 指标处理器消费）。"""
