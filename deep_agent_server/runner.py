@@ -451,7 +451,16 @@ async def run_deep_agent(
             model_name = await deep_storage.get_user_secret(user_id, "llm_model") or ""
         except Exception:
             pass
+        # 本轮生成的 HTML 分享链接（无则不带）：一处解析，run_metrics 推送与
+        # result_summary 落库共用（此前只推 SSE，排查时无法从 DB 核查）
+        html_url = ""
+        try:
+            html_url = await adapter.latest_html_share_url() or ""
+        except Exception:
+            logger.warning(f"[DeepRunner] 解析 HTML 分享链接失败 run={run_id}", exc_info=True)
         summary = {"conversation_id": conversation_id, "token_usage": usage}
+        if html_url:
+            summary["html_url"] = html_url
         await deep_storage.update_agent_run(
             run_id,
             status,
@@ -519,10 +528,11 @@ async def run_deep_agent(
             started_at=run_started_at,
             finished_at=finished_at,
             session_summary=session_summary,
+            html_url=html_url or None,
         )
 
     async def _yield_run_metrics(metrics: dict):
-        """推送 run_metrics（async：需先解析本轮 HTML 分享链接）。"""
+        """推送 run_metrics（html_url 已随 _finalize_tokens 一并解析并落库）。"""
         return _run_metrics_message(
             adapter,
             session_id,
@@ -532,7 +542,7 @@ async def run_deep_agent(
             metrics["token_usage"],
             run_started_at,
             datetime.fromisoformat(metrics["finished_at"]),
-            html_url=await adapter.latest_html_share_url(),
+            html_url=metrics.get("html_url"),
         )
 
     async def _yield_workspace_files_async(finished_at: Optional[str] = None):

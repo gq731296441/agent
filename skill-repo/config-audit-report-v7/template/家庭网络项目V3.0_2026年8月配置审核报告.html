@@ -520,6 +520,22 @@ body {
   display: inline-block;
 }
 
+/* 定义说明（按期关闭数等指标定义） */
+.definition-note {
+  background: #eff6ff;
+  border-left: 4px solid var(--primary-light);
+  border-radius: 6px;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+.definition-note strong {
+  color: var(--primary-color);
+  font-weight: 600;
+}
+
 /* 页脚 */
 .site-footer {
   text-align: center;
@@ -641,6 +657,9 @@ body {
       <!-- 改进任务按期关闭率 -->
       <section class="closure-section">
         <h2 class="section-title">改进任务按期关闭率详情</h2>
+        <div class="definition-note">
+          <strong>按期关闭数</strong>：状态为"已完成"且验收通过日期 ≤ 计划完成日期的改进任务数；<strong>按期关闭率</strong> = 按期关闭数 ÷ 不符合项数 × 100%。
+        </div>
         <div class="closure-card">
           <div class="closure-grid" id="closure-grid">
             <!-- 由JS动态生成 -->
@@ -688,6 +707,12 @@ body {
     <div class="tab-content" id="improvement">
       <section class="table-section">
         <h2 class="section-title" id="tasks-title">改进任务明细</h2>
+        <div class="definition-note">
+          <strong>按期关闭数</strong>：状态为"已完成"且验收通过日期 ≤ 计划完成日期的改进任务数；<strong>按期关闭率</strong> = 按期关闭数 ÷ 不符合项数 × 100%。
+        </div>
+        <div class="definition-note">
+          <strong>是否超期</strong>：①状态为"执行中"或"待验收"，且计划完成日期 &lt; 当前日期 → 超期；②状态为"新建"，且当前时间 - 计划开始日期 &gt; 60天 → 超期；其余情况为未超期。
+        </div>
         <div class="status-summary" id="tasks-status"></div>
         <div class="filter-bar" id="tasks-filter" style="display:none;margin-bottom:16px;">
           <label for="tasks-month-filter">审核月份筛选：</label>
@@ -708,7 +733,9 @@ body {
                 <th>典型问题</th>
                 <th>审核说明</th>
                 <th>改进建议</th>
+                <th>计划开始日期</th>
                 <th>计划完成日期</th>
+                <th>验收通过日期</th>
                 <th>责任人</th>
                 <th>是否超期</th>
               </tr>
@@ -736,7 +763,7 @@ const REPORT_DATA = {"stats": {"total": 28, "notPass": 5, "notInvolved": 0, "pas
 //   taskDist: [{label, value, percentage, color}],
 //   closure: { month, notPassCount, onTimeCount, onTimeRate },
 //   checklist: [{标识,所属项目,审核分类,研发活动,审核项,检查要点,审核时机,审核依据,审核结果,典型问题,改进建议}],
-//   tasks: [{标识,状态,标题,所属项目,所属中心,研发活动,审核项,典型问题,审核说明,改进建议,计划开始日期,计划完成日期,责任人,是否超期}]
+//   tasks: [{标识,状态,标题,所属项目,所属中心,研发活动,审核项,典型问题,审核说明,改进建议,计划开始日期,计划完成日期,验收通过日期,责任人,是否超期}]
 // }
 
 document.addEventListener('DOMContentLoaded', function () {
@@ -907,9 +934,14 @@ function renderClosure(closure) {
     items.forEach(item => {
       const cls = item.highlight ? 'closure-item highlight' : 'closure-item';
       const valCls = item.rate ? 'closure-value rate' : 'closure-value';
+      let val = item.value;
+      // 按期关闭率：数值加%，NA不加
+      if (item.rate && val !== 'NA' && val !== null && val !== undefined && val !== '') {
+        val = val + '%';
+      }
       html += '<div class="' + cls.trim() + '">' +
         '<div class="closure-label">' + item.label + '</div>' +
-        '<div class="' + valCls.trim() + '">' + item.value + '</div>' +
+        '<div class="' + valCls.trim() + '">' + val + '</div>' +
         '</div>';
     });
     grid.innerHTML = html;
@@ -1031,7 +1063,7 @@ function renderChecklistTable(data) {
 function renderTasksTable(data) {
   const tbody = document.getElementById('tasks-tbody');
   if (!data || data.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#94a3b8;padding:24px;">暂无数据</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;color:#94a3b8;padding:24px;">暂无数据</td></tr>';
     return;
   }
   let html = '';
@@ -1046,7 +1078,9 @@ function renderTasksTable(data) {
       '<td>' + esc(r['典型问题']) + '</td>' +
       '<td>' + esc(stripHtml(r['审核说明'])) + '</td>' +
       '<td>' + esc(r['改进建议']) + '</td>' +
+      '<td>' + esc(r['计划开始日期']) + '</td>' +
       '<td>' + esc(r['计划完成日期']) + '</td>' +
+      '<td>' + esc(r['验收通过日期']) + '</td>' +
       '<td>' + esc(r['责任人']) + '</td>' +
       '<td>' + esc(r['是否超期']) + '</td>' +
       '</tr>';

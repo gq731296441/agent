@@ -4,6 +4,7 @@ description: 研发云工作项技能（用户常称 rdc、研发云、RDCloud�
 version: 1.3.0
 generator: co-skill-creator
 tags: ["研发提效", "数据智能"]
+author: platform
 ---
 # Studio 研发云工作项技能
 RDC 工作项技能提供工作项的创建、更新、查询、详情、导出、统计，以及**工作项评论**（查询评论树、添加评论、回复评论）；**邮件与 iCenter 消息仅在与上述业务联动时触发**，禁止在无创建/更新/查询/导出/统计/查看详情意图时直接调用发送脚本。

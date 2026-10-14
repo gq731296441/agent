@@ -240,7 +240,7 @@ def build_report_data(checklist, tasks):
         })
     checklist_rows.sort(key=result_sort_key)
 
-    # 改进任务明细（15列，含审核月份），按状态权重 + 审核月份排序
+    # 改进任务明细（16列，含审核月份），按状态权重 + 审核月份排序
     task_rows = []
     for t in tasks:
         task_rows.append({
@@ -253,7 +253,9 @@ def build_report_data(checklist, tasks):
             "典型问题": t.get("典型问题"),
             "审核说明": strip_html(t.get("审核说明")),
             "改进建议": t.get("改进建议"),
+            "计划开始日期": format_date(t.get("计划开始日期")),
             "计划完成日期": format_date(t.get("计划完成日期")),
+            "验收通过日期": format_date(t.get("验收通过日期")),
             "责任人": t.get("责任人"),
             "是否超期": t.get("是否超期", "未超期"),
         })

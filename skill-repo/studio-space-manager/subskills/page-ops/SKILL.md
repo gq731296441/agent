@@ -6,8 +6,9 @@ description: >-
   子页面与页面层级结构查询;空间最新更新页面列表;
   附件识别清单、批量下载到指定目录、批量上传(单文件 <=100MB,超限本地拦截并提示)、docId 单文档下载;
   **附件上传到表格单元格**(`attachment_to_table_cell.py`,一键上传并插入指定单元格);
-  **图片上传并插入页面**(`upload_image_to_page.py`,上传图片到文件服务并插入页面正文（支持页面末尾、指定章节、表格单元格）)。
-version: 1.4.0
+  **图片上传并插入页面**(`upload_image_to_page.py`,上传图片到文件服务并插入页面正文（支持页面末尾、指定章节、表格单元格）);
+  **HTML 包含宏**(`studio_space_html_include_macro.py`,上传本地 HTML 文件,以 HtmlIncludeMacro 宏形式渲染到页面正文/章节,避免复杂样式被 xss 过滤破坏)。
+version: 1.5.0
 ---
 # 页面操作子技能
 
@@ -35,6 +36,7 @@ version: 1.4.0
 - `scripts/studio_space_attachment.py`
 - `scripts/attachment_to_table_cell.py`(附件上传并挂载到表格单元格)
 - `scripts/upload_image_to_page.py`(图片上传并插入页面，支持多种插入位置)
+- `scripts/studio_space_html_include_macro.py`(**HTML 包含宏**:上传本地 HTML 文件并渲染到页面)
 
 ## 3. 常用触发词
 
@@ -46,6 +48,7 @@ version: 1.4.0
 - 附件:附件、下载附件、附件清单、上传附件、文档附件、docId
 - 附件上传到表格:附件上传到表格、把附件放到表格里、表格中插入附件
 - 图片:上传图片、插入图片、将图片添加到页面、上传并插入图片
+- **HTML 包含宏**:HTML包含宏、上传html、html渲染、复杂页面、动态报表、html宏
 
 ## 4. 意图识别与命令路由(核心)
 
@@ -77,6 +80,7 @@ version: 1.4.0
 | 附件上传 | `spaceId` + `upload-file` | `pageId` / `json` / `--no-attach-to-page` | `studio_space_attachment.py` | 单文件上限 100MB;可重复 `--upload-file` 批量上传;默认自动挂载到页面正文末尾
 | 附件上传到表格单元格 | `page-url` 或 `spaceId+pageId` + `block-id` + `row-index` + `col-index` + `upload-file` | `json-output` | `attachment_to_table_cell.py` | 将附件插入到表格指定单元格;行列索引从 0 开始;多个文件依次填充列;自动清理页面底部重复附件段落 |
 | 图片上传并插入页面 | `space-id` + (`page-id` 或 `page-url`) + `image-path` (可重复) + (插入模式参数: `--insert-mode` + `--chapter-name` 或 `--block-id` + `--row-index` + `--col-index`) | `alt`、`--alt-prefix`、`--no-attach`、`--json`、`--insert-mode`、`--chapter-name`、`--block-id`、`--row-index`、`--col-index` | `upload_image_to_page.py` | 批量上传图片，支持插入位置：页面末尾（默认）、指定章节（--insert-mode chapter --chapter-name）、表格单元格（--insert-mode table-cell --block-id --row-index --col-index）。使用 --no-attach 仅上传不插入；alt 通过 --alt 或 --alt-prefix 控制。 |
+| **HTML 包含宏** | `url` 或 `spaceId+pageId` + `html-file` | `--attach-chapter-name` / `--attach-position` / `--attach-mode` / `--json` | `studio_space_html_include_macro.py` | 上传本地 HTML 文件，以 HtmlIncludeMacro 宏形式渲染到页面（整页末尾/章节），上传后自动回写。macroId/blockId/fileKey 自动生成。单文件 ≤100MB；单页宏上限 10 个。复杂样式 HTML 请用此方式，避免直写被 xss 过滤破坏 |
 
 ### 4.3 参数提取规则
 
@@ -125,6 +129,14 @@ version: 1.4.0
   "请提供新正文(或本地 md 文件路径);章节编辑还需章节标题。"
 - 表格单元格缺 blockId:
   "请提供表格所在 block 的 blockId,或先通过其它方式列出页面 block 后再更新。"
+- HTML 包含宏缺 html 文件:
+  "请提供本地 HTML 文件路径（--html-file），以及目标页面 URL 或 spaceId+pageId。"
+- HTML 包含宏缺页面定位:
+  "请提供页面链接（用于解析 spaceId+pageId），或直接给 --space-id 与 --page-id。"
+- HTML 包含宏缺章节定位:
+  "请使用 --attach-chapter-name 指定目标章节标题（可加 --attach-position 指定同名章节第几个）。"
+- HTML 包含宏超限:
+  "单页 HTML 包含宏上限 10 个，当前页面已达到上限，请先删除部分宏或换页。"
 
 ## 5. 页面编辑子技能(专表)
 
@@ -215,6 +227,17 @@ python3 scripts/upload_image_to_page.py \
 
 # docId 单文档下载
 python3 scripts/studio_space_attachment.py --doc-id "{docId}"
+
+# 🆕 HTML 包含宏：上传本地 html 并以宏形式渲染到页面末尾（推荐，macroId/blockId/fileKey 自动生成）
+python3 scripts/studio_space_html_include_macro.py \
+  --url "https://i.zte.com.cn/#/shared/{spaceId}/wiki/page/{pageId}/view" \
+  --html-file "/path/to/report.html"
+
+# 🆕 HTML 包含宏：挂载到指定章节（自动生成；同名章节多个可用 --attach-position 指定第几个）
+python3 scripts/studio_space_html_include_macro.py \
+  --space-id "{spaceId}" --page-id "{pageId}" \
+  --html-file "/path/to/report.html" \
+  --attach-chapter-name "1. 背景" --attach-mode append
 ```
 
 ## 7. 约束与澄清
@@ -232,3 +255,10 @@ python3 scripts/studio_space_attachment.py --doc-id "{docId}"
 - 图片上传限制:单文件必须 <=10MB;仅支持常见图片格式(PNG、JPG、JPEG、GIF、WEBP 等)。
 - 图片上传默认自动将图片链接追加到页面正文末尾;若仅需上传,显式加 `--no-attach`。
 - 图片 URL 通过 `uploadImage` 接口返回的 `path` 拼接生成:`https://icenterapi.zte.com.cn/{path}`。
+- **HTML 包含宏**(`studio_space_html_include_macro.py`):将复杂样式/交互 HTML 以 HtmlIncludeMacro 宏渲染到页面,避免直写被 xss 过滤破坏(官方推荐方案)。
+  - **流程**:上传本地 HTML(`--html-file`)→ 自动生成 macroId/blockId → 构造宏片段 → 自动回写页面(整页末尾或指定章节),无需额外参数;macroId/blockId/fileKey 均由脚本自动生成,不支持手动指定。
+  - **上传接口**:`POST {SPACE_PLUGIN}/file/upload/html?docId={pageId}&spaceId={spaceId}&macroId={macroId}`,表单字段 `htmlFile`(multipart/form-data);单文件 ≤100MB,脚本请求前本地校验。
+  - **渲染地址** = `https://icenterapi.zte.com.cn/zte-rdcloud-space-plugin/` + 接口返回的 `bo.urlPath`(NAS 直链);宏属性取自 `bo.nasFileName`/`bo.udmFileKey`/`bo.blockId`;未返回 urlPath 时兜底取返回的完整 http 地址。
+  - **宏结构**(2.0 空间真实格式):`<div class="ze-macro" macro-key="HtmlIncludeMacro" macro-id=... block-id=... m-mode="upload" m-file-name="{nasFileName}" m-url="{base+urlPath}" m-file-key=...>...<div class="ze-macro-body">...</div></div>`;回写走 `updateContent`(MCP 同款)。
+  - **挂载位置**:整页末尾(默认)或指定章节(`--attach-chapter-name` + `--attach-position`,同名章节从 1 起;`--attach-mode` 可选 `append`/`prepend`)。
+  - **平台限制**:单页 HTML 包含宏上限 10 个,回写前统计已存在宏,达到上限即阻断提示;宏计数兼容 2.0(`macro-key`)与 1.0(`data-macro-key`)。

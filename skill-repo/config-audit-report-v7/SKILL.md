@@ -1,9 +1,12 @@
 ---
 name: config-audit-report
 description: 生成配置审核报告（Config Audit Report）。当用户提到"配置审核报告"、"项目配置审核报告"、"配置审核"、"配置管理领域检查单"、"改进计划/改进任务"等关键词，或需要查询配置管理领域检查单数据、改进任务详情并生成配置审核统计与明细报告时，使用本技能。
-version: 1.2.0
+version: 1.5.0
 author: 00294192
 changes: |
+  - v1.5.0: 修复改进计划表格"验收通过日期"显示为空的问题（build_report.py 的 task_rows 缺少该字段）；改进计划TAB页新增"计划开始日期"字段（取 createdTime，放在"改进建议"与"计划完成日期"之间）；改进计划TAB页新增"是否超期"规则描述
+  - v1.4.0: 改进计划TAB页表格新增"验收通过日期"字段（取接口返回的 passedTimeOfAcceptance），放在"计划完成日期"与"责任人"之间
+  - v1.3.0: 优化报告展示：①在"概览"页-改进任务按期关闭率详情、改进计划页表格上方均添加"按期关闭数"定义说明；②按期关闭率在单月数据时也显示百分比格式（如50%），与多月数据展示保持一致
   - v1.2.0: 新增 scripts/create_icenter_page_with_macro.py：创建 iCenter 页面时同步通过 HTML 宏（HtmlIncludeMacro）嵌入报告链接，一步完成建页+嵌入
   - v1.1.0: 优化报告功能：表格增加"审核月份"列；按单据状态+审核月排序；多月份时增加下拉筛选；TAB标题显示状态统计；按期关闭率按月+总计展示；每次生成报告均重新从接口获取数据
   - v1.0.0: 初始版本，按 OpenClaw 标准模板重构；接口文档迁移至 references/api_docs.md
@@ -28,7 +31,7 @@ tags: ["研发提效"]
 
 ### 运行环境约定（智能体平台）
 
-- 本技能在沙箱容器内以**只读**方式挂载在 `/mnt/skills/config-audit-report-v7/`，`execute` 命令中的脚本、模板路径均使用该前缀；用文件工具（`read_file` 等）读取技能文件时用 `/skills/config-audit-report-v7/`。
+- 本技能在沙箱容器内以**只读**方式挂载在 `/mnt/skills/config-audit-report-v8/`，`execute` 命令中的脚本、模板路径均使用该前缀；用文件工具（`read_file` 等）读取技能文件时用 `/skills/config-audit-report-v8/`。
 - `/workspace/` 为当前会话工作区（可读写），所有产物统一写入 `/workspace/output/`。
 - 工号与认证 Token 由平台注入到每次命令执行的环境变量 `coclaw_empno` / `coclaw_token` 中，命令里**直接引用变量**（如 `--emp-no "$coclaw_empno"`），不要向用户索要，也不要写死具体值。
 
@@ -56,7 +59,7 @@ tags: ["研发提效"]
 推荐使用技能自带的 Python 脚本 `scripts/fetch_config_audit.py` 获取数据，脚本会自动处理分页遍历逻辑。
 
 ```bash
-python3 /mnt/skills/config-audit-report-v7/scripts/fetch_config_audit.py \
+python3 /mnt/skills/config-audit-report-v8/scripts/fetch_config_audit.py \
     --emp-no "$coclaw_empno" \
     --auth-value "$coclaw_token" \
     --start-month 2026-08 \
@@ -81,7 +84,7 @@ python3 /mnt/skills/config-audit-report-v7/scripts/fetch_config_audit.py \
 - `config_audit_tasks.json`：改进任务详情数据
 - `config_audit_overview.json`：概览统计数据
 
-> **⚠️ 输出目录约定：** 所有生成的文件（数据 JSON、HTML 报告）**必须输出到技能目录之外**，默认统一输出到 `/workspace/output/` 目录。**禁止**将生成文件写入 `/mnt/skills/config-audit-report-v7/` 技能目录内（该目录为只读挂载，仅存放技能代码、模板与文档）。
+> **⚠️ 输出目录约定：** 所有生成的文件（数据 JSON、HTML 报告）**必须输出到技能目录之外**，默认统一输出到 `/workspace/output/` 目录。**禁止**将生成文件写入 `/mnt/skills/config-audit-report-v8/` 技能目录内（该目录为只读挂载，仅存放技能代码、模板与文档）。
 
 ### 第三步：生成报告
 
@@ -92,8 +95,8 @@ python3 /mnt/skills/config-audit-report-v7/scripts/fetch_config_audit.py \
 推荐使用 `scripts/build_report.py`（基于 `template/` 下的独立 HTML 模板生成）：
 
 ```bash
-python3 /mnt/skills/config-audit-report-v7/scripts/build_report.py \
-    --template "/mnt/skills/config-audit-report-v7/template/家庭网络项目V3.0_2026年8月配置审核报告.html" \
+python3 /mnt/skills/config-audit-report-v8/scripts/build_report.py \
+    --template "/mnt/skills/config-audit-report-v8/template/家庭网络项目V3.0_2026年8月配置审核报告.html" \
     --project-name "家庭网络项目V3.0" \
     --audit-month "2026-08" \
     --checklist /workspace/output/config_audit_checklist.json \
@@ -104,7 +107,7 @@ python3 /mnt/skills/config-audit-report-v7/scripts/build_report.py \
 报告结构说明：
 - **TAB 1 概览**：概览指标（审核记录总数、不通过/不涉及/通过项数、不符合项占比）、审核条目按研发活动分布、改进任务按研发活动分布、改进任务按期关闭率（按月，多个月份时含总计行）。
 - **TAB 2 配置管理领域检查单**：接口一明细表格（12 列，含"审核月份"列），按审核结果权重（不通过→通过→部分通过→其他）+ 审核月份升序排序；标题显示"总计：xx条，XX状态：XX条"；多个月份时提供月份下拉筛选。
-- **TAB 3 改进计划**：接口二明细表格（15 列，含"审核月份"列），按状态权重（新建→执行中→待人工验收→已完成→待确认拒绝→已确认拒绝）+ 审核月份升序排序；标题显示"总计：xx条，XX状态：XX条"；多个月份时提供月份下拉筛选。
+- **TAB 3 改进计划**：接口二明细表格（17 列，含"审核月份"列），按状态权重（新建→执行中→待人工验收→已完成→待确认拒绝→已确认拒绝）+ 审核月份升序排序；标题显示"总计：xx条，XX状态：XX条"；多个月份时提供月份下拉筛选。
 
 ### 第四步：创建 iCenter 页面并同步嵌入报告（可选）
 
@@ -113,7 +116,7 @@ python3 /mnt/skills/config-audit-report-v7/scripts/build_report.py \
 > **原理说明：** iCenter 的"HTML 宏"本质上是页面正文 HTML 中的一段宏标记（`<div macro-key="HtmlIncludeMacro" m-url="<链接>" ...>`）。因此创建页面时直接把宏标记作为页面正文（contentBody）传入即可，无需先建页再二次回写。
 
 ```bash
-python3 /mnt/skills/config-audit-report-v7/scripts/create_icenter_page_with_macro.py \
+python3 /mnt/skills/config-audit-report-v8/scripts/create_icenter_page_with_macro.py \
     --space-id 15c203c3742d49698037d6ced74a09ed \
     --parent-id 6b545da5b17f11f18528c70fe21883a3 \
     --title "ZXUPN CSR V6.2_2026年7月配置审核报告" \
@@ -137,7 +140,7 @@ python3 /mnt/skills/config-audit-report-v7/scripts/create_icenter_page_with_macr
 
 > **⚠️ URL 取值规则：** `--url` 必须传入**本轮任务实际生成的 HTML 报告分享链接**（或用户明确指定的目标 URL），**禁止**使用示例占位链接或写死的地址。
 
-### 报告功能说明（v1.1.0）
+### 报告功能说明（v1.3.0）
 
 1. **审核月份列**：检查单与改进计划表格最左侧新增"审核月份"列，取接口返回的 `standardAuditMonth` 字段。
 2. **排序规则**：
@@ -145,8 +148,12 @@ python3 /mnt/skills/config-audit-report-v7/scripts/create_icenter_page_with_macr
    - 改进计划：按状态排序（新建 → 执行中 → 待人工验收 → 已完成 → 待确认拒绝 → 已确认拒绝），同状态内按审核月份升序。
 3. **月份下拉筛选**：当数据涉及多个月份时，检查单与改进计划 TAB 页顶部显示月份下拉框，可选"全部月份"或具体月份，月份由小到大排列。
 4. **TAB 标题状态统计**：标题下方另起一行显示状态统计摘要，用不同颜色小圆点 + 状态名 + 冒号 + 单据数表示（如"● 总计：76　● 不通过：15　● 通过：32"），字号与"审核月份筛选"一致。
-5. **按期关闭率**：当数据范围涉及多个月份时，按月统计每个月份的不符合项数、按期关闭数、按期关闭率（按月份从小到大排列），并增加"总计"行；"按期关闭率"列数值带"%"（"NA"除外）。
-6. **标识超链接**：配置管理领域检查单与改进计划 TAB 页的"标识"列记录添加超链接，链接地址为 `https://rdcloud.zte.com.cn/uportal/rd-uportal/workspaces/YXCA/apps/wim/allWorkItems/{标识}`（如 `YXCA-68566` → `.../allWorkItems/YXCA-68566`），点击在新标签页打开。
+5. **按期关闭率**：当数据范围涉及多个月份时，按月统计每个月份的不符合项数、按期关闭数、按期关闭率（按月份从小到大排列），并增加"总计"行；"按期关闭率"列数值带"%"（"NA"除外）。**单月数据时**，按期关闭率同样显示为百分比格式（如"50%"），与多月数据展示保持一致。
+6. **按期关闭数定义说明**：在"概览"页-改进任务按期关闭率详情区域、以及"改进计划"页表格上方，均添加定义说明："**按期关闭数**：状态为'已完成'且验收通过日期 ≤ 计划完成日期的改进任务数；**按期关闭率** = 按期关闭数 ÷ 不符合项数 × 100%。"
+7. **标识超链接**：配置管理领域检查单与改进计划 TAB 页的"标识"列记录添加超链接，链接地址为 `https://rdcloud.zte.com.cn/uportal/rd-uportal/workspaces/YXCA/apps/wim/allWorkItems/{标识}`（如 `YXCA-68566` → `.../allWorkItems/YXCA-68566`），点击在新标签页打开。
+8. **验收通过日期**：改进计划 TAB 页表格新增"验收通过日期"字段（取接口返回的 `passedTimeOfAcceptance`），放在"计划完成日期"与"责任人"之间。
+9. **计划开始日期**：改进计划 TAB 页表格新增"计划开始日期"字段（取接口返回的 `createdTime`），放在"改进建议"与"计划完成日期"之间。
+10. **是否超期规则描述**：改进计划 TAB 页表格上方新增"是否超期"规则说明："①状态为'执行中'或'待验收'，且计划完成日期 < 当前日期 → 超期；②状态为'新建'，且当前时间 - 计划开始日期 > 60天 → 超期；其余情况为未超期。"
 
 ## 参考文档
 - [接口文档与字段定义](references/api_docs.md)：两个接口的调用方式、CURL 示例、输出字段定义、"是否超期"计算逻辑、报告生成规则。
