@@ -1841,12 +1841,14 @@ async def set_user_fast_llm_config(
 
 
 async def resolve_user_aux_llm_credentials(user_id: str) -> tuple[str, str, str]:
-    """快速模型已完整配置则用 fast，否则回退主模型。"""
-    main_model = await get_user_secret(user_id, "llm_model")
-    main_base = await get_user_secret(user_id, "llm_base_url")
-    main_key = await get_user_secret(user_id, "llm_api_key")
-    if not main_model or not main_base or not main_key:
+    """快速模型已完整配置则用 fast，否则回退当前生效主模型（user_llm_profiles）。"""
+    await ensure_user_llm_profile(user_id)
+    profile = await get_active_user_llm_profile(user_id)
+    if not profile or not profile["model"] or not profile["base_url"] or not profile["api_key"]:
         raise ValueError("请先配置主模型 API Key 与 Base URL")
+    main_model = profile["model"]
+    main_base = profile["base_url"]
+    main_key = profile["api_key"]
 
     fast_model = await get_user_secret(user_id, "llm_fast_model")
     fast_base = await get_user_secret(user_id, "llm_fast_base_url")
@@ -1854,6 +1856,192 @@ async def resolve_user_aux_llm_credentials(user_id: str) -> tuple[str, str, str]
     if fast_model and fast_base and fast_key:
         return fast_model.strip(), fast_base.strip(), fast_key.strip()
     return main_model.strip(), main_base.strip(), main_key.strip()
+
+
+# ==================== User LLM profiles ====================
+
+async def set_user_llm_active_profile(
+    user_id: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+) -> None:
+    """将 (model, base_url) 组合设为当前生效配置，取消该用户其他组合的 active。
+
+    组合已存在时保留旧 api_key（api_key 为空）；新组合写入 api_key。
+    """
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE user_llm_profiles SET is_active = FALSE WHERE user_id = $1",
+            user_id,
+        )
+        await conn.execute(
+            """
+            INSERT INTO user_llm_profiles (user_id, model, base_url, api_key, is_active)
+            VALUES ($1, $2, $3, $4, TRUE)
+            ON CONFLICT (user_id, model, base_url) DO UPDATE SET
+                is_active = TRUE,
+                api_key = CASE WHEN EXCLUDED.api_key <> '' THEN EXCLUDED.api_key
+                               ELSE user_llm_profiles.api_key END,
+                updated_at = now()
+            """,
+            user_id,
+            (model or "").strip(),
+            (base_url or "").strip(),
+            (api_key or "").strip(),
+        )
+
+
+async def get_active_user_llm_profile(user_id: str) -> Optional[dict]:
+    """返回当前生效组合 {model, base_url, api_key}；无 active 返回 None。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT model, base_url, api_key
+            FROM user_llm_profiles
+            WHERE user_id = $1 AND is_active = TRUE
+            LIMIT 1
+            """,
+            user_id,
+        )
+    if not row:
+        return None
+    return {"model": row["model"], "base_url": row["base_url"], "api_key": row["api_key"]}
+
+
+async def get_user_llm_history(user_id: str) -> dict:
+    """返回用户全部配置组合的历史数据（供配置页展示与自由组合判断）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT model, base_url, api_key, is_active
+            FROM user_llm_profiles
+            WHERE user_id = $1
+            ORDER BY updated_at DESC, id DESC
+            """,
+            user_id,
+        )
+    models: List[str] = []
+    base_urls: List[str] = []
+    combo_has_key: Dict[str, bool] = {}
+    active = None
+    active_key_masked = ""
+    active_has_key = False
+    for r in rows:
+        m = r["model"]
+        b = r["base_url"]
+        if m not in models:
+            models.append(m)
+        if b not in base_urls:
+            base_urls.append(b)
+        combo_has_key[f"{m}|{b}"] = bool(r["api_key"])
+        if r["is_active"] and active is None:
+            active = {"model": m, "base_url": b}
+            active_has_key = bool(r["api_key"])
+            if r["api_key"]:
+                active_key_masked = mask_secret_value(r["api_key"])
+    return {
+        "models": models,
+        "base_urls": base_urls,
+        "active": active,
+        "api_key_masked": active_key_masked,
+        "has_api_key": active_has_key,
+        "combo_has_key": combo_has_key,
+        "configured": bool(active and active_has_key),
+    }
+
+
+async def get_user_llm_combo_key(user_id: str, model: str, base_url: str) -> str:
+    """返回指定 (model, base_url) 组合已存的 api_key；未存返回空串。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT api_key FROM user_llm_profiles
+            WHERE user_id = $1 AND model = $2 AND base_url = $3
+            LIMIT 1
+            """,
+            user_id,
+            model,
+            base_url,
+        )
+    if not row:
+        return ""
+    return row["api_key"] or ""
+
+
+async def delete_user_llm_value(user_id: str, value_type: str, value: str) -> None:
+    """删除引用到某历史 model 或 base_url 的所有配置组合。
+
+    若删除了 active 行，将剩余组合中最近更新的一个设为 active；无剩余则 active 置空。
+    """
+    if value_type not in ("model", "base_url"):
+        raise ValueError(f"value_type 必须是 model 或 base_url，收到: {value_type}")
+    column = "model" if value_type == "model" else "base_url"
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"DELETE FROM user_llm_profiles WHERE user_id = $1 AND {column} = $2",
+            user_id,
+            value,
+        )
+        row = await conn.fetchrow(
+            """
+            SELECT COUNT(*) AS c,
+                   COALESCE(MAX(CASE WHEN is_active THEN 1 ELSE 0 END), 0) AS has_active
+            FROM user_llm_profiles
+            WHERE user_id = $1
+            """,
+            user_id,
+        )
+        if row and row["c"] > 0 and not row["has_active"]:
+            await conn.execute(
+                """
+                UPDATE user_llm_profiles SET is_active = TRUE
+                WHERE user_id = $1 AND id = (
+                    SELECT id FROM user_llm_profiles
+                    WHERE user_id = $1
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT 1
+                )
+                """,
+                user_id,
+            )
+
+
+async def ensure_user_llm_profile(user_id: str) -> None:
+    """惰性幂等兜底：profiles 为空且旧 user_secrets 有主模型时迁移为 active 组合。
+
+    用 ON CONFLICT DO NOTHING 保证并发安全；所有运行时读取点与配置接口统一调用。
+    """
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) AS c FROM user_llm_profiles WHERE user_id = $1",
+            user_id,
+        )
+        if row and row["c"] > 0:
+            return
+    old_model = (await get_user_secret(user_id, "llm_model") or "").strip()
+    old_base = (await get_user_secret(user_id, "llm_base_url") or "").strip()
+    old_key = (await get_user_secret(user_id, "llm_api_key") or "").strip()
+    if not old_model or not old_base or not old_key:
+        return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_llm_profiles (user_id, model, base_url, api_key, is_active)
+            VALUES ($1, $2, $3, $4, TRUE)
+            ON CONFLICT (user_id, model, base_url) DO NOTHING
+            """,
+            user_id,
+            old_model,
+            old_base,
+            old_key,
+        )
 
 
 # ==================== Subscriptions ====================

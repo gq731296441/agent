@@ -448,7 +448,8 @@ async def run_deep_agent(
         finished_at = datetime.now(timezone.utc)
         model_name = ""
         try:
-            model_name = await deep_storage.get_user_secret(user_id, "llm_model") or ""
+            profile = await deep_storage.get_active_user_llm_profile(user_id) or {}
+            model_name = profile.get("model") or ""
         except Exception:
             pass
         # 本轮生成的 HTML 分享链接（无则不带）：一处解析，run_metrics 推送与

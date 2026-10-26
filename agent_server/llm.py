@@ -243,16 +243,19 @@ async def create_title_llm_for_user(user_id: str):
 
 
 async def create_agent_llm_for_user(user_id: str, agent_kind: str = "default"):
-    """默认与订阅 Agent 均使用用户界面配置的 user_secrets。"""
+    """默认与订阅 Agent 均使用用户当前生效的 LLM 配置（user_llm_profiles）。"""
     from db import deep_storage
 
     _ = agent_kind  # 保留参数供调用方区分会话类型；LLM 来源统一
-    model = await deep_storage.get_user_secret(user_id, "llm_model")
-    base_url = await deep_storage.get_user_secret(user_id, "llm_base_url")
-    api_key = await deep_storage.get_user_secret(user_id, "llm_api_key")
-    if not model or not base_url or not api_key:
+    await deep_storage.ensure_user_llm_profile(user_id)
+    profile = await deep_storage.get_active_user_llm_profile(user_id)
+    if not profile or not profile["model"] or not profile["base_url"] or not profile["api_key"]:
         raise ValueError("请先配置模型 API Key 与 Base URL")
-    return create_llm_from_config(model=model, base_url=base_url, api_key=api_key)
+    return create_llm_from_config(
+        model=profile["model"],
+        base_url=profile["base_url"],
+        api_key=profile["api_key"],
+    )
 
 
 def llm_config_fingerprint(model: str, base_url: str) -> str:

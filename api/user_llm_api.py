@@ -1,4 +1,9 @@
-"""用户级 LLM 配置 API。"""
+"""用户级 LLM 配置 API。
+
+主模型配置支持多组合历史记忆与自由切换，存储于 user_llm_profiles 表：
+- 每用户可有多个 (model, base_url, api_key) 组合，其中至多一个为 active（当前生效）
+- 快速模型（fast）仍走旧 user_secrets 的 llm_fast_*，逻辑保持不变
+"""
 
 import asyncio
 from typing import Literal, Optional
@@ -36,7 +41,7 @@ class UserLlmTestBody(BaseModel):
 
     支持两种模式：
     - 传完整 model + base_url + api_key：直接测试，无需事先保存
-    - 不传或部分传：从 DB 已保存配置回退
+    - 不传或部分传：从用户已保存的组合回退（按请求的 model+base_url 查 key）
     """
     target: Literal["main", "fast"] = "main"
     model: Optional[str] = None
@@ -44,11 +49,17 @@ class UserLlmTestBody(BaseModel):
     api_key: Optional[str] = Field(default=None, description="API Key；留空则从 DB 读取已保存 Key")
 
 
+class UserLlmDeleteBody(BaseModel):
+    """删除单条历史值（级联删除引用它的所有配置组合）。"""
+    type: Literal["model", "base_url"] = Field(..., description="删除类型")
+    value: str = Field(..., description="要删除的历史值")
+
+
 async def _resolve_test_credentials(user_id: str, body: UserLlmTestBody):
     """解析测试凭证。
 
     优先使用 body 传入的完整凭证（支持未保存时测试）；
-    body 未传则从 DB 已保存配置回退。
+    body 未传则从用户已保存的组合回退（主模型按请求组合查 key）。
     """
     body_model = (body.model or "").strip()
     body_base_url = (body.base_url or "").strip()
@@ -58,28 +69,40 @@ async def _resolve_test_credentials(user_id: str, body: UserLlmTestBody):
     if body_model and body_base_url and body_api_key:
         return body_model, body_base_url, body_api_key
 
-    # 回退到 DB 已保存配置
-    stored = await deep_storage.get_user_llm_config(user_id)
     if body.target == "fast":
+        # fast 逻辑保持旧行为：从 user_secrets 的 llm_fast_* 读取
+        stored = await deep_storage.get_user_llm_config(user_id)
         fast = stored.get("fast") or {}
         model = body_model or fast.get("model") or ""
         base_url = body_base_url or fast.get("base_url") or ""
         if fast.get("configured"):
             api_key = await deep_storage.get_user_secret(user_id, "llm_fast_api_key") or ""
         else:
-            model = body_model or stored.get("model") or ""
-            base_url = body_base_url or stored.get("base_url") or ""
-            api_key = await deep_storage.get_user_secret(user_id, "llm_api_key") or ""
+            # fast 未配置时回退主模型
+            profile = await deep_storage.get_active_user_llm_profile(user_id) or {}
+            model = body_model or profile.get("model") or ""
+            base_url = body_base_url or profile.get("base_url") or ""
+            api_key = await deep_storage.get_user_llm_combo_key(
+                user_id, model, base_url
+            ) or ""
     else:
-        model = body_model or stored.get("model") or ""
-        base_url = body_base_url or stored.get("base_url") or ""
-        api_key = await deep_storage.get_user_secret(user_id, "llm_api_key") or ""
+        model = body_model
+        base_url = body_base_url
+        if not model or not base_url:
+            # 未指定组合时回退当前生效组合
+            profile = await deep_storage.get_active_user_llm_profile(user_id) or {}
+            model = body_model or profile.get("model") or ""
+            base_url = body_base_url or profile.get("base_url") or ""
+        api_key = await deep_storage.get_user_llm_combo_key(
+            user_id, model, base_url
+        ) or ""
     return model.strip(), base_url.strip(), api_key.strip()
 
 
 @router.get("/llm-config", response_model=ApiResponse)
 async def get_llm_config(user_id: str = Query(...)):
-    data = await deep_storage.get_user_llm_config(user_id)
+    await deep_storage.ensure_user_llm_profile(user_id)
+    data = await deep_storage.get_user_llm_history(user_id)
     return ApiResponse.success(data=data)
 
 
@@ -91,18 +114,22 @@ async def put_llm_config(
     if not body.model.strip() or not body.base_url.strip():
         return ApiResponse.error(msg="主模型 model、base_url 不能为空", code=400)
 
-    existing = await deep_storage.get_user_llm_config(user_id)
     new_key = (body.api_key or "").strip()
-    if not new_key and not existing.get("has_api_key"):
-        return ApiResponse.error(msg="首次配置必须填写主模型 api_key", code=400)
+    history = await deep_storage.get_user_llm_history(user_id)
+    combo_key = f"{body.model.strip()}|{body.base_url.strip()}"
+    combo_exists = history["combo_has_key"].get(combo_key, False)
+    if not new_key and not combo_exists:
+        return ApiResponse.error(msg="首次配置必须填写 api_key", code=400)
 
-    await deep_storage.set_user_llm_config(
+    await deep_storage.set_user_llm_active_profile(
         user_id,
         body.model.strip(),
         body.base_url.strip(),
-        api_key=new_key if new_key else None,
+        api_key=new_key,
     )
 
+    # fast 分支保持旧逻辑（管理 user_secrets 的 llm_fast_*）
+    existing = await deep_storage.get_user_llm_config(user_id)
     if body.clear_fast:
         await deep_storage.clear_user_fast_llm_config(user_id)
     else:
@@ -139,8 +166,20 @@ async def put_llm_config(
                     api_key=fast_key,
                 )
 
-    cfg = await deep_storage.get_user_llm_config(user_id)
-    return ApiResponse.success(data=cfg, msg="已保存")
+    data = await deep_storage.get_user_llm_history(user_id)
+    return ApiResponse.success(data=data, msg="已保存")
+
+
+@router.delete("/llm-config/value", response_model=ApiResponse)
+async def delete_llm_config_value(
+    body: UserLlmDeleteBody = Body(...),
+    user_id: str = Query(...),
+):
+    if not body.value.strip():
+        return ApiResponse.error(msg="value 不能为空", code=400)
+    await deep_storage.delete_user_llm_value(user_id, body.type, body.value.strip())
+    data = await deep_storage.get_user_llm_history(user_id)
+    return ApiResponse.success(data=data, msg="已删除")
 
 
 @router.post("/llm-config/test", response_model=ApiResponse)

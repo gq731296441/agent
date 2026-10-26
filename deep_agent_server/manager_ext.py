@@ -265,8 +265,10 @@ async def create_deep_agent_for_session(
     from agent_server.llm import create_agent_llm_for_user, llm_config_fingerprint
 
     try:
-        model = await deep_storage.get_user_secret(user_id, "llm_model") or ""
-        base_url = await deep_storage.get_user_secret(user_id, "llm_base_url") or ""
+        await deep_storage.ensure_user_llm_profile(user_id)
+        profile = await deep_storage.get_active_user_llm_profile(user_id) or {}
+        model = profile.get("model") or ""
+        base_url = profile.get("base_url") or ""
         llm_fp = llm_config_fingerprint(model, base_url) if model and base_url else "none"
     except Exception:
         llm_fp = "unknown"

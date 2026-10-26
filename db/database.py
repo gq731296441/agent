@@ -148,6 +148,7 @@ class DatabaseManager:
             await self._migrate_deep_columns(conn)
             await self._migrate_subscription_schema(conn)
             await self._init_scheduled_tasks_table(conn)
+            await self._init_user_llm_profiles_table(conn)
 
     async def _migrate_tool_call_logs_columns(self, conn):
         """为 tool_call_logs 添加可观测性扩展列。"""
@@ -895,6 +896,24 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due
             ON scheduled_tasks(is_enabled, next_run_at)
             WHERE is_deleted = FALSE AND is_enabled = TRUE
+        """)
+
+    async def _init_user_llm_profiles_table(self, conn):
+        """初始化 user_llm_profiles 表（用户 LLM 配置组合历史）。"""
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_llm_profiles (
+                id BIGSERIAL PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                model TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                api_key TEXT NOT NULL DEFAULT '',
+                is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                UNIQUE (user_id, model, base_url)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_llm_profiles_user
+            ON user_llm_profiles(user_id);
         """)
 
     async def close(self):

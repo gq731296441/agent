@@ -621,9 +621,8 @@ async def get_session_context_usage(
     resolved_model_name = model_name
     if not resolved_model_name:
         try:
-            resolved_model_name = (
-                await deep_storage.get_user_secret(userId, "llm_model") or ""
-            )
+            profile = await deep_storage.get_active_user_llm_profile(userId) or {}
+            resolved_model_name = profile.get("model") or ""
         except Exception:
             resolved_model_name = ""
 
