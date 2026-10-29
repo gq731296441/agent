@@ -679,72 +679,128 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
     # ==================== 流式路径 ====================
     if stream_mode:
         async def event_generator():
-            """SSE 事件生成器"""
-            try:
-                # 新会话先发送 session_allocated 事件
-                if is_new_session:
-                    allocated_msg = AgentMessage.session_allocated(
-                        session_id=session_id,
-                        content={
-                            "session_id": session_id,
-                            "session_title": session_title,
-                            "agent_id": resolved_agent_id,
-                        }
-                    ).to_frontend_dict()
-                    yield f"data: {json.dumps(allocated_msg, ensure_ascii=False)}\n\n"
+            """SSE 事件生成器。
 
-                async for message in process_agent_stream(
-                    manager_agents=manager_agents,
-                    action=action,
-                    user_id=user_id,
-                    user_token=user_token,
-                    session_id=session_id,
-                    payload=params,
-                    allow_if_missing=is_new_session,
-                    wait_on_queue=True,
-                ):
-                    json_data = json.dumps(message, ensure_ascii=False)
-                    yield f"data: {json_data}\n\n"
+            agent 流在独立的 producer task 中消费，本生成器只负责从队列取帧下发。
+            这样做的目的：
+            1) agent 长时间无输出（大上下文 LLM 思考、长工具调用）时，仍能按
+               固定间隔下发注释帧心跳，避免 nginx proxy_read_timeout（默认 60s）
+               或调用方 httpx read timeout 掐断连接；
+            2) 客户端断开时对 producer 走显式 task.cancel()（producer 不在
+               Starlette 的 anyio cancel scope 内），runner 的优雅收尾
+               （落库 stopped / end / 释放沙箱）仍能执行。
+            """
+            queue: asyncio.Queue = asyncio.Queue(maxsize=256)
 
-                # 延迟标题生成：首轮正常完成后生成并推送（新会话或之前空会话的首条消息）
-                if is_first_message:
-                    logger.info(
-                        f"[Session] 开始延迟标题生成 session={session_id} "
-                        f"is_new={is_new_session} is_first={is_first_message}"
-                    )
-                    from utils.session_utils import deferred_generate_and_update_title
-                    new_title = await deferred_generate_and_update_title(
-                        session_id=session_id,
-                        user_id=user_id,
-                        question=question,
-                    )
-                    if new_title:
-                        title_msg = AgentMessage.session_title_updated(
+            async def _produce():
+                try:
+                    # 新会话先发送 session_allocated 事件
+                    if is_new_session:
+                        allocated_msg = AgentMessage.session_allocated(
                             session_id=session_id,
                             content={
                                 "session_id": session_id,
-                                "session_title": new_title,
+                                "session_title": session_title,
+                                "agent_id": resolved_agent_id,
                             }
                         ).to_frontend_dict()
-                        yield f"data: {json.dumps(title_msg, ensure_ascii=False)}\n\n"
-                    else:
+                        await queue.put(f"data: {json.dumps(allocated_msg, ensure_ascii=False)}\n\n")
+
+                    async for message in process_agent_stream(
+                        manager_agents=manager_agents,
+                        action=action,
+                        user_id=user_id,
+                        user_token=user_token,
+                        session_id=session_id,
+                        payload=params,
+                        allow_if_missing=is_new_session,
+                        wait_on_queue=True,
+                    ):
+                        json_data = json.dumps(message, ensure_ascii=False)
+                        await queue.put(f"data: {json_data}\n\n")
+
+                    # 延迟标题生成：首轮正常完成后生成并推送（新会话或之前空会话的首条消息）。
+                    # get_agent_stream 会吞掉 CancelledError 正常返回，这里用 cancelling()
+                    # 判断本任务是否已被取消（客户端断开），避免白跑一次标题生成 LLM 调用。
+                    task = asyncio.current_task()
+                    if is_first_message and not (task and task.cancelling()):
                         logger.info(
-                            f"[Session] 跳过标题推送（用户已自定义标题） "
-                            f"session={session_id}"
+                            f"[Session] 开始延迟标题生成 session={session_id} "
+                            f"is_new={is_new_session} is_first={is_first_message}"
                         )
+                        from utils.session_utils import deferred_generate_and_update_title
+                        new_title = await deferred_generate_and_update_title(
+                            session_id=session_id,
+                            user_id=user_id,
+                            question=question,
+                        )
+                        if new_title:
+                            title_msg = AgentMessage.session_title_updated(
+                                session_id=session_id,
+                                content={
+                                    "session_id": session_id,
+                                    "session_title": new_title,
+                                }
+                            ).to_frontend_dict()
+                            await queue.put(f"data: {json.dumps(title_msg, ensure_ascii=False)}\n\n")
+                        else:
+                            logger.info(
+                                f"[Session] 跳过标题推送（用户已自定义标题） "
+                                f"session={session_id}"
+                            )
 
-            except Exception as e:
-                error_msg = AgentMessage.error(
-                    session_id=session_id,
-                    content=str(e)
-                ).to_frontend_dict()
-                yield f"data: {json.dumps(error_msg, ensure_ascii=False)}\n\n"
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    error_msg = AgentMessage.error(
+                        session_id=session_id,
+                        content=str(e)
+                    ).to_frontend_dict()
+                    await queue.put(f"data: {json.dumps(error_msg, ensure_ascii=False)}\n\n")
 
-                end_msg = AgentMessage.end(
-                    session_id=session_id,
-                    reason=EndReason.STOP
-                ).to_frontend_dict()
-                yield f"data: {json.dumps(end_msg, ensure_ascii=False)}\n\n"
+                    end_msg = AgentMessage.end(
+                        session_id=session_id,
+                        reason=EndReason.STOP
+                    ).to_frontend_dict()
+                    await queue.put(f"data: {json.dumps(end_msg, ensure_ascii=False)}\n\n")
+                finally:
+                    # 用 put_nowait：当前任务若正处于取消状态，await 会被立即打断
+                    try:
+                        queue.put_nowait(None)
+                    except asyncio.QueueFull:
+                        pass
+
+            producer = asyncio.create_task(
+                _produce(), name=f"sse-producer:{session_id}"
+            )
+            heartbeat_interval = max(1, app_config.SSE_HEARTBEAT_INTERVAL)
+            try:
+                while True:
+                    try:
+                        item = await asyncio.wait_for(
+                            queue.get(), timeout=heartbeat_interval
+                        )
+                    except asyncio.TimeoutError:
+                        # SSE 注释帧：EventSource / SSE 解析器都会忽略，
+                        # 但能持续刷新 nginx 与调用方的读超时计时器
+                        yield ": keepalive\n\n"
+                        continue
+                    if item is None:
+                        break
+                    yield item
+            finally:
+                # producer 是独立 task（不在 Starlette 的 anyio cancel scope 内），
+                # 显式取消即可让 runner 走正常的取消收尾。这里不 await：生成器
+                # 此刻可能正处于取消传播中，await 会立即再抛；producer 会在后台
+                # 完成收尾后自行结束。
+                if not producer.done():
+                    producer.cancel()
+                # 排空队列：解除 producer 可能因队列满而卡在 queue.put 上的收尾消息
+                while True:
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
 
         return StreamingResponse(
             event_generator(),

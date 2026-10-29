@@ -102,6 +102,11 @@ class BaseConfig(BaseSettings):
     HEARTBEAT_INTERVAL: int = Field(default=30, description="WebSocket 心跳间隔（秒）")
     HEARTBEAT_TIMEOUT: int = Field(default=600, description="WebSocket 心跳超时（秒）")
 
+    # ==================== SSE 保活配置 ====================
+    # agent 长时间无输出（大上下文 LLM 思考、长工具调用）时按此间隔下发注释帧，
+    # 避免 nginx proxy_read_timeout（默认 60s）/ 客户端 read timeout 掐断连接
+    SSE_HEARTBEAT_INTERVAL: int = Field(default=15, description="SSE 心跳注释帧间隔（秒）")
+
     # ==================== 其他配置 ====================
     ALLOWED_HOSTS: list = Field(default_factory=lambda: ["localhost"], description="允许的主机列表")
 
