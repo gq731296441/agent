@@ -204,7 +204,7 @@ async def get_agent(
     if not agent:
         return ApiResponse.error(msg="无权访问或不存在", code=403)
 
-    # 解析 MCP：id + name 合并返回
+    # 解析 MCP：id + name + deleted 合并返回
     mcp_ids = await deep_storage.get_agent_mcp_ids(agent_id)
     mcps = []
     if mcp_ids:
@@ -214,34 +214,49 @@ async def get_agent(
         for mid, snap_name in snapshots.items():
             if mid in mcp_ids:
                 name_map[mid] = snap_name
-        # L2: 全量 MCP 目录（兜底未命中的名称）
-        # 认证约束：外部接口要求 id+token 匹配同一用户，创建者 id + 查看者 token 会校验失败，
-        # 因此改用全量目录（查看者自己的认证即可访问全部公共组件）
-        missing_ids = [mid for mid in mcp_ids if mid not in name_map or not name_map[mid]]
-        if missing_ids:
-            try:
-                from api.mcp_api import _fetch_external_mcp_all_list, _normalize_mcp_item
 
-                all_raw = await _fetch_external_mcp_all_list(user_id, x_auth_value)
-                all_catalog = [_normalize_mcp_item(item) for item in all_raw]
-                for mid in missing_ids:
-                    if mid not in name_map or not name_map[mid]:
-                        # 绑定 ID 是组件 id，目录条目通过 componentId 字段对应
-                        name = next(
-                            (m.get("name") for m in all_catalog
-                             if int(m.get("componentId") or 0) == mid and m.get("name")),
-                            None,
-                        )
-                        if name:
-                            name_map[mid] = name
-            except Exception:
-                pass
-        # L3: 查看者的 MCP catalog（最终兜底）
+        # L2: 全量 MCP 目录 —— 既兜底名称，也用于判定组件是否已被外部广场删除。
+        # 认证约束：外部接口要求 id+token 匹配同一用户，创建者 id + 查看者 token 会校验失败，
+        # 因此改用全量目录（查看者自己的认证即可访问全部公共组件）。
+        # 必须无条件拉取：即使名称已由快照解析，也要靠目录判断 deleted。
+        catalog_ids: Optional[set] = None
+        try:
+            from api.mcp_api import _fetch_external_mcp_all_list, _normalize_mcp_item
+
+            all_raw = await _fetch_external_mcp_all_list(user_id, x_auth_value)
+            all_catalog = [_normalize_mcp_item(item) for item in all_raw]
+            catalog_ids = {
+                int(m.get("componentId") or 0)
+                for m in all_catalog
+                if m.get("componentId")
+            }
+            for mid in mcp_ids:
+                if mid in name_map and name_map[mid]:
+                    continue
+                name = next(
+                    (m.get("name") for m in all_catalog
+                     if int(m.get("componentId") or 0) == mid and m.get("name")),
+                    None,
+                )
+                if name:
+                    name_map[mid] = name
+        except Exception:
+            # 目录不可用时无法判定删除状态，保持 deleted=False，避免误标
+            catalog_ids = None
+
+        # L3: 查看者的 MCP catalog（名称最终兜底）
         still_missing = [mid for mid in mcp_ids if mid not in name_map or not name_map[mid]]
         if still_missing and user_id != (agent.get("user_id") or agent.get("creator_user_id") or ""):
             name_map.update(await _resolve_mcp_names(user_id, still_missing, x_auth_value))
+
         for mid in mcp_ids:
-            mcps.append({"id": mid, "name": name_map.get(mid, "")})
+            name = name_map.get(mid) or ""
+            deleted = bool(catalog_ids is not None and mid not in catalog_ids)
+            mcps.append({
+                "id": mid,
+                "name": name or f"MCP #{mid}",
+                "deleted": deleted,
+            })
     agent["mcps"] = mcps
 
     # 解析 Skill：id + name 合并返回
@@ -281,6 +296,17 @@ async def update_agent(
             if unnamed_ids:
                 try:
                     mcp_names.update(await _resolve_mcp_names(user_id, unnamed_ids, x_auth_value))
+                except Exception:
+                    pass
+            # 已被外部广场删除的组件解析不到名称，用旧快照兜底，
+            # 避免编辑保存一次就把 snapshot_mcp_name 覆盖成 null
+            still_unnamed = [mid for mid in mcp_ids if mid not in mcp_names]
+            if still_unnamed:
+                try:
+                    old_snapshots = await deep_storage.get_agent_mcp_snapshot_names(agent_id)
+                    for mid in still_unnamed:
+                        if old_snapshots.get(mid):
+                            mcp_names[mid] = old_snapshots[mid]
                 except Exception:
                     pass
         else:

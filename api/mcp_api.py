@@ -6,12 +6,13 @@ import httpx
 import os
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, HTTPException, Header, Query
+from fastapi import APIRouter, Body, HTTPException, Header, Query
 from pydantic import BaseModel, Field
 from mcp_server.mcp_manager import McpToolService
 from mcp_server.mcp_mock import get_default_mock_mcp_list, merge_mock_mcp_list
-from common.schemas import ListApiResponse
+from common.schemas import ApiResponse, ListApiResponse
 from config import get_logger, app_config
+from db import deep_storage
 
 # 清除代理环境变量，确保直连
 os.environ.pop("http_proxy", None)
@@ -224,13 +225,17 @@ async def _validate_and_build_response(
     source: str,
     *,
     force_refresh: bool = False,
+    auth_token: str = "",
 ):
     if not mcp_list:
         return ListApiResponse.success(data=[], msg="成功")
 
     mcp_service = McpToolService()
     validated_tools = await mcp_service.validate_mcp_servers(
-        mcp_list, force_refresh=force_refresh
+        mcp_list,
+        force_refresh=force_refresh,
+        user_id=user_id,
+        user_token=auth_token,
     )
 
     result_data = []
@@ -303,7 +308,11 @@ async def get_mcp_tools(
                 return cached
 
         response = await _validate_and_build_response(
-            mcp_list, user_id, source, force_refresh=refresh
+            mcp_list,
+            emp_no,
+            source,
+            force_refresh=refresh,
+            auth_token=x_auth_value,
         )
         _set_user_tools_cache(user_id, fingerprint, response)
         return response
@@ -338,17 +347,22 @@ async def get_all_mcp_tools(
             return _build_tools_without_validation(mcp_list)
 
         fingerprint = _mcp_list_fingerprint(mcp_list)
+        cache_uid = emp_no or "__all__"
         if not refresh:
-            cached = _get_user_tools_cache("__all__", fingerprint)
+            cached = _get_user_tools_cache(cache_uid, fingerprint)
             if cached is not None:
-                logger.info(f"[MCP API] all 命中缓存 key=__all__")
+                logger.info(f"[MCP API] all 命中缓存 key={cache_uid}")
                 return cached
 
         response = await _validate_and_build_response(
-            mcp_list, "", "external", force_refresh=refresh
+            mcp_list,
+            emp_no,
+            "external",
+            force_refresh=refresh,
+            auth_token=x_auth_value,
         )
         if not refresh:
-            _set_user_tools_cache("__all__", fingerprint, response)
+            _set_user_tools_cache(cache_uid, fingerprint, response)
         return response
     except HTTPException:
         raise
@@ -356,3 +370,61 @@ async def get_all_mcp_tools(
         logger.error(f"[MCP API] 获取全量 MCP 工具列表失败: {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"服务器内部错误: {str(e)}")
+
+
+# ==================== 用户维度 MCP 快照 ====================
+
+class McpSnapshotItem(BaseModel):
+    """用户订阅列表中的 MCP 快照项"""
+    id: int = Field(..., description="组件ID（componentId）")
+    name: str = Field(default="", description="MCP 名称")
+    description: str = Field(default="", description="MCP 描述")
+    url: str = Field(default="", description="MCP URL")
+    type: str = Field(default="http", description="MCP 类型")
+
+
+class McpSnapshotSyncRequest(BaseModel):
+    user_id: str = Field(..., description="用户ID")
+    mcps: List[McpSnapshotItem] = Field(default_factory=list, description="当前订阅的 MCP 列表")
+
+
+@router.post("/snapshots/sync", response_model=ApiResponse, summary="同步用户已订阅 MCP 快照")
+async def sync_mcp_snapshots(body: McpSnapshotSyncRequest = Body(...)):
+    """前端每次成功拿到订阅列表后调用。
+
+    订阅列表中的 MCP 更新快照；其余历史快照标记为 deleted=True。
+    **仅在成功获取订阅列表时调用**，接口异常时不要调用，避免全量误标。
+    """
+    if not body.user_id:
+        raise HTTPException(status_code=400, detail="user_id 不能为空")
+    try:
+        count = await deep_storage.sync_user_mcp_snapshots(
+            body.user_id,
+            [m.model_dump() for m in body.mcps],
+        )
+        return ApiResponse.success(data={"count": count})
+    except Exception as e:
+        logger.error(f"[MCP API] 同步 MCP 快照失败: {e}")
+        raise HTTPException(status_code=500, detail=f"同步 MCP 快照失败: {str(e)}")
+
+
+@router.get("/snapshots", response_model=ApiResponse, summary="获取用户 MCP 快照（含已删除）")
+async def list_mcp_snapshots(user_id: str = Query(..., description="用户ID")):
+    """返回用户曾订阅过的 MCP 快照；deleted=True 表示组件已从外部广场删除。"""
+    try:
+        items = await deep_storage.get_user_mcp_snapshots(user_id)
+        return ApiResponse.success(data=items)
+    except Exception as e:
+        logger.error(f"[MCP API] 获取 MCP 快照失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取 MCP 快照失败: {str(e)}")
+
+
+@router.delete("/snapshots/{mcp_id}", response_model=ApiResponse, summary="删除用户 MCP 快照")
+async def delete_mcp_snapshot(mcp_id: int, user_id: str = Query(..., description="用户ID")):
+    """组件已被删除时，用户主动取消订阅（清理快照）。"""
+    try:
+        await deep_storage.remove_user_mcp_snapshot(user_id, mcp_id)
+        return ApiResponse.success(msg="已取消订阅")
+    except Exception as e:
+        logger.error(f"[MCP API] 删除 MCP 快照失败: {e}")
+        raise HTTPException(status_code=500, detail=f"删除 MCP 快照失败: {str(e)}")

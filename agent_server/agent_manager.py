@@ -202,7 +202,9 @@ class AgentManager:
             mcp_tools = []
             if mcp_list:
                 try:
-                    mcp_tools = await mcp_service.get_mcp_toollist(mcp_list)
+                    mcp_tools = await mcp_service.get_mcp_toollist(
+                        mcp_list, user_id=user_id, user_token=user_token
+                    )
                     logger.info(f"[AgentManager] 成功加载 {len(mcp_tools)} 个 MCP 工具")
                 except Exception as e:
                     logger.error(f"[AgentManager] 加载 MCP 工具失败: {e}")

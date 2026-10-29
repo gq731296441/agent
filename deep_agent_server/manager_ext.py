@@ -341,7 +341,9 @@ async def create_deep_agent_for_session(
     mcp_tools = []
     if mcp_list:
         try:
-            mcp_tools = await mcp_service.get_mcp_toollist(mcp_list)
+            mcp_tools = await mcp_service.get_mcp_toollist(
+                mcp_list, user_id=user_id, user_token=user_token
+            )
         except Exception as e:
             return None, f"加载 MCP 工具失败: {e}"
 

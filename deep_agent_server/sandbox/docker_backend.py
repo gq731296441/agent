@@ -16,8 +16,8 @@ from typing import Any, Optional
 
 # 宿主机进程 UID/GID，用于 docker exec 时以相同身份执行命令，
 # 确保 bind mount 目录中创建的文件 owner 与 FilesystemBackend 一致。
-_HOST_EXEC_UID = os.getuid()
-_HOST_EXEC_GID = os.getgid()
+_HOST_EXEC_UID = os.getuid() if hasattr(os, "getuid") else 0
+_HOST_EXEC_GID = os.getgid() if hasattr(os, "getgid") else 0
 
 # 宿主机/容器常见系统目录前缀。虚拟文件系统只提供 /workspace/、/skills/ 等
 # 路由；对这些系统目录的文件操作一律拒绝并引导模型改用虚拟路径，避免模型

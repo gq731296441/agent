@@ -16,6 +16,57 @@ from mcp_server.tool_name_utils import normalize_tools_for_llm
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("MCPManager")
 
+# 内部 MCP 鉴权请求头：x-auth-value = SSE/WS 的 user_token，x-emp-no = 用户 id
+MCP_HEADER_EMP_NO = "x-emp-no"
+MCP_HEADER_AUTH_VALUE = "x-auth-value"
+_HTTP_TRANSPORTS = {"http", "sse", "streamable_http", "streamable-http"}
+
+
+def _token_fingerprint(user_token: str) -> str:
+    return hashlib.sha256((user_token or "").encode()).hexdigest()[:16]
+
+
+def parse_mcp_item_headers(raw: Any) -> Dict[str, str]:
+    """解析 MCP 条目自带的 headers（dict 或 JSON 字符串）。"""
+    headers = raw
+    if isinstance(headers, str):
+        try:
+            headers = json.loads(headers)
+        except Exception:
+            return {}
+    if not isinstance(headers, dict):
+        return {}
+    parsed: Dict[str, str] = {}
+    for key, value in headers.items():
+        if key is None or value is None:
+            continue
+        name = str(key).strip()
+        if not name:
+            continue
+        parsed[name] = str(value).strip()
+    return parsed
+
+
+def build_mcp_request_headers(
+    item_headers: Dict[str, str] | None = None,
+    *,
+    user_id: str = "",
+    user_token: str = "",
+) -> Dict[str, str]:
+    """合并 MCP 条目 headers，并默认注入当前会话的内部鉴权头。
+
+    SSE / WebSocket 传入的 user_token → x-auth-value，user_id → x-emp-no。
+    这两项以当前会话身份为准，覆盖条目里可能残留的同名头。
+    """
+    merged: Dict[str, str] = dict(item_headers or {})
+    emp_no = str(user_id or "").strip()
+    auth_value = str(user_token or "").strip()
+    if emp_no:
+        merged[MCP_HEADER_EMP_NO] = emp_no
+    if auth_value:
+        merged[MCP_HEADER_AUTH_VALUE] = auth_value
+    return {k: v for k, v in merged.items() if k and v}
+
 
 def _create_no_proxy_async_client(
     headers: Dict[str, str] | None = None,
@@ -105,8 +156,20 @@ class McpToolService:
     def _server_cache_key(self, name: str, config: Dict[str, Any]) -> str:
         url = (config.get("url") or "").strip()
         transport = (config.get("transport") or "http").strip().lower()
+        headers = config.get("headers") if isinstance(config.get("headers"), dict) else {}
+        safe_headers: Dict[str, str] = {}
+        for key, value in headers.items():
+            if str(key).lower() == MCP_HEADER_AUTH_VALUE:
+                safe_headers[str(key)] = _token_fingerprint(str(value))
+            else:
+                safe_headers[str(key)] = str(value)
         payload = json.dumps(
-            {"name": name, "url": url, "transport": transport},
+            {
+                "name": name,
+                "url": url,
+                "transport": transport,
+                "headers": safe_headers,
+            },
             sort_keys=True,
             ensure_ascii=False,
         )
@@ -125,25 +188,33 @@ class McpToolService:
     def _set_server_cached(self, cache_key: str, result: Tuple) -> None:
         self._server_validation_cache[cache_key] = (time.monotonic(), result)
 
-    def _list_cache_key(self, mcp_list: List[Dict[str, Any]]) -> str:
-        """生成 MCP 列表缓存键（url + headers + name + id）。"""
+    def _list_cache_key(
+        self,
+        mcp_list: List[Dict[str, Any]],
+        user_id: str = "",
+        user_token: str = "",
+    ) -> str:
+        """生成 MCP 列表缓存键（url + headers + name + id + 会话身份）。"""
         normalized = []
         for item in mcp_list or []:
-            headers = item.get("headers")
-            if isinstance(headers, str):
-                try:
-                    headers = json.loads(headers)
-                except Exception:
-                    headers = headers
             normalized.append({
                 "id": item.get("id"),
                 "name": item.get("name"),
                 "url": (item.get("url") or "").strip(),
                 "type": (item.get("type") or "http").strip().lower(),
-                "headers": headers if isinstance(headers, dict) else {},
+                "headers": parse_mcp_item_headers(item.get("headers")),
             })
         normalized.sort(key=lambda x: (str(x.get("id")), x.get("name") or ""))
-        payload = json.dumps(normalized, sort_keys=True, ensure_ascii=False, default=str)
+        payload = json.dumps(
+            {
+                "items": normalized,
+                "emp": str(user_id or "").strip(),
+                "token_fp": _token_fingerprint(user_token),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+        )
         return hashlib.sha256(payload.encode()).hexdigest()
 
     def _get_cached_validation(self, cache_key: str) -> Optional[List[Tuple]]:
@@ -176,19 +247,26 @@ class McpToolService:
             return name, False, [], "unavailable"
     
     async def _run_batch_validation(
-        self, mcp_list: List[Dict], *, force_refresh: bool = False
+        self,
+        mcp_list: List[Dict],
+        *,
+        force_refresh: bool = False,
+        user_id: str = "",
+        user_token: str = "",
     ) -> List[Tuple]:
         """
         统一处理并发验证逻辑（单 MCP 级 TTL 缓存 + 列表级缓存）
         """
         if not force_refresh:
-            cache_key = self._list_cache_key(mcp_list)
+            cache_key = self._list_cache_key(mcp_list, user_id=user_id, user_token=user_token)
             cached = self._get_cached_validation(cache_key)
             if cached is not None:
                 logger.info(f"MCP 验证命中列表缓存 key={cache_key[:12]}... 共 {len(cached)} 个服务器")
                 return cached
 
-        mcp_config = self._build_mcp_config(mcp_list)
+        mcp_config = self._build_mcp_config(
+            mcp_list, user_id=user_id, user_token=user_token
+        )
         results: List[Tuple] = []
         pending: List[Tuple[str, Dict[str, Any], str]] = []
 
@@ -210,7 +288,9 @@ class McpToolService:
                 results.append(result)
 
         if not force_refresh:
-            list_key = self._list_cache_key(mcp_list)
+            list_key = self._list_cache_key(
+                mcp_list, user_id=user_id, user_token=user_token
+            )
             self._set_cached_validation(list_key, results)
         return results
 
@@ -221,11 +301,18 @@ class McpToolService:
         server_list: List[Dict[str, Any]],
         *,
         force_refresh: bool = False,
+        user_id: str = "",
+        user_token: str = "",
     ) -> List[Dict[str, Any]]:
         """
         验证给定服务器列表并返回带状态的结构（用于前端展示）
         """
-        raw_results = await self._run_batch_validation(server_list, force_refresh=force_refresh)
+        raw_results = await self._run_batch_validation(
+            server_list,
+            force_refresh=force_refresh,
+            user_id=user_id,
+            user_token=user_token,
+        )
         
         # 建立 名字 -> 状态 的映射
         status_map = {name: status for name, success, tools, status in raw_results}
@@ -239,11 +326,19 @@ class McpToolService:
             
         return response
 
-    async def get_mcp_toollist(self, server_list: List[Dict[str, Any]]) -> List[Any]:
+    async def get_mcp_toollist(
+        self,
+        server_list: List[Dict[str, Any]],
+        *,
+        user_id: str = "",
+        user_token: str = "",
+    ) -> List[Any]:
         """
         获取所有可用的 MCP 工具对象（过滤不可用的）
         """
-        raw_results = await self._run_batch_validation(server_list)
+        raw_results = await self._run_batch_validation(
+            server_list, user_id=user_id, user_token=user_token
+        )
 
         all_mcp_tools = []
         for name, is_success, tools, status in raw_results:
@@ -255,29 +350,42 @@ class McpToolService:
         logger.info(f"MCP 工具加载完成，共计 {len(all_mcp_tools)} 个可用工具")
         return all_mcp_tools
 
-    def _build_mcp_config(self, mcp_list: list) -> Dict[str, Dict[str, Any]]:
+    def _build_mcp_config(
+        self,
+        mcp_list: list,
+        user_id: str = "",
+        user_token: str = "",
+    ) -> Dict[str, Dict[str, Any]]:
         """
-        将前端传入的列表结构转换为 MultiServerMCPClient 所需的字典配置
+        将前端传入的列表结构转换为 MultiServerMCPClient 所需的字典配置。
+
+        HTTP / SSE 传输默认带上 x-emp-no、x-auth-value（来自当前 SSE/WS 会话）。
         """
         mcp_config = {}
         for item in mcp_list:
             name = item.get("name")
             if not name:
                 continue
+            transport = (item.get("type") or "http").strip().lower()
             server_config: Dict[str, Any] = {
-                "transport": (item.get("type") or "http").strip().lower(),
+                "transport": transport,
                 "url": (item.get("url") or "").strip(),
                 # 显式禁用系统代理，避免企业代理影响内网 MCP 连接
                 "httpx_client_factory": _create_no_proxy_async_client,
             }
-            headers = item.get("headers")
-            if isinstance(headers, str):
-                try:
-                    headers = json.loads(headers)
-                except Exception:
-                    headers = None
-            if isinstance(headers, dict) and headers:
-                # 透传自定义请求头，适用于需要 Token/鉴权的 MCP 服务
-                server_config["headers"] = headers
+            if transport in _HTTP_TRANSPORTS:
+                headers = build_mcp_request_headers(
+                    parse_mcp_item_headers(item.get("headers")),
+                    user_id=user_id,
+                    user_token=user_token,
+                )
+                if headers:
+                    server_config["headers"] = headers
+                    logger.debug(
+                        "MCP [%s] 注入内部鉴权头 x-emp-no=%s x-auth-value=%s",
+                        name,
+                        "set" if headers.get(MCP_HEADER_EMP_NO) else "empty",
+                        "set" if headers.get(MCP_HEADER_AUTH_VALUE) else "empty",
+                    )
             mcp_config[name] = server_config
         return mcp_config

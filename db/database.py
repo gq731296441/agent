@@ -505,6 +505,23 @@ class DatabaseManager:
                 PRIMARY KEY (agent_id, mcp_id)
             );
 
+            -- 用户维度的 MCP 快照：记录用户曾订阅过的组件（含名称），
+            -- 外部组件广场删除组件后仍能展示并标记 deleted。
+            CREATE TABLE IF NOT EXISTS user_mcp_snapshots (
+                user_id TEXT NOT NULL,
+                mcp_id BIGINT NOT NULL,
+                name TEXT,
+                description TEXT,
+                url TEXT,
+                type TEXT DEFAULT 'http',
+                deleted BOOLEAN NOT NULL DEFAULT FALSE,
+                last_seen_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT now(),
+                PRIMARY KEY (user_id, mcp_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_mcp_snapshots_user
+            ON user_mcp_snapshots(user_id, deleted);
+
             CREATE TABLE IF NOT EXISTS user_agent_skill_bindings (
                 agent_id UUID NOT NULL REFERENCES user_agents(id) ON DELETE CASCADE,
                 installed_skill_id UUID NOT NULL,

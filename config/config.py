@@ -75,6 +75,18 @@ class BaseConfig(BaseSettings):
         default=1001,
         description="Mock MRM MCP 工具 ID",
     )
+    MCP_AUTH_ECHO_SERVER_URL: str = Field(
+        default="http://127.0.0.1:6003/mcp",
+        description="本地 auth_echo_mcp.py HTTP 端点（校验 x-emp-no / x-auth-value）",
+    )
+    MCP_AUTH_ECHO_MOCK_NAME: str = Field(
+        default="auth-echo",
+        description="本地鉴权回显 MCP 在 MultiServerMCPClient 中的名称",
+    )
+    MCP_AUTH_ECHO_MOCK_ID: int = Field(
+        default=1002,
+        description="本地鉴权回显 MCP 工具 ID",
+    )
 
     # ==================== 内置工具配置 ====================
     EMP_INFO_API_URL: str = Field(

@@ -84,6 +84,22 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
 
         return gen_chunk
 
+def normalize_base_url(base_url: str) -> str:
+    """把 Base URL 规范化为 OpenAI 客户端要求的「版本前缀」形式。
+
+    OpenAI SDK 会在 base_url 后自行拼接 `/chat/completions`。用户如果直接填了
+    完整接口路径（如 `.../v1/chat/completions`），实际请求会变成
+    `.../v1/chat/completions/chat/completions` 而 404。这里统一去掉误填的
+    接口后缀，仅保留到 `/v1` 这一层。
+    """
+    url = (base_url or "").strip().rstrip("/")
+    for suffix in ("/chat/completions", "/completions", "/responses"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)].rstrip("/")
+            break
+    return url
+
+
 def _require_api_key(api_key: Optional[str], name: str) -> str:
     if not api_key or not str(api_key).strip():
         raise ValueError(f"未配置 {name}，请在 .env 中设置对应环境变量")
@@ -105,7 +121,7 @@ def _agent_llm_config() -> Dict[str, Any]:
     config = _base_llm_kwargs()
     config.update({
         "model": app_config.LLM_AGENT_MODEL,
-        "base_url": app_config.LLM_AGENT_BASE_URL,
+        "base_url": normalize_base_url(app_config.LLM_AGENT_BASE_URL),
         "api_key": _require_api_key(app_config.LLM_AGENT_API_KEY, "LLM_AGENT_API_KEY"),
     })
     return config
@@ -114,7 +130,7 @@ def _aux_llm_config(**overrides: Any) -> Dict[str, Any]:
     config = _base_llm_kwargs()
     config.update({
         "model": app_config.LLM_AUX_MODEL,
-        "base_url": app_config.LLM_AUX_BASE_URL,
+        "base_url": normalize_base_url(app_config.LLM_AUX_BASE_URL),
         "api_key": _require_api_key(app_config.LLM_AUX_API_KEY, "LLM_AUX_API_KEY"),
     })
     config.update(overrides)
@@ -177,7 +193,7 @@ def create_llm_from_config(
     config = _base_llm_kwargs()
     config.update({
         "model": model,
-        "base_url": base_url,
+        "base_url": normalize_base_url(base_url),
         "api_key": _require_api_key(api_key, "llm_api_key"),
         "streaming": streaming,
         "temperature": temperature,
@@ -260,7 +276,8 @@ async def create_agent_llm_for_user(user_id: str, agent_kind: str = "default"):
 
 def llm_config_fingerprint(model: str, base_url: str) -> str:
     import hashlib
-    payload = f"{model}|{base_url}"
+    # 与实际构造 LLM 时使用的 base_url 保持一致，避免同一配置产生两个指纹
+    payload = f"{model}|{normalize_base_url(base_url)}"
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 

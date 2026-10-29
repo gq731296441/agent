@@ -868,6 +868,109 @@ async def get_or_create_default_agent(user_id: str) -> str:
     return ""
 
 
+# ==================== 用户维度 MCP 快照 ====================
+
+async def sync_user_mcp_snapshots(user_id: str, mcps: List[dict]) -> int:
+    """同步用户当前订阅的 MCP 快照。
+
+    - 订阅列表中出现的 MCP：更新名称/描述/URL 并标记 deleted=False；
+    - 该用户其余历史快照：标记 deleted=True（组件被外部广场删除，或用户已取消订阅）。
+
+    调用方应只在**成功拿到订阅列表**时调用，避免接口异常返回空列表导致全量误标。
+    返回本次同步后仍有效的快照数。
+    """
+    pool = await db_manager.get_pool()
+    seen_ids: List[int] = []
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for item in mcps or []:
+                try:
+                    mid = int(item.get("id") or item.get("componentId") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not mid:
+                    continue
+                seen_ids.append(mid)
+                await conn.execute(
+                    """
+                    INSERT INTO user_mcp_snapshots
+                        (user_id, mcp_id, name, description, url, type, deleted, last_seen_at, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, FALSE, now(), now())
+                    ON CONFLICT (user_id, mcp_id) DO UPDATE SET
+                        name = EXCLUDED.name,
+                        description = EXCLUDED.description,
+                        url = EXCLUDED.url,
+                        type = EXCLUDED.type,
+                        deleted = FALSE,
+                        last_seen_at = now(),
+                        updated_at = now()
+                    """,
+                    user_id,
+                    mid,
+                    (item.get("name") or "").strip() or None,
+                    item.get("description") or None,
+                    item.get("url") or None,
+                    (item.get("type") or "http").strip().lower(),
+                )
+            if seen_ids:
+                await conn.execute(
+                    """
+                    UPDATE user_mcp_snapshots
+                    SET deleted = TRUE, updated_at = now()
+                    WHERE user_id = $1 AND deleted = FALSE AND NOT (mcp_id = ANY($2::bigint[]))
+                    """,
+                    user_id,
+                    seen_ids,
+                )
+            else:
+                # 订阅列表为空：用户已取消全部订阅，历史快照全部标记删除
+                await conn.execute(
+                    """
+                    UPDATE user_mcp_snapshots
+                    SET deleted = TRUE, updated_at = now()
+                    WHERE user_id = $1 AND deleted = FALSE
+                    """,
+                    user_id,
+                )
+    return len(seen_ids)
+
+
+async def get_user_mcp_snapshots(user_id: str, *, include_deleted: bool = True) -> List[dict]:
+    """获取用户维度的 MCP 快照，deleted=True 表示组件已从外部广场删除。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        sql = """
+            SELECT mcp_id, name, description, url, type, deleted, last_seen_at, updated_at
+            FROM user_mcp_snapshots
+            WHERE user_id = $1
+        """
+        if not include_deleted:
+            sql += " AND deleted = FALSE"
+        sql += " ORDER BY deleted ASC, name ASC NULLS LAST"
+        rows = await conn.fetch(sql, user_id)
+    result = []
+    for r in rows:
+        item = dict(r)
+        item["mcp_id"] = int(item["mcp_id"])
+        item["deleted"] = bool(item.get("deleted"))
+        for key in ("last_seen_at", "updated_at"):
+            if item.get(key):
+                item[key] = item[key].isoformat()
+        result.append(item)
+    return result
+
+
+async def remove_user_mcp_snapshot(user_id: str, mcp_id: int) -> None:
+    """删除单条快照（用户在能力市场主动取消订阅时调用）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM user_mcp_snapshots WHERE user_id = $1 AND mcp_id = $2",
+            user_id,
+            int(mcp_id),
+        )
+
+
 async def bump_agent_config_version(agent_id: str) -> None:
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:

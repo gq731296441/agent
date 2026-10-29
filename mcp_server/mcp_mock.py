@@ -19,6 +19,17 @@ def get_default_mock_mcp_list() -> List[Dict[str, Any]]:
             "type": "http",
             "url": app_config.MCP_MRM_SERVER_URL,
         },
+        {
+            "id": app_config.MCP_AUTH_ECHO_MOCK_ID,
+            "componentId": app_config.MCP_AUTH_ECHO_MOCK_ID,
+            "name": app_config.MCP_AUTH_ECHO_MOCK_NAME,
+            "description": (
+                "内部鉴权回显 MCP（校验请求头 x-emp-no / x-auth-value，"
+                "需先启动: python mcp_server/tool/auth_echo_mcp.py）"
+            ),
+            "type": "http",
+            "url": app_config.MCP_AUTH_ECHO_SERVER_URL,
+        },
     ]
 
 
