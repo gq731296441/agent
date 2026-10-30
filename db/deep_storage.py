@@ -1896,6 +1896,11 @@ async def get_user_llm_config(user_id: str) -> dict:
 
 
 async def has_user_llm_config(user_id: str) -> bool:
+    # 优先按新表生效组合判定（新用户只写 user_llm_profiles，未回填旧 secrets）。
+    # 无 active 组合时回退旧 user_secrets 主模型配置。
+    profile = await get_active_user_llm_profile(user_id)
+    if profile and profile.get("model") and profile.get("base_url") and profile.get("api_key"):
+        return True
     cfg = await get_user_llm_config(user_id)
     return bool(cfg.get("configured"))
 
