@@ -289,6 +289,8 @@ class DatabaseManager:
             "ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS agent_id UUID",
             # 用户手动重命名的会话标题标记：置位后自动标题生成不再覆盖/推送
             "ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS title_is_custom BOOLEAN DEFAULT FALSE",
+            # 会话置顶标记：置顶会话在列表前部，按最近活跃时间倒序
+            "ALTER TABLE user_sessions ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN NOT NULL DEFAULT FALSE",
         ]
         for col_sql in alter_columns:
             try:

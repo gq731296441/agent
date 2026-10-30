@@ -97,6 +97,27 @@ async def update_session_title(
             return False
 
 
+async def update_session_pin(user_id: str, session_id: str, pinned: bool) -> bool:
+    """设置会话置顶状态（幂等设置，非 toggle）。返回是否命中并更新。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        try:
+            result = await conn.execute(
+                """
+                UPDATE user_sessions
+                SET is_pinned = $1, updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = $2 AND session_id = $3 AND is_deleted = FALSE
+                """,
+                bool(pinned),
+                user_id,
+                UUID(session_id) if isinstance(session_id, str) else session_id,
+            )
+            return result == "UPDATE 1"
+        except Exception as e:
+            logger.error(f"【会话】更新置顶状态失败 session={session_id} error={e}")
+            return False
+
+
 async def sync_agent_session_titles(agent_id: str, new_name: str) -> int:
     """订阅智能体改名后，同步其全部订阅会话的标题。
 
@@ -177,7 +198,8 @@ async def get_user_sessions(
                 f"""
                 SELECT s.session_id, s.session_name, s.last_active_at, s.created_at,
                        s.updated_at, s.agent_id, s.agent_kind, s.context_epoch,
-                       s.subscription_frozen, a.name AS agent_name, a.is_deleted AS agent_deleted,
+                       s.subscription_frozen, s.is_pinned,
+                       a.name AS agent_name, a.is_deleted AS agent_deleted,
                        a.avatar_color AS agent_avatar_color,
                        a.visibility AS agent_visibility, a.user_id AS agent_creator_user_id,
                        sub.status AS subscription_status
@@ -187,7 +209,7 @@ async def get_user_sessions(
                     ON sub.user_id = s.user_id AND sub.agent_id = s.agent_id
                 WHERE s.user_id = $1 AND s.is_deleted = FALSE AND s.agent_kind = $2
                       {empty_filter}
-                ORDER BY s.last_active_at DESC
+                ORDER BY s.is_pinned DESC, s.last_active_at DESC
                 """,
                 user_id,
                 agent_kind,
@@ -197,11 +219,11 @@ async def get_user_sessions(
                 f"""
                 SELECT s.session_id, s.session_name, s.last_active_at, s.created_at,
                        s.updated_at, s.agent_id, s.agent_kind, s.context_epoch,
-                       s.subscription_frozen
+                       s.subscription_frozen, s.is_pinned
                 FROM user_sessions s
                 WHERE s.user_id = $1 AND s.is_deleted = FALSE
                       {empty_filter}
-                ORDER BY s.last_active_at DESC
+                ORDER BY s.is_pinned DESC, s.last_active_at DESC
                 """,
                 user_id,
             )

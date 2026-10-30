@@ -54,6 +54,7 @@ class SessionItem(BaseModel):
     agent_name: str | None = Field(default=None, description="订阅智能体名称")
     avatar_color: str | None = Field(default=None, description="智能体头像背景色")
     context_epoch: int = Field(default=1)
+    is_pinned: bool = Field(default=False, description="是否置顶")
 
 
 class HistoryItem(BaseModel):
@@ -149,6 +150,7 @@ async def get_user_sessions(
                 agent_creator_user_id=s.get("agent_creator_user_id"),
                 avatar_color=s.get("agent_avatar_color") or s.get("avatar_color"),
                 context_epoch=int(s.get("context_epoch") or 1),
+                is_pinned=bool(s.get("is_pinned")),
             )
             for s in sessions
         ]
@@ -323,6 +325,45 @@ async def rename_session(
     except Exception as e:
         logger.error(f"[Session API] 重命名会话失败: {e}")
         return ApiResponse.error(msg=f"重命名会话失败: {str(e)}")
+
+
+@router.post("/pin", response_model=ApiResponse)
+async def set_session_pin(
+    user_id: str = Query(..., description="用户ID"),
+    session_id: str = Query(..., description="会话ID"),
+    payload: Any = Body(None),
+):
+    """设置会话置顶状态（幂等设置，非 toggle）。
+
+    仅支持默认智能体会话：订阅智能体会话标题跟随智能体，置顶语义不适用。
+    请求体传 {"pinned": true|false} 表达目标状态，重试安全。
+    """
+    pinned = False
+    if isinstance(payload, dict):
+        pinned = bool(payload.get("pinned"))
+    try:
+        meta = await storage.get_session_meta(session_id)
+        if (
+            not meta
+            or str(meta.get("user_id")) != str(user_id)
+            or meta.get("is_deleted")
+        ):
+            return ApiResponse.error(msg="会话不存在或无权修改", code=404)
+        if meta.get("agent_kind") == "subscription":
+            return ApiResponse.error(
+                msg="订阅智能体会话不支持置顶",
+                code=403,
+            )
+        ok = await storage.update_session_pin(user_id, session_id, pinned)
+        if not ok:
+            return ApiResponse.error(msg="会话不存在或无权修改", code=404)
+        return ApiResponse.success(
+            data={"session_id": session_id, "is_pinned": pinned},
+            msg="已置顶" if pinned else "已取消置顶",
+        )
+    except Exception as e:
+        logger.error(f"[Session API] 设置置顶失败: {e}")
+        return ApiResponse.error(msg=f"设置置顶失败: {str(e)}")
 
 
 @router.delete("/delete/permanent", response_model=ApiResponse)

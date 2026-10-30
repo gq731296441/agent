@@ -141,3 +141,4 @@ tiktoken_cache/
 .claude/
 !skill-repo/
 .icodemate/
+test/
