@@ -1,0 +1,51 @@
+# 平台叠加规则：补齐 SKILL.md / references 中文指令正文。
+# 与 s3canner 内置规则按 id 合并（同 id 覆盖，新 id 追加）。
+rules:
+  - id: INST-001-ZH
+    name: prompt injection (zh)
+    category: instructions
+    severity: critical
+    description: Chinese prompt injection in skill instructions
+    source: security
+    name_zh: 中文提示词注入
+    description_zh: 指令正文含中文提示词注入（忽略/忘掉以上指令等）
+    suggestion_zh: 移除或重写该指令，避免覆盖系统约束
+    suggestion_en: Remove or rewrite the instruction to prevent override
+    pattern: '(忽略|无视|忘掉|忘记)\s*(以上|之前|先前|上述|前面)?\s*(的)?\s*(全部|所有)?\s*(指令|约束|规则|提示)'
+    file_scope:
+      - SKILL.md
+      - references/*.md
+    enabled: true
+    confidence: 0.95
+  - id: INST-002-ZH
+    name: privilege escalation (zh)
+    category: instructions
+    severity: critical
+    description: Chinese privilege-escalation phrasing in skill instructions
+    source: security
+    name_zh: 中文权限提升
+    description_zh: 指令正文含中文越权/无限制扮演
+    suggestion_zh: 移除权限提升类指令或限定适用范围
+    suggestion_en: Remove privilege escalation instructions or scope them
+    pattern: '(你现在是|扮演|假装成|没有任何限制|不受限制|无限制)'
+    file_scope:
+      - SKILL.md
+      - references/*.md
+    enabled: true
+    confidence: 0.95
+  - id: INST-010-ZH
+    name: privilege keywords in instructions (zh)
+    category: instructions
+    severity: critical
+    description: Chinese bypass/privilege keywords in instruction body
+    source: security
+    name_zh: 中文指令越权
+    description_zh: 指令正文含绕过安全策略、提权、执行任意、访问全部等
+    suggestion_zh: 删除越权表述，改为具体、可审计的操作说明
+    suggestion_en: Remove privilege terms; describe scoped, auditable actions
+    pattern: '(绕过.{0,12}(安全|策略|限制|防护)|提权|执行任意|访问全部)'
+    file_scope:
+      - SKILL.md
+      - references/*.md
+    enabled: true
+    confidence: 0.9

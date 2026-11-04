@@ -4,6 +4,7 @@
 interrupt_on 等组件，并返回 DeepAgentWrapper 供 runner 消费。
 """
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -339,6 +340,269 @@ def _patch_format_message_content():
         logger.warning(f"[DeepFactory] 修补 _format_message_content 失败: {e}")
 
 
+def _patch_skills_reload_on_change():
+    """技能目录集合变化时强制 SkillsMiddleware 重新扫描技能清单。
+
+    deepagents 的 SkillsMiddleware 只要 state 里已有 skills_metadata 就永久跳过
+    加载（before_agent 直接返回 None）。会话进行中安装/卸载技能后，系统提示里的
+    技能清单仍是旧值：agent 会认为新技能"未启用"，即使 /skills/ 下已有对应目录。
+
+    这里在执行前比对 /skills/ 当前目录集合与 state 中已加载技能的目录集合，
+    不一致时重新扫描并覆盖 skills_metadata（含新增/删除/下架）。
+    """
+    try:
+        from deepagents.middleware import skills as _skills_mod
+        from deepagents.middleware.skills import SkillsMiddleware, SkillsStateUpdate
+
+        if getattr(SkillsMiddleware, "_zte_reload_on_change", False):
+            return
+
+        def _entry_dir_names(entries) -> set:
+            names = set()
+            for e in entries or []:
+                if not e.get("is_dir"):
+                    continue
+                name = Path(str(e.get("path") or "")).name
+                if name:
+                    names.add(name)
+            return names
+
+        def _loaded_dir_names(metadata) -> set:
+            names = set()
+            for item in metadata or []:
+                try:
+                    names.add(Path(str(item.get("path") or "")).parent.name)
+                except (OSError, ValueError):
+                    continue
+            return names
+
+        def _backend_ls_dirs(backend, path) -> set | None:
+            try:
+                result = backend.ls(path)
+            except Exception:
+                return None
+            if result is None or getattr(result, "error", None):
+                return None
+            return _entry_dir_names(getattr(result, "entries", None))
+
+        async def _backend_als_dirs(backend, path) -> set | None:
+            try:
+                result = await backend.als(path)
+            except Exception:
+                return None
+            if result is None or getattr(result, "error", None):
+                return None
+            return _entry_dir_names(getattr(result, "entries", None))
+
+        def _current_dirs(mw, backend) -> set | None:
+            # 优先按 sources 前缀列目录；backend 直接以技能目录为根时回退 ls("/")
+            current: set = set()
+            found_any = False
+            for source_path in mw.sources:
+                dirs = _backend_ls_dirs(backend, source_path)
+                if dirs is not None:
+                    found_any = True
+                    current |= dirs
+            if not found_any:
+                dirs = _backend_ls_dirs(backend, "/")
+                if dirs is not None:
+                    found_any = True
+                    current |= dirs
+            return current if found_any else None
+
+        async def _acurrent_dirs(mw, backend) -> set | None:
+            current: set = set()
+            found_any = False
+            for source_path in mw.sources:
+                dirs = await _backend_als_dirs(backend, source_path)
+                if dirs is not None:
+                    found_any = True
+                    current |= dirs
+            if not found_any:
+                dirs = await _backend_als_dirs(backend, "/")
+                if dirs is not None:
+                    found_any = True
+                    current |= dirs
+            return current if found_any else None
+
+        def _sync_update(mw, backend):
+            all_skills: dict = {}
+            errors: list = []
+            for source_path in mw.sources:
+                found, err = _skills_mod._list_skills_with_errors(backend, source_path)
+                if err is not None:
+                    errors.append(err)
+                for skill in found:
+                    all_skills[skill["name"]] = skill
+            if not all_skills and errors:
+                # backend 直接以技能目录为根时 sources 前缀不存在，回退根路径
+                found, err = _skills_mod._list_skills_with_errors(backend, "/")
+                if err is None:
+                    errors = []
+                for skill in found:
+                    all_skills[skill["name"]] = skill
+            update = SkillsStateUpdate(skills_metadata=list(all_skills.values()))
+            if errors:
+                update["skills_load_errors"] = errors
+            return update
+
+        async def _async_update(mw, backend):
+            all_skills: dict = {}
+            errors: list = []
+            for source_path in mw.sources:
+                found, err = await _skills_mod._alist_skills_with_errors(backend, source_path)
+                if err is not None:
+                    errors.append(err)
+                for skill in found:
+                    all_skills[skill["name"]] = skill
+            if not all_skills and errors:
+                found, err = await _skills_mod._alist_skills_with_errors(backend, "/")
+                if err is None:
+                    errors = []
+                for skill in found:
+                    all_skills[skill["name"]] = skill
+            update = SkillsStateUpdate(skills_metadata=list(all_skills.values()))
+            if errors:
+                update["skills_load_errors"] = errors
+            return update
+
+        _orig_before = SkillsMiddleware.before_agent
+        _orig_abefore = SkillsMiddleware.abefore_agent
+
+        def before_agent(self, state, runtime, config):
+            if "skills_metadata" not in state:
+                return _orig_before(self, state, runtime, config)
+            try:
+                backend = self._get_backend(state, runtime, config)
+                current = _current_dirs(self, backend, _backend_ls_dirs)
+                loaded = _loaded_dir_names(state.get("skills_metadata"))
+                # 空集合视为挂载异常，不重载，避免把技能清单清空
+                if not current or current == loaded:
+                    return None
+                return _sync_update(self, backend)
+            except Exception as e:
+                logger.warning(f"[DeepFactory] 技能清单重载检查失败: {e}")
+                return None
+
+        async def abefore_agent(self, state, runtime, config):
+            if "skills_metadata" not in state:
+                return await _orig_abefore(self, state, runtime, config)
+            try:
+                backend = self._get_backend(state, runtime, config)
+                current = await _acurrent_dirs(self, backend)
+                loaded = _loaded_dir_names(state.get("skills_metadata"))
+                if not current or current == loaded:
+                    return None
+                return await _async_update(self, backend)
+            except Exception as e:
+                logger.warning(f"[DeepFactory] 技能清单重载检查失败: {e}")
+                return None
+
+        SkillsMiddleware.before_agent = before_agent
+        SkillsMiddleware.abefore_agent = abefore_agent
+        SkillsMiddleware._zte_reload_on_change = True
+        logger.info("[DeepFactory] 已修补 SkillsMiddleware — 技能目录变化时自动重载")
+
+        # ── 技能清单补充中文名 ──────────────────────────────────────────
+        # deepagents 只展示 SKILL.md 的英文 name；market 包的中文名在
+        # .install-meta.json（上传时填写）。这里在加载技能时把中文名拼进
+        # description，使 agent 同时看到 中文名 / 英文名 / 编号（路径）。
+        from deep_agent_server.skills.dirs import INSTALL_META_FILENAME
+
+        def _meta_path_for(skill) -> str:
+            p = str(skill.get("path") or "")
+            if not p:
+                return ""
+            return str(Path(p).parent).rstrip("/") + "/" + INSTALL_META_FILENAME
+
+        def _apply_aliases(skill, raw) -> None:
+            """把中文名与技能编号拼进 description，使 agent 能关联三种标识。"""
+            if not raw:
+                return
+            try:
+                text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+                meta = json.loads(text)
+            except (ValueError, UnicodeDecodeError):
+                return
+            if not isinstance(meta, dict):
+                return
+            name = str(skill.get("name") or "")
+            aliases = []
+            zh = str(meta.get("name_zh") or "").strip()
+            if zh and zh != name:
+                aliases.append(f"中文名：{zh}")
+            pid = str(meta.get("package_id") or meta.get("skill_id") or "").strip()
+            if pid and pid != name:
+                aliases.append(f"技能编号：{pid}")
+            if aliases:
+                skill["description"] = (
+                    "（" + "；".join(aliases) + "）" + str(skill.get("description") or "")
+                )
+
+        def _decorate_sync(backend, skills) -> None:
+            if not skills:
+                return
+            paths = [_meta_path_for(s) for s in skills]
+            if not any(paths):
+                return
+            try:
+                responses = backend.download_files([p for p in paths if p])
+            except Exception:
+                return
+            by_path = {}
+            for r in responses or []:
+                path = getattr(r, "path", None)
+                content = getattr(r, "content", None)
+                if path and content:
+                    by_path[path] = content
+            for s in skills:
+                _apply_aliases(s, by_path.get(_meta_path_for(s)))
+
+        async def _decorate_async(backend, skills) -> None:
+            if not skills:
+                return
+            paths = [_meta_path_for(s) for s in skills]
+            if not any(paths):
+                return
+            try:
+                responses = await backend.adownload_files([p for p in paths if p])
+            except Exception:
+                return
+            by_path = {}
+            for r in responses or []:
+                path = getattr(r, "path", None)
+                content = getattr(r, "content", None)
+                if path and content:
+                    by_path[path] = content
+            for s in skills:
+                _apply_aliases(s, by_path.get(_meta_path_for(s)))
+
+        _orig_list = getattr(_skills_mod, "_list_skills_with_errors", None)
+        _orig_alist = getattr(_skills_mod, "_alist_skills_with_errors", None)
+
+        if _orig_list is not None and not getattr(_orig_list, "_zte_zh_patched", False):
+            def _list_with_zh(backend, source_path):
+                found, err = _orig_list(backend, source_path)
+                _decorate_sync(backend, found)
+                return found, err
+
+            _list_with_zh._zte_zh_patched = True
+            _skills_mod._list_skills_with_errors = _list_with_zh
+
+        if _orig_alist is not None and not getattr(_orig_alist, "_zte_zh_patched", False):
+            async def _alist_with_zh(backend, source_path):
+                found, err = await _orig_alist(backend, source_path)
+                await _decorate_async(backend, found)
+                return found, err
+
+            _alist_with_zh._zte_zh_patched = True
+            _skills_mod._alist_skills_with_errors = _alist_with_zh
+
+        logger.info("[DeepFactory] 已修补 SkillsMiddleware — 技能清单附带中文名")
+    except Exception as e:
+        logger.warning(f"[DeepFactory] 修补 SkillsMiddleware 失败: {e}")
+
+
 # 模块加载时执行补丁（确保 create_deep_agent 内部调用时已生效）
 _patch_format_message_content()
 _patch_token_counter_for_summarization()
@@ -346,6 +610,7 @@ _patch_summary_message_format()
 _patch_acreate_summary_no_callbacks()
 _patch_awrap_store_stream_writer()
 _patch_acreate_summary_emit_compressing()
+_patch_skills_reload_on_change()
 
 BUILTIN_TOOLS = {
     "write_todos", "read_file", "write_file", "edit_file",
@@ -397,6 +662,7 @@ async def create_deep_agent_instance(
     checkpointer=None,
     store=None,
     selected_skill_ids: Optional[List[str]] = None,
+    disabled_skill_labels: Optional[List[str]] = None,
     *,
     agent_kind: str = "default",
     skip_sandbox: bool = False,
@@ -426,6 +692,16 @@ async def create_deep_agent_instance(
             system_prompt = base_prompt + "\n\n# 智能体设定\n" + custom_prompt if custom_prompt else base_prompt
         else:
             system_prompt = build_system_prompt(user_id=user_id, user_token=user_token)
+        if disabled_skill_labels:
+            names = "、".join(str(n) for n in disabled_skill_labels if n)
+            if names:
+                system_prompt += (
+                    "\n\n# 已下架技能\n"
+                    "以下技能已被作者下架，你可以看到它们的名称，但已被禁用、无法访问："
+                    f"{names}。"
+                    "禁止读取这些技能的 SKILL.md 或任何技能文件，禁止按其指令行动，禁止调用它们。"
+                    "若用户要求使用它们，请明确说明该技能已禁用、无法访问。"
+                )
         config = user_agent.get("config") or {}
         sandbox_mode = False
         backend = build_backend_factory(

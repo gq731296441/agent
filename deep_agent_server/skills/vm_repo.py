@@ -338,10 +338,21 @@ async def sync_catalog_from_vm_repo() -> dict:
         logger.warning("[VMRepo] 扫描结果为空，跳过同步")
         return {"synced": 0, "skill_ids": []}
 
+    delisted_ids = set()
+    try:
+        from deep_agent_server.skills.marketplace import storage as ms
+
+        delisted_ids = set(await ms.list_delisted_package_ids())
+    except Exception:
+        logger.exception("[VMRepo] 读取已下架包失败，继续同步")
+
     present_ids = []
     for entry in entries:
         skill_id = entry["skill_id"]
         present_ids.append(skill_id)
+        if skill_id in delisted_ids:
+            await deep_storage.set_skill_catalog_status(skill_id, "archived")
+            continue
 
         # 保留已有的 creator 信息（避免覆盖用户创建者）
         existing = await deep_storage.get_skill_catalog(skill_id)

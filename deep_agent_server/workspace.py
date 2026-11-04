@@ -20,6 +20,13 @@ from config import get_logger
 
 logger = get_logger(__name__)
 
+
+def _resolve_skill_dir_name(root: Path, skill_id: str) -> str:
+    """延迟导入：workspace 被 skills 包反向依赖，顶层导入会循环。"""
+    from deep_agent_server.skills.dirs import resolve_dir_name
+
+    return resolve_dir_name(root, skill_id)
+
 _USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_@.+~-]+$")
 _AGENT_ID_PATTERN = re.compile(r"^[a-fA-F0-9-]+$")
 
@@ -144,8 +151,10 @@ def _sync_agent_skill_to_sandbox(agent_id: str, skill_id: str) -> bool:
     if not sid:
         return False
 
-    ws_skill = get_agent_skills_dir(agent_id) / sid
-    sandbox_skill = get_sandbox_agent_skills_dir(agent_id) / sid
+    agent_root = get_agent_skills_dir(agent_id)
+    dir_name = _resolve_skill_dir_name(agent_root, sid)
+    ws_skill = agent_root / dir_name
+    sandbox_skill = get_sandbox_agent_skills_dir(agent_id) / dir_name
 
     if not ws_skill.is_dir():
         return False
@@ -220,6 +229,7 @@ def _skill_bind_path_candidates(user_id: str, skill_id: str) -> list:
     """Docker bind 候选宿主机路径（SANDBOX 根优先，其次 WORKSPACE 根）。"""
     sid = (skill_id or "").strip().strip("/\\")
     uid = validate_user_id(user_id)
+    dir_name = _resolve_skill_dir_name(get_skills_dir(uid), sid)
     seen: set = set()
     out: list = []
     for root in (get_sandbox_workspace_root(), app_config.get_workspace_root()):
@@ -227,7 +237,7 @@ def _skill_bind_path_candidates(user_id: str, skill_id: str) -> list:
         if not r or r in seen:
             continue
         seen.add(r)
-        out.append(Path(r) / uid / "skills" / sid)
+        out.append(Path(r) / uid / "skills" / dir_name)
     return out
 
 
@@ -245,8 +255,10 @@ def sync_skill_to_sandbox_bind_path(user_id: str, skill_id: str, *, force: bool 
     if not sid or ".." in sid or "/" in sid or "\\" in sid:
         return False
 
-    ws_skill = get_skills_dir(user_id) / sid
-    sandbox_skill = get_sandbox_skills_dir(user_id) / sid
+    skills_root = get_skills_dir(user_id)
+    dir_name = _resolve_skill_dir_name(skills_root, sid)
+    ws_skill = skills_root / dir_name
+    sandbox_skill = get_sandbox_skills_dir(user_id) / dir_name
     if not ws_skill.is_dir():
         return False
 
@@ -356,7 +368,9 @@ def resolve_skill_bind_host_path(
     # 安装到 .agents 侧，此处必须跳过 skill-repo 分支，否则 bind 与文件工具
     # 会落到不同目录（skill-repo / 用户目录），造成沙箱与 /skills/ 不一致。
     if agent_id:
-        agent_skill = get_agent_skills_dir(agent_id) / sid
+        agent_root = get_agent_skills_dir(agent_id)
+        sid = _resolve_skill_dir_name(agent_root, sid)
+        agent_skill = agent_root / sid
         sandbox_agent_skill = get_sandbox_agent_skills_dir(agent_id) / sid
 
         # 远程 dockerd：直接信任 NFS 对齐，返回 SANDBOX 路径
@@ -414,7 +428,9 @@ def resolve_skill_bind_host_path(
         logger.info(f"[Workspace] skill docker bind (builtin): {builtin_path}")
         return builtin_path.resolve()
 
-    ws_skill = get_skills_dir(user_id) / sid
+    skills_root = get_skills_dir(user_id)
+    sid = _resolve_skill_dir_name(skills_root, sid)
+    ws_skill = skills_root / sid
     sandbox_skill = get_sandbox_skills_dir(user_id) / sid
 
     # 双向一致性自愈：SANDBOX 侧有文件而 WORKSPACE 侧为空（卸载残留 / NFS
@@ -607,14 +623,16 @@ def remove_skill_installation(user_id: str, skill_id: str) -> None:
     if not sid or ".." in sid or "/" in sid or "\\" in sid:
         raise ValueError(f"非法 skill_id: {skill_id}")
 
-    user_skill = get_skills_dir(uid) / sid
+    skills_root = get_skills_dir(uid)
+    dir_name = _resolve_skill_dir_name(skills_root, sid)
+    user_skill = skills_root / dir_name
     if user_skill.exists():
         shutil.rmtree(user_skill, ignore_errors=True)
         logger.info(f"[Workspace] 已删除用户 skill 目录 {user_skill}")
 
     # SANDBOX 侧（远程 dockerd 时 Agent 进程可能不可达，best effort）
     try:
-        sandbox_skill = get_sandbox_skills_dir(uid) / sid
+        sandbox_skill = get_sandbox_skills_dir(uid) / dir_name
         if _workspace_roots_differ() and sandbox_skill.exists():
             shutil.rmtree(sandbox_skill, ignore_errors=True)
             logger.info(f"[Workspace] 已删除 sandbox skill 目录 {sandbox_skill}")

@@ -148,6 +148,7 @@ class DatabaseManager:
             await self._migrate_deep_columns(conn)
             await self._migrate_subscription_schema(conn)
             await self._init_scheduled_tasks_table(conn)
+            await self._init_skill_marketplace_tables(conn)
             await self._init_user_llm_profiles_table(conn)
 
     async def _migrate_tool_call_logs_columns(self, conn):
@@ -337,6 +338,8 @@ class DatabaseManager:
             "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS skill_type TEXT NOT NULL DEFAULT 'platform'",
             "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS source_path TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS file_size_bytes BIGINT DEFAULT 0",
+            "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS name_zh TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE skill_catalog ADD COLUMN IF NOT EXISTS name_en TEXT NOT NULL DEFAULT ''",
         ]
         for col_sql in alter_columns:
             try:
@@ -872,6 +875,13 @@ class DatabaseManager:
             )
         except Exception:
             pass
+
+    async def _init_skill_marketplace_tables(self, conn):
+        """Skill 市场写模型：packages / submissions / versions 等。"""
+        from deep_agent_server.skills.marketplace.storage import ensure_marketplace_schema
+
+        await ensure_marketplace_schema(conn)
+        logger.debug("【数据库】✅ Skill marketplace schema 就绪")
 
     async def _init_scheduled_tasks_table(self, conn):
         """初始化 scheduled_tasks 表（定时任务）。"""

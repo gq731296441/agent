@@ -8,10 +8,10 @@ from common.schemas import ApiResponse, ListApiResponse, PaginatedApiResponse
 from db import deep_storage
 from deep_agent_server.skills.installer import (
     SkillInstallError,
-    install_skill_for_user,
     uninstall_skill_for_user,
     upgrade_skill_for_user,
 )
+from deep_agent_server.skills.marketplace.install import InstallError, install_pinned_version
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
@@ -58,6 +58,7 @@ async def get_catalog_item(
     if not row or row.get("status") != "published":
         return ApiResponse.error(msg="Skill 不存在", code=404)
     data = dict(row)
+    data["name"] = (data.get("name_zh") or data.get("name") or skill_id).strip()
     if data.get("created_at"):
         data["created_at"] = data["created_at"].isoformat()
     if data.get("updated_at"):
@@ -89,8 +90,10 @@ async def list_subscribed(user_id: str = Query(...)):
 @router.post("/subscribe/{skill_id}", response_model=ApiResponse)
 async def subscribe_skill(skill_id: str, user_id: str = Query(...)):
     try:
-        data = await install_skill_for_user(user_id, skill_id)
+        data = await install_pinned_version(user_id, skill_id)
         return ApiResponse.success(data=data, msg="订阅成功")
+    except InstallError as e:
+        return ApiResponse.error(msg=e.message, code=e.code)
     except SkillInstallError as e:
         return ApiResponse.error(msg=str(e), code=e.code)
 

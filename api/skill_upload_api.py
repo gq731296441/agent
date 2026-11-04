@@ -1,173 +1,224 @@
-"""Skill 上传/管理 API：用户上传、更新、删除、导出 skill。"""
+"""Skill 上传 API：异步 submit + 查询/重试/取消。"""
 
-from urllib.parse import quote
+from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import Response
+import json
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, File, Form, Header, Query, UploadFile
 
 from common.schemas import ApiResponse, ListApiResponse
-from db import deep_storage
-from deep_agent_server.skills.admin_service import submit_skill_for_review
-from deep_agent_server.skills.vm_repo import (
-    export_skill_as_zip,
-    upload_skill_zip,
+from deep_agent_server.skills.marketplace import storage as ms
+from deep_agent_server.skills.marketplace.publish_service import (
+    PublishError,
+    get_publish_service,
 )
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
 
-# ── 我创建的 Skill ──
+def _with_scan_progress(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not row:
+        return row
+    data = dict(row)
+    meta = data.get("meta")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except Exception:
+            meta = {}
+    if not isinstance(meta, dict):
+        meta = {}
+    data["scan_progress"] = meta.get("scan_progress")
+    return data
 
 
 @router.get("/my-skills", response_model=ListApiResponse)
 async def list_my_skills(user_id: str = Query(...)):
-    rows = await deep_storage.list_skills_by_creator(user_id)
-    return ListApiResponse.success(data=rows)
+    rows = await ms.list_submissions_for_user(user_id)
+    return ListApiResponse.success(data=[_with_scan_progress(r) for r in rows])
 
 
-# ── 上传新 Skill ──
+@router.get("/submissions", response_model=ListApiResponse)
+async def list_my_submissions(user_id: str = Query(...), limit: int = Query(50, ge=1, le=200)):
+    rows = await ms.list_submissions_for_user(user_id, limit=limit)
+    return ListApiResponse.success(data=[_with_scan_progress(r) for r in rows])
+
+
+@router.get("/uploads", response_model=ListApiResponse)
+async def list_my_uploads(user_id: str = Query(...), limit: int = Query(50, ge=1, le=200)):
+    rows = await ms.list_uploads_for_user(user_id, limit=limit)
+    data = []
+    for row in rows:
+        item = _with_scan_progress(row)
+        st = item.get("status") or ""
+        item["reviewed"] = st in ("AWAITING_REVIEW", "PROMOTED") or bool(item.get("version_id"))
+        data.append(item)
+    return ListApiResponse.success(data=data)
+
+
+@router.get("/uploads/{package_id}", response_model=ApiResponse)
+async def get_my_upload(package_id: str, user_id: str = Query(...)):
+    pkg = await ms.get_package(package_id)
+    if not pkg:
+        return ApiResponse.error(msg="不存在", code=404)
+    if pkg.get("owner_id") != user_id:
+        from db import deep_storage
+
+        if not await deep_storage.is_admin(user_id):
+            return ApiResponse.error(msg="不存在", code=404)
+    subs = await ms.list_submissions_for_package(package_id, limit=20)
+    latest = _with_scan_progress(subs[0]) if subs else None
+    findings = []
+    if latest:
+        findings = await ms.list_findings(latest["id"])
+        latest["findings"] = findings
+    versions = await ms.list_versions_for_package(package_id)
+    install_count = await ms.count_package_installs(package_id)
+    return ApiResponse.success(
+        data={
+            "package": pkg,
+            "latest_submission": latest,
+            "submissions": [_with_scan_progress(s) for s in subs],
+            "versions": versions,
+            "findings": findings,
+            "install_count": install_count,
+            "reviewed": any(
+                (v.get("status") or "") in ("PUBLISHED", "REVIEW_PENDING", "QUARANTINED")
+                for v in versions
+            )
+            or any(
+                (s.get("status") or "") in ("AWAITING_REVIEW", "PROMOTED") for s in subs
+            ),
+        }
+    )
+
+
+@router.delete("/uploads/{package_id}", response_model=ApiResponse)
+async def delete_my_upload(package_id: str, user_id: str = Query(...)):
+    try:
+        result = await get_publish_service().withdraw_package(package_id, user_id)
+        return ApiResponse.success(data=result, msg="已删除并下架")
+    except PublishError as e:
+        return ApiResponse.error(msg=e.message, code=e.code)
+
+
+@router.get("/submissions/{submission_id}", response_model=ApiResponse)
+async def get_submission(submission_id: str, user_id: str = Query(...)):
+    sub = await ms.get_submission(submission_id)
+    if not sub:
+        return ApiResponse.error(msg="不存在", code=404)
+    if sub["submitter_id"] != user_id:
+        from db import deep_storage
+
+        if not await deep_storage.is_admin(user_id):
+            return ApiResponse.error(msg="不存在", code=404)
+    findings = await ms.list_findings(submission_id)
+    data = _with_scan_progress(dict(sub))
+    data["findings"] = findings
+    return ApiResponse.success(data=data)
 
 
 @router.post("/upload", response_model=ApiResponse)
 async def upload_skill(
     user_id: str = Query(...),
     file: UploadFile = File(...),
-    name: str = Form(...),
+    version: str = Form(...),
+    package_id: str = Form(""),
+    requested_visibility: str = Form("public"),
+    name_zh: str = Form(""),
+    name_en: str = Form(""),
     description: str = Form(""),
-    version: str = Form("1.0.0"),
     tags: str = Form(""),
     author: str = Form(""),
+    idempotency_key_header: Optional[str] = Header(None, alias="Idempotency-Key"),
+    idempotency_key: str = Form(""),
 ):
-    """上传 Skill ZIP 包。创建后状态为 draft，需管理员审核发布。"""
-    if not file.filename or not file.filename.lower().endswith(".zip"):
-        return ApiResponse.error(msg="仅支持 ZIP 文件", code=400)
-
+    """异步提交：返回 submission_id，不在请求内跑完扫描。"""
+    key = (idempotency_key_header or idempotency_key or "").strip() or None
     try:
-        zip_data = await file.read()
-        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+        # 流式读取并硬限
+        from config.config import app_config
 
-        result = await upload_skill_zip(
-            user_id=user_id,
-            zip_data=zip_data,
-            name=name,
-            description=description,
-            version=version,
-            tags=tag_list,
-            author=author or user_id,
+        max_bytes = int(getattr(app_config, "SKILL_UPLOAD_MAX_BYTES", 52428800))
+        chunks = []
+        total = 0
+        while True:
+            chunk = await file.read(1024 * 256)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                return ApiResponse.error(msg=f"ZIP 超过 {max_bytes // 1024 // 1024} MiB", code=400)
+            chunks.append(chunk)
+        zip_bytes = b"".join(chunks)
+        if not zip_bytes:
+            return ApiResponse.error(msg="空文件", code=400)
+
+        svc = get_publish_service()
+        result = await svc.submit(
+            submitter_id=user_id,
+            zip_bytes=zip_bytes,
+            version=version.strip(),
+            package_id=(package_id or "").strip() or None,
+            requested_visibility="public",
+            idempotency_key=key,
+            declared_meta={
+                "name_zh": name_zh,
+                "name_en": name_en,
+                "description": description,
+                "tags": tags,
+                "author": author or user_id,
+            },
         )
-
-        # 自动提交发布审批
-        try:
-            await submit_skill_for_review(
-                skill_id=result["skill_id"],
-                action_type="publish",
-                requested_by=user_id,
-                new_version=version,
-            )
-        except Exception:
-            pass  # 提交审批失败不影响上传
-
-        return ApiResponse.success(data=result, msg="上传成功，已提交审核")
-    except ValueError as e:
-        return ApiResponse.error(msg=str(e), code=400)
+        return ApiResponse.success(data=result, msg="已提交")
+    except PublishError as e:
+        return ApiResponse.error(msg=e.message, code=e.code)
     except Exception as e:
         return ApiResponse.error(msg=f"上传失败: {e}", code=500)
 
 
-# ── 更新 Skill ──
-
-
-@router.put("/update/{skill_id}", response_model=ApiResponse)
-async def update_skill(
-    skill_id: str,
-    user_id: str = Query(...),
-    file: UploadFile = File(...),
-    name: str = Form(""),
-    description: str = Form(""),
-    version: str = Form(""),
-    tags: str = Form(""),
-    author: str = Form(""),
-):
-    """更新已有的 skill（上传新 ZIP 覆盖）。需要管理员审核。"""
-    if not file.filename or not file.filename.lower().endswith(".zip"):
-        return ApiResponse.error(msg="仅支持 ZIP 文件", code=400)
-
-    catalog = await deep_storage.get_skill_catalog(skill_id)
-    if not catalog:
-        return ApiResponse.error(msg="Skill 不存在", code=404)
-
-    # 校验所有权
-    if catalog.get("creator_user_id") and catalog["creator_user_id"] != user_id:
-        is_admin = await deep_storage.is_admin(user_id)
-        if not is_admin:
-            return ApiResponse.error(msg="无权更新该 Skill", code=403)
-
+@router.post("/submissions/{submission_id}/retry", response_model=ApiResponse)
+async def retry_submission(submission_id: str, user_id: str = Query(...)):
     try:
-        zip_data = await file.read()
-        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else ""
-
-        result = await upload_skill_zip(
-            user_id=user_id,
-            zip_data=zip_data,
-            name=name or catalog.get("name", ""),
-            description=description or catalog.get("description", ""),
-            version=version or catalog.get("version", "1.0.0"),
-            tags=tag_list if isinstance(tag_list, list) else list(catalog.get("tags") or []),
-            author=author or catalog.get("author", ""),
-            existing_skill_id=skill_id,
-        )
-
-        # 提交更新审批
-        await submit_skill_for_review(
-            skill_id=skill_id,
-            action_type="update",
-            requested_by=user_id,
-            old_version=catalog.get("version", ""),
-            new_version=result["version"],
-        )
-
-        return ApiResponse.success(data=result, msg="更新已提交审核")
-    except ValueError as e:
-        return ApiResponse.error(msg=str(e), code=400)
-    except Exception as e:
-        return ApiResponse.error(msg=f"更新失败: {e}", code=500)
+        result = await get_publish_service().retry_scan(submission_id, user_id)
+        return ApiResponse.success(data=result, msg="已重新入队")
+    except PublishError as e:
+        return ApiResponse.error(msg=e.message, code=e.code)
 
 
-# ── 删除 Skill ──
+@router.post("/submissions/{submission_id}/cancel", response_model=ApiResponse)
+async def cancel_submission(submission_id: str, user_id: str = Query(...)):
+    try:
+        result = await get_publish_service().cancel(submission_id, user_id)
+        return ApiResponse.success(data=result, msg="已取消")
+    except PublishError as e:
+        return ApiResponse.error(msg=e.message, code=e.code)
+
+
+# 旧 update/delete/export：update 改为提示走新 submit；保留 export 兼容
+@router.put("/update/{skill_id}", response_model=ApiResponse)
+async def update_skill_legacy(skill_id: str, user_id: str = Query(...)):
+    return ApiResponse.error(
+        msg="请使用 POST /skills/upload 并指定 package_id 与更高 SemVer 提交新版本",
+        code=410,
+    )
 
 
 @router.delete("/delete/{skill_id}", response_model=ApiResponse)
-async def delete_skill(skill_id: str, user_id: str = Query(...)):
-    """删除自己创建的 skill（需管理员审批）。"""
-    catalog = await deep_storage.get_skill_catalog(skill_id)
-    if not catalog:
-        return ApiResponse.error(msg="Skill 不存在", code=404)
-
-    if catalog.get("creator_user_id") and catalog["creator_user_id"] != user_id:
-        is_admin = await deep_storage.is_admin(user_id)
-        if not is_admin:
-            return ApiResponse.error(msg="无权删除该 Skill", code=403)
-
-    try:
-        review_id = await submit_skill_for_review(
-            skill_id=skill_id,
-            action_type="delete",
-            requested_by=user_id,
-        )
-        return ApiResponse.success(
-            data={"skill_id": skill_id, "review_id": review_id},
-            msg="删除申请已提交审核",
-        )
-    except Exception as e:
-        return ApiResponse.error(msg=str(e), code=400)
-
-
-# ── 导出 Skill ──
+async def delete_skill_legacy(skill_id: str, user_id: str = Query(...)):
+    return ApiResponse.error(msg="删除请联系管理员隔离或下架", code=410)
 
 
 @router.get("/{skill_id}/export")
 async def export_skill(skill_id: str, user_id: str = Query("")):
-    """下载 skill 为 ZIP 文件。"""
+    from urllib.parse import quote
+
+    from fastapi import HTTPException
+    from fastapi.responses import Response
+
+    from deep_agent_server.skills.vm_repo import export_skill_as_zip
+
     try:
         zip_bytes, filename = export_skill_as_zip(skill_id)
         encoded = quote(filename)

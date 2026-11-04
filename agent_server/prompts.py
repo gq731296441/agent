@@ -16,7 +16,7 @@ _ENV_AND_FS_SECTION = """
 ## 环境与文件系统
 你拥有以下虚拟文件系统：
 
-- `/skills/` — 技能安装目录（只读）。每个技能位于 `/skills/{{skill_id}}/` 下，通过 `read_file` 读取 `SKILL.md` 获取完整说明，无权限读取表示该技能被关闭。
+- `/skills/` — 技能安装目录（只读）。每个技能位于 `/skills/<技能目录名>/` 下，通过 `read_file` 读取 `SKILL.md` 获取完整说明，无权限读取表示该技能被关闭。技能目录名即该技能 `SKILL.md` frontmatter 中 `name` 的值。
 - `/workspace/` — 当前会话工作目录（可读写）。**所有输出文件、生成结果、中间产物必须写在此处**。不要写到 `/tmp/` 或其他临时路径。
 - `/memories/` — 持久化记忆存储。
 
@@ -30,11 +30,11 @@ _SANDBOX_SECTION = """
 - **文件工具**（`read_file`、`write_file`、`edit_file`、`ls`、`glob`、`grep`）在**宿主机**上执行，使用 `/skills/`、`/workspace/` 路径。
 - **`execute` 工具**在**沙箱容器内**执行，工作目录为 `/workspace`。
 - 容器内 `/workspace` 与宿主机 `/workspace/` 是同一份共享数据，通过 NFS 或 bind mount 实时同步。
-- 技能在容器内的只读挂载路径为 `/mnt/skills/{{skill_id}}/`，内容与 `/skills/{{skill_id}}/` 一致。
+- 技能在容器内的只读挂载路径为 `/mnt/skills/<技能目录名>/`，内容与 `/skills/<技能目录名>/` 一致。
 
 **核心原则：**
 - 文件工具只用 `/skills/` 和 `/workspace/` 路径。
-- `execute` 命令中只用 `/workspace` 和 `/mnt/skills/{{skill_id}}/` 路径。
+- `execute` 命令中只用 `/workspace` 和 `/mnt/skills/<技能目录名>/` 路径。
 - **绝对不要**在 `execute` 中使用 `/skills/`（容器内不存在该路径）。
 - **绝对不要**用文件工具访问 `/mnt/skills/`（该路径仅在容器内存在）。
 - 文件工具的结果直接反映宿主机文件系统，execute 的输出是容器内 stdout/stderr，两者通过共享 `/workspace/` 实现数据互通。
@@ -55,12 +55,23 @@ _MCP_SKILL_SECTION = """
 **技能系统（Skills）**：
 - 技能是预置的可复用任务包，采用渐进式披露：
   1. 下方列出已启用的技能名称和简述。
-  2. 完整说明在 `/skills/{{skill_id}}/SKILL.md` 中，使用 `read_file` 按需读取。
-  3. 技能中的脚本通过 `execute` 在容器内运行，路径使用 `/mnt/skills/{{skill_id}}/`。
+  2. 完整说明在 `/skills/<技能目录名>/SKILL.md` 中，使用 `read_file` 按需读取。
+  3. 技能中的脚本通过 `execute` 在容器内运行，路径使用 `/mnt/skills/<技能目录名>/`。
 - 未在下方列出的技能均处于**已关闭**状态，不要尝试访问或绕过限制。
+
+**技能路径与命令改写规则（与技能文档冲突时，以本节为准）：**
+- `execute` 的默认工作目录是 `/workspace`，**不是技能目录**。技能文档中的相对脚本命令（如 `python main.py ...`、`python scripts/xxx.py ...`、`./run.sh`）一律改写为 `python3 /mnt/skills/<技能目录名>/<相对路径> ...`。
+- `<技能目录名>` 就是 `/skills/` 下的技能目录名，也就是该技能 `SKILL.md` frontmatter 中 `name` 的值（本平台两者一致）。
+- 技能文档中的相对文件路径（`references/...`、`assets/...`、`templates/...` 等）：用 `read_file` / `ls` 时按 `/skills/<技能目录名>/...` 解析；用 `execute` 时按 `/mnt/skills/<技能目录名>/...` 解析。
+- 技能文档中的相对输出路径（`./output`、`Excel 同目录`、`~/...`、`/tmp/...`）一律改为 `/workspace/...`。
+- 不要 `cd` 进技能目录执行，也不要假设当前目录是技能目录；脚本一律用绝对路径调用。
+- 技能文档要求交互式确认（`input()`、`read`、`Y/N`）时，必须使用技能提供的非交互参数（如 `--no-prompt`、`--yes`）；没有此类参数时，先告知用户该技能无法自动执行。
+- 示例：技能 `demo` 的文档写 `python main.py validate xxx.xlsx`，实际应执行 `python3 /mnt/skills/demo/main.py validate /workspace/xxx.xlsx --output-dir /workspace/output`。
 
 **选择与调用：**
 - 用户选择的工具和skill技能会随时改变，调用前需确认工具是否开启。
+- **图片理解 / OCR 统一使用内置 `read_image` 工具**；不要调用任何 MCP 的图片识别/OCR 类工具（相关 MCP 已停用且不可用）。
+- 技能文档中的命令示例是技能作者本机视角，不代表平台路径；执行前必须按上面的规则改写。
 - 工具和技能中的 token 参数以系统提示中的'用户token'为准，不使用过期 token。
 - 涉及html文件的生成请使用`vanilla-web-builder`和`frontend-design`技能
 

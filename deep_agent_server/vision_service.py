@@ -1,12 +1,17 @@
-"""Vision API 服务 — nebulacoder-v8.0 多模态接口。
+"""Vision API 服务 — Qwen3-VL 多模态接口。
 
-封装新 Vision API 的调用逻辑，被 file_parser.py（后端解析）和
+封装多模态图片识别调用，被 file_parser.py（后端解析）和
 builtin_tools/image_reader.py（Agent 工具）共用。
 
-API:
-  URL:     http://10.57.230.76:40082/v1/chat/completions
-  Model:   nebulacoder-v8.0
-  Auth:    纯工号（无 "Bearer " 前缀）
+默认 API（可在 .env 中覆盖）:
+  URL:     https://maas-apigateway.dt.zte.com.cn/model/qwen3-vl-32b-instruct/v1/chat/completions
+  Model:   Qwen3-VL-32B-Instruct
+  Auth:    Bearer <VISION_API_KEY>
+
+兼容说明：
+  - 配置了 VISION_API_KEY 时使用 `Authorization: Bearer <key>`；
+  - 未配置时回退为旧 nebulacoder 的“纯工号”认证（需同时把
+    VISION_API_URL / VISION_MODEL 指回旧接口），否则会认证失败。
 """
 
 import base64
@@ -15,13 +20,9 @@ from pathlib import Path
 import httpx
 
 from config import get_logger
+from config.config import app_config
 
 logger = get_logger(__name__)
-
-# 新 Vision API 配置
-VISION_BASE_URL = "http://10.57.230.76:40082/v1/chat/completions"
-VISION_MODEL = "nebulacoder-v8.0"
-VISION_TIMEOUT = 120  # 秒
 
 # 支持的图片格式
 SUPPORTED_IMAGE_EXTENSIONS: set[str] = {
@@ -31,6 +32,9 @@ SUPPORTED_IMAGE_EXTENSIONS: set[str] = {
 
 # 单张图片大小上限（20MB）
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
+
+# 错误响应 body 日志截断长度
+_ERROR_BODY_LOG_LIMIT = 500
 
 
 def _get_mime_type(suffix: str) -> str:
@@ -50,19 +54,42 @@ def _get_mime_type(suffix: str) -> str:
     return mapping.get(suffix.lower(), "image/jpeg")
 
 
+def _extract_content(result: dict) -> str:
+    """从 OpenAI 兼容响应中提取文本内容。
+
+    兼容 content 为字符串或分段列表（多模态模型常见）两种格式。
+    """
+    try:
+        content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except (AttributeError, IndexError, TypeError):
+        return ""
+
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts).strip()
+    return str(content).strip() if content else ""
+
+
 async def analyze_image(
     image_path: Path,
     user_id: str,
     question: str = "请详细描述这张图片的内容",
-    timeout: int = VISION_TIMEOUT,
+    timeout: int | None = None,
 ) -> str:
-    """使用新 Vision API 分析图片，返回文本描述。
+    """使用多模态模型分析图片，返回文本描述。
 
     Args:
         image_path: 图片磁盘绝对路径
-        user_id: 用户 8 位工号（用作 Authorization header）
+        user_id: 用户 8 位工号（仅在未配置 API Key、回退旧接口时用作认证）
         question: 对图片的提问
-        timeout: 超时秒数
+        timeout: 超时秒数（默认读取 VISION_TIMEOUT）
 
     Returns:
         描述文本。失败时返回错误字符串（而非抛异常），
@@ -100,57 +127,76 @@ async def analyze_image(
     mime = _get_mime_type(suffix)
     data_url = f"data:{mime};base64,{b64_data}"
 
-    # 4. 调用 API
-    headers = {
-        "Authorization": str(user_id),  # 纯工号，无 "Bearer " 前缀
-        "Content-Type": "application/json",
-    }
+    # 4. 认证头：优先 Bearer API Key；未配置时兼容旧版纯工号
+    api_url = (app_config.VISION_API_URL or "").strip()
+    model = (app_config.VISION_MODEL or "").strip()
+    api_key = (app_config.VISION_API_KEY or "").strip()
+    if not api_url or not model:
+        return "错误：未配置 VISION_API_URL / VISION_MODEL，无法调用图片识别服务"
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    else:
+        headers["Authorization"] = str(user_id)
+        logger.warning(
+            "VISION_API_KEY 未配置，使用纯工号认证；"
+            "仅当 VISION_API_URL 指向旧 nebulacoder 接口时可用"
+        )
+
     payload = {
-        "model": VISION_MODEL,
+        "model": model,
         "messages": [
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": question},
                     {"type": "image_url", "image_url": {"url": data_url}},
+                    {"type": "text", "text": question},
                 ],
             }
         ],
         "stream": False,
-        "temperature": 0.2,
-        "think_mode": "normal",
     }
 
+    # 5. 调用 API
+    eff_timeout = timeout or app_config.VISION_TIMEOUT
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(VISION_BASE_URL, headers=headers, json=payload)
+        # trust_env=False：绕过系统 http(s)_proxy / all_proxy（部分环境配置了
+        # httpx 不支持的 socks 代理；该接口是内网直连域名，no_proxy 已覆盖）
+        async with httpx.AsyncClient(timeout=eff_timeout, trust_env=False) as client:
+            response = await client.post(api_url, headers=headers, json=payload)
             if response.status_code != 200:
+                body = (response.text or "")[:_ERROR_BODY_LOG_LIMIT]
                 logger.error(
                     f"Vision API 错误 status={response.status_code} "
-                    f"file={image_path.name}"
+                    f"file={image_path.name} body={body}"
                 )
                 return (
                     f"图片解析失败: API 返回 {response.status_code}。"
                     f"请稍后重试。"
                 )
 
-            result = response.json()
-            content = (
-                result.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-            )
+            try:
+                result = response.json()
+            except ValueError:
+                logger.error(
+                    f"Vision API 返回非 JSON file={image_path.name} "
+                    f"body={(response.text or '')[:_ERROR_BODY_LOG_LIMIT]}"
+                )
+                return "图片解析失败: API 返回非 JSON 内容。"
+
+            content = _extract_content(result)
             if not content:
                 return "图片解析完成，但未返回有效内容。"
 
             logger.info(
                 f"Vision API 成功 file={image_path.name} "
-                f"response_len={len(content)}"
+                f"model={model} response_len={len(content)}"
             )
             return content
 
     except httpx.TimeoutException:
-        return f"图片解析超时（{timeout}秒），请重试或使用更小的图片。"
+        return f"图片解析超时（{eff_timeout}秒），请重试或使用更小的图片。"
     except Exception as e:
         logger.error(f"Vision API 调用失败 file={image_path.name} error={e}")
         return f"图片解析失败: {e}"

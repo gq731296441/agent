@@ -41,6 +41,10 @@ _BLOCKED_PATH_PARTS = (
     "/.sandbox/",
 )
 
+# 后端文件解析缓存（file_parser.CACHE_SUFFIX）：{原文件}.parsed.txt
+# 属于内部中间产物，不作为会话文件卡片展示
+_PARSE_CACHE_SUFFIX = ".parsed.txt"
+
 
 def file_extension(path: str) -> str:
     name = (path or "").split("/")[-1]
@@ -58,6 +62,9 @@ def is_card_eligible_agent_path(agent_path: str) -> bool:
     for part in _BLOCKED_PATH_PARTS:
         if part in norm:
             return False
+    # 解析缓存文件（如 untitled.png.parsed.txt）不展示为文件卡片
+    if p.lower().endswith(_PARSE_CACHE_SUFFIX):
+        return False
     ext = file_extension(p)
     if not ext or ext in _IMAGE_EXTS:
         return False
@@ -282,6 +289,9 @@ def find_recent_document_files(
         for name in filenames:
             if "." not in name:
                 continue
+            # 排除后端解析缓存（{原文件}.parsed.txt），不作为会话文档登记
+            if name.lower().endswith(_PARSE_CACHE_SUFFIX):
+                continue
             if name.rsplit(".", 1)[-1].lower() not in _CARD_EXTS:
                 continue
             path = Path(dirpath) / name
@@ -365,6 +375,9 @@ def build_conversation_files_payload(
         if len(files) >= _MAX_CARD_FILES:
             break
         agent_path = item.get("agent_path") or ""
+        # 兜底过滤：解析缓存等内部文件不进入卡片（recorded 可能来自 execute 兜底扫描）
+        if not agent_path or not is_card_eligible_agent_path(agent_path):
+            continue
         entry = build_file_entry(
             user_id=user_id,
             session_id=session_id,

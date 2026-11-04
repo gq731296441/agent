@@ -43,17 +43,61 @@ async def set_catalog_status(
     return ApiResponse.success(msg="状态已更新")
 
 
-# ── VM 迁移 ──
+# ── 可信导入（P1e）──
+
+
+class ImportBody(BaseModel):
+    package_id: str
+    version: str
+    source_path: str = Field(..., description="服务器本地 ZIP 或目录路径")
+    policy: str = Field(default="trusted_import", pattern="^(trusted_import|emergency_import)$")
+    reason: str = ""
+    visibility: str = "public"
+    origin: str = "official"
+    operator: str = "system"
+
+
+@router.post("/import", response_model=ApiResponse)
+async def import_trusted_skill(
+    body: ImportBody,
+    x_internal_token: str | None = Header(default=None),
+):
+    """管理员/内部可信导入：可跳过扫描与人审，不可跳过结构校验。"""
+    _verify_internal_token(x_internal_token)
+    from pathlib import Path
+
+    from deep_agent_server.skills.marketplace.publish_service import (
+        PublishError,
+        get_publish_service,
+    )
+
+    src = Path(body.source_path)
+    try:
+        result = await get_publish_service().import_trusted(
+            source=src,
+            package_id=body.package_id.strip(),
+            version=body.version.strip(),
+            operator=body.operator or "system",
+            policy=body.policy,
+            reason=body.reason,
+            visibility=body.visibility,
+            origin=body.origin,
+        )
+        return ApiResponse.success(data=result, msg="导入完成")
+    except PublishError as e:
+        return ApiResponse.error(msg=e.message, code=e.code)
+
+
+# ── VM 迁移（已废弃：保留接口但提示改用 import）──
 
 
 @router.post("/migrate-vm", response_model=ApiResponse)
 async def migrate_to_vm_repo(x_internal_token: str | None = Header(default=None)):
-    """首次部署/手动触发：将项目 skill-repo/ 非内置 skill 迁移到 VM .skill-repo/。"""
     _verify_internal_token(x_internal_token)
-    from deep_agent_server.skills.vm_repo import migrate_non_builtin_skills
-
-    result = await migrate_non_builtin_skills()
-    return ApiResponse.success(data=result, msg="迁移完成")
+    return ApiResponse.error(
+        msg="已废弃：请使用 POST /internal/skills/import 与显式 package_id+version 清单",
+        code=410,
+    )
 
 
 # ── 管理员初始化 ──

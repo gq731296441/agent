@@ -162,13 +162,7 @@ async def lifespan(app: FastAPI):
 
         if app_config.SKILL_CATALOG_AUTO_SYNC:
             try:
-                # 第一步：将项目 skill-repo/ 非内置 skill 迁移到 VM .skill-repo/
-                from deep_agent_server.skills.vm_repo import migrate_non_builtin_skills
-
-                migration_result = await migrate_non_builtin_skills()
-                logger.info(f"【SkillCatalog】VM 迁移: {migration_result}")
-
-                # 第二步：从 VM .skill-repo/ 同步 catalog
+                # 不再启动 migrate_non_builtin_skills；官方包用 import_trusted 清单导入
                 from deep_agent_server.skills.catalog_sync import sync_catalog_from_repo
 
                 vm_root = app_config.get_vm_skill_repo_root()
@@ -177,6 +171,29 @@ async def lifespan(app: FastAPI):
                 logger.info(f"【SkillCatalog】启动同步: {sync_result}")
             except Exception as e:
                 logger.warning(f"【SkillCatalog】启动同步失败: {e}")
+
+        # 旧安装目录迁移：目录名 skill_id → 英文名（使 ls /skills 与技能名一致）
+        try:
+            from deep_agent_server.skills.dirs import migrate_legacy_skill_dirs
+
+            migrate_result = await migrate_legacy_skill_dirs()
+            if migrate_result.get("migrated") or migrate_result.get("errors"):
+                logger.info(f"【SkillDirMigrate】{migrate_result}")
+        except Exception as e:
+            logger.warning(f"【SkillDirMigrate】迁移失败: {e}")
+
+        if getattr(app_config, "SKILL_MARKETPLACE_WORKER", True):
+            try:
+                from deep_agent_server.skills.marketplace.worker import start_marketplace_worker
+                from deep_agent_server.skills.marketplace.release import recover_orphaned_releases
+                from deep_agent_server.skills.marketplace.gc import cleanup_expired_builds
+
+                await recover_orphaned_releases()
+                await cleanup_expired_builds()
+                await start_marketplace_worker()
+                logger.info("【SkillMarketplace】Worker 已启动")
+            except Exception as e:
+                logger.warning(f"【SkillMarketplace】Worker 启动失败: {e}")
 
         # 确保所有已有订阅智能体的 .agents/{agent_id}/skills/ 目录已初始化
         try:
@@ -189,12 +206,23 @@ async def lifespan(app: FastAPI):
             errors = 0
             for aid in agent_ids:
                 try:
+                    market_ids = await _ds.get_agent_market_skill_ids(aid)
+                    if not market_ids:
+                        continue
+                    # 仅在目录缺失或存在旧布局（uskill-* 无 sidecar）时重建，
+                    # 避免每次启动全量拷贝所有智能体技能文件
                     root = get_agent_skills_dir(aid)
-                    if not root.is_dir():
-                        market_ids = await _ds.get_agent_market_skill_ids(aid)
-                        if market_ids:
-                            sync_skills_to_agent(aid, market_ids)
-                            migrated += 1
+                    need_sync = not root.is_dir()
+                    if not need_sync:
+                        need_sync = any(
+                            p.is_dir()
+                            and p.name.startswith("uskill-")
+                            and not (p / ".install-meta.json").is_file()
+                            for p in root.iterdir()
+                        )
+                    if need_sync:
+                        await sync_skills_to_agent(aid, market_ids)
+                        migrated += 1
                 except Exception as e:
                     errors += 1
                     logger.warning(
@@ -283,6 +311,13 @@ async def lifespan(app: FastAPI):
             logger.info("✅ 定时任务 sweeper 已停止")
         except Exception as e:
             logger.warning(f"【app】⚠️ 定时任务 sweeper 关闭失败: {e}")
+        try:
+            from deep_agent_server.skills.marketplace.worker import stop_marketplace_worker
+
+            await stop_marketplace_worker()
+            logger.info("✅ Skill marketplace worker 已停止")
+        except Exception as e:
+            logger.warning(f"【app】⚠️ Skill marketplace worker 关闭失败: {e}")
         try:
             from deep_agent_server.sandbox.status_notify import set_sandbox_status_notifier
             from deep_agent_server.hitl.sweeper import set_hitl_ws_notifier

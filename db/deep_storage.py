@@ -1109,14 +1109,17 @@ async def upsert_skill_catalog(
     repo_rel_path: str,
     *,
     status: str = "published",
+    name_zh: str = "",
+    name_en: str = "",
 ) -> None:
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
             INSERT INTO skill_catalog (
-                skill_id, name, description, version, tags, author, status, repo_rel_path
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                skill_id, name, description, version, tags, author, status, repo_rel_path,
+                name_zh, name_en
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ON CONFLICT (skill_id) DO UPDATE SET
                 name = EXCLUDED.name,
                 description = EXCLUDED.description,
@@ -1124,6 +1127,14 @@ async def upsert_skill_catalog(
                 tags = EXCLUDED.tags,
                 author = EXCLUDED.author,
                 repo_rel_path = EXCLUDED.repo_rel_path,
+                name_zh = CASE
+                    WHEN EXCLUDED.name_zh <> '' THEN EXCLUDED.name_zh
+                    ELSE skill_catalog.name_zh
+                END,
+                name_en = CASE
+                    WHEN EXCLUDED.name_en <> '' THEN EXCLUDED.name_en
+                    ELSE skill_catalog.name_en
+                END,
                 status = CASE
                     WHEN skill_catalog.status = 'archived' AND EXCLUDED.status = 'published'
                     THEN 'published'
@@ -1139,6 +1150,8 @@ async def upsert_skill_catalog(
             author or "",
             status,
             repo_rel_path,
+            name_zh or "",
+            name_en or "",
         )
 
 
@@ -1191,6 +1204,8 @@ async def delete_missing_skills(present_ids: List[str]) -> int:
             """
             DELETE FROM skill_catalog
             WHERE skill_id != ALL($1::text[])
+              AND COALESCE(skill_type, 'platform') <> 'user'
+              AND skill_id NOT LIKE 'uskill-%'
             """,
             present_ids,
         )
@@ -1213,13 +1228,16 @@ async def list_skill_catalog(
     page_size = max(1, min(page_size, 100))
     offset = (page - 1) * page_size
 
-    conditions = ["c.status = $1"]
+    conditions = [
+        "c.status = $1",
+        "NOT EXISTS (SELECT 1 FROM skill_packages p WHERE p.id = c.skill_id AND p.delisted = TRUE)",
+    ]
     params: List[Any] = [status]
     idx = 2
 
     if q:
         conditions.append(
-            f"(c.skill_id ILIKE ${idx} OR c.name ILIKE ${idx} OR c.description ILIKE ${idx})"
+            f"(c.skill_id ILIKE ${idx} OR c.name ILIKE ${idx} OR c.name_zh ILIKE ${idx} OR c.name_en ILIKE ${idx} OR c.description ILIKE ${idx})"
         )
         params.append(f"%{q}%")
         idx += 1
@@ -1249,7 +1267,9 @@ async def list_skill_catalog(
     list_sql = f"""
         SELECT
             c.skill_id,
-            c.name,
+            COALESCE(NULLIF(c.name_zh, ''), c.name) AS name,
+            c.name_zh,
+            c.name_en,
             c.description,
             c.version,
             c.tags,
@@ -1298,6 +1318,10 @@ async def list_skill_catalog_tags(status: str = "published") -> List[str]:
             WHERE c.status = $1
               AND tag IS NOT NULL
               AND btrim(tag) != ''
+              AND NOT EXISTS (
+                SELECT 1 FROM skill_packages p
+                WHERE p.id = c.skill_id AND p.delisted = TRUE
+              )
             ORDER BY tag
             """,
             status,
@@ -1317,15 +1341,17 @@ async def list_user_subscribed_skills(user_id: str) -> List[Dict[str, Any]]:
                 uis.install_dir,
                 uis.version AS installed_version,
                 uis.installed_at,
-                c.name,
+                COALESCE(NULLIF(c.name_zh, ''), c.name) AS name,
                 c.description,
                 c.version AS latest_version,
                 c.tags,
                 c.author,
                 c.status AS catalog_status,
-                c.updated_at AS catalog_updated_at
+                c.updated_at AS catalog_updated_at,
+                COALESCE(p.delisted, FALSE) AS delisted
             FROM user_installed_skills uis
             LEFT JOIN skill_catalog c ON c.skill_id = uis.market_skill_id
+            LEFT JOIN skill_packages p ON p.id = uis.market_skill_id
             WHERE uis.user_id = $1
             ORDER BY uis.installed_at DESC
             """,
@@ -1348,6 +1374,7 @@ async def list_user_subscribed_skills(user_id: str) -> List[Dict[str, Any]]:
                 and version_is_newer(latest, installed)
             )
             d["latest_version"] = latest
+            d["delisted"] = bool(d.get("delisted"))
             result.append(d)
         return result
 
@@ -1399,7 +1426,7 @@ async def set_agent_skill_bindings(
                 skill_name = (names.get(sid) or "").strip()
                 if not skill_name:
                     cat = await conn.fetchrow(
-                        "SELECT name FROM skill_catalog WHERE skill_id = $1", sid
+                        "SELECT COALESCE(NULLIF(name_zh, ''), name) AS name FROM skill_catalog WHERE skill_id = $1", sid
                     )
                     skill_name = cat["name"] if cat else sid
 
@@ -1459,7 +1486,8 @@ async def get_agent_skill_names(agent_id: str) -> List[Dict[str, str]]:
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT b.market_skill_id, b.snapshot_skill_name, c.name AS catalog_name
+            """SELECT b.market_skill_id, b.snapshot_skill_name,
+                      COALESCE(NULLIF(c.name_zh, ''), c.name) AS catalog_name
                FROM user_agent_skill_bindings b
                LEFT JOIN skill_catalog c ON c.skill_id = b.market_skill_id
                WHERE b.agent_id = $1""",

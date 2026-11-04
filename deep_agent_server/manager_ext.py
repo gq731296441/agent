@@ -72,11 +72,20 @@ async def resolve_mcp_list(
 
     if payload_mcp:
         allowed = set(binding_ids)
-        # 绑定 ID 是组件 id；payload 条目优先用 componentId，缺省时退化为 id
-        return [
-            m for m in payload_mcp
-            if int(m.get("componentId") or m.get("id") or 0) in allowed
-        ]
+
+        def _payload_ids(m: dict) -> set:
+            ids = set()
+            for key in ("id", "componentId"):
+                try:
+                    v = int(m.get(key) or 0)
+                except (TypeError, ValueError):
+                    v = 0
+                if v:
+                    ids.add(v)
+            return ids
+
+        # 绑定 ID 可能是组件 id 或目录条目 id，payload 条目任一字段命中即保留
+        return [m for m in payload_mcp if _payload_ids(m) & allowed]
 
     from api.mcp_api import _fetch_external_mcp_all_list, _normalize_mcp_item, _resolve_mcp_source_list
     from config import get_logger
@@ -103,8 +112,17 @@ async def resolve_mcp_list(
                 catalog, source = [], ""
 
     try:
-        # 绑定 ID 是组件 id（Component.id），目录条目通过 componentId 字段对应
-        id_to_item = {int(i.get("componentId")): i for i in catalog if i.get("componentId")}
+        # 绑定 ID 可能是组件 id（能力市场）或目录条目 id（智能体创建表单），
+        # 两者都登记；componentId 优先，保持既有语义。
+        id_to_item: Dict[int, dict] = {}
+        for item in catalog:
+            for key in ("componentId", "id"):
+                try:
+                    cid = int(item.get(key) or 0)
+                except (TypeError, ValueError):
+                    cid = 0
+                if cid and cid not in id_to_item:
+                    id_to_item[cid] = item
         matched = [id_to_item[mid] for mid in binding_ids if mid in id_to_item]
         missing_ids = [mid for mid in binding_ids if mid not in id_to_item]
 
@@ -235,6 +253,28 @@ async def create_deep_agent_for_session(
     skill_candidate_dirs = await _resolve_skill_dirs_for_agent(
         agent_kind, user_id, resolved_agent_id or "", creator_user_id
     )
+    disabled_skill_labels: list = []
+    try:
+        from pathlib import Path as _P
+        from deep_agent_server.skills.marketplace import storage as _ms
+
+        delisted_ids = set(await _ms.list_delisted_package_ids())
+        if delisted_ids:
+            original_dirs = list(skill_candidate_dirs)
+            skill_candidate_dirs = [
+                d for d in original_dirs if _P(d).name not in delisted_ids
+            ]
+            hit = []
+            if selected_skill_ids:
+                hit = [s for s in selected_skill_ids if s in delisted_ids]
+                selected_skill_ids = [s for s in selected_skill_ids if s not in delisted_ids]
+            elif selected_skill_ids is None:
+                hit = [_P(d).name for d in original_dirs if _P(d).name in delisted_ids]
+            uniq = list(dict.fromkeys(hit))
+            if uniq:
+                disabled_skill_labels = await _ms.package_display_names(uniq)
+    except Exception:
+        _log.exception("filter delisted skills failed")
     if selected_skill_ids is not None:
         selected_skill_ids = effective_selected_skill_ids(
             skill_candidate_dirs, selected_skill_ids
@@ -376,6 +416,7 @@ async def create_deep_agent_for_session(
             checkpointer=manager.checkpointer,
             store=manager.store,
             selected_skill_ids=selected_skill_ids,
+            disabled_skill_labels=disabled_skill_labels,
             agent_kind=agent_kind,
             skip_sandbox=skip_sandbox,
             user_token=user_token,

@@ -86,6 +86,30 @@ def _create_no_proxy_async_client(
     return httpx.AsyncClient(**kwargs)
 
 
+def _parse_blocked_set(raw: str) -> set[str]:
+    """解析逗号分隔的屏蔽列表（兼容中文逗号）。"""
+    return {
+        s.strip()
+        for s in str(raw or "").replace("，", ",").split(",")
+        if s.strip()
+    }
+
+
+def is_mcp_blocked(item: Dict[str, Any]) -> bool:
+    """判断 MCP 是否被本地屏蔽（用于屏蔽已下线/不可用的外部 MCP）。
+
+    通过 MCP_BLOCKED_IDS / MCP_BLOCKED_NAMES 配置，命中 id（或 componentId）
+    或名称即视为屏蔽。
+    """
+    blocked_ids = _parse_blocked_set(getattr(app_config, "MCP_BLOCKED_IDS", "") or "")
+    blocked_names = _parse_blocked_set(getattr(app_config, "MCP_BLOCKED_NAMES", "") or "")
+    if not blocked_ids and not blocked_names:
+        return False
+    item_id = str(item.get("id") or item.get("componentId") or "").strip()
+    name = str(item.get("name") or "").strip()
+    return bool((item_id and item_id in blocked_ids) or (name and name in blocked_names))
+
+
 # MCP 工具参数校验错误关键词（用于区分 LLM 参数错误 vs 服务端内部错误）
 _MCP_PARAM_ERROR_KEYWORDS = [
     "validation error",
@@ -365,6 +389,9 @@ class McpToolService:
         for item in mcp_list:
             name = item.get("name")
             if not name:
+                continue
+            if is_mcp_blocked(item):
+                logger.info("MCP [%s] 已被本地屏蔽，跳过连接", name)
                 continue
             transport = (item.get("type") or "http").strip().lower()
             server_config: Dict[str, Any] = {

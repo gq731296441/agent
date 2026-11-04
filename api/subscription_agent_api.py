@@ -79,13 +79,21 @@ async def _resolve_mcp_names(user_id: str, mcp_ids: List[int], auth_token: str =
         return {}
     try:
         mcp_list, _ = await _resolve_mcp_source_list(user_id, auth_token)
-        # mcp_ids 是组件 id，目录条目通过 componentId 字段对应
+        # 绑定 ID 可能是条目 id（智能体创建表单）或组件 id（能力市场），两者都要匹配
         target_ids = {int(mid) for mid in mcp_ids}
-        return {
-            int(m["componentId"]): m["name"]
-            for m in mcp_list
-            if m.get("componentId") and m.get("name") and int(m["componentId"]) in target_ids
-        }
+        resolved: Dict[int, str] = {}
+        for m in mcp_list:
+            name = m.get("name")
+            if not name:
+                continue
+            for key in ("id", "componentId"):
+                try:
+                    cid = int(m.get(key) or 0)
+                except (TypeError, ValueError):
+                    cid = 0
+                if cid and cid in target_ids:
+                    resolved[cid] = name
+        return resolved
     except Exception:
         return {}
 
@@ -188,7 +196,7 @@ async def create_agent(
         market_ids = await deep_storage.set_agent_skill_bindings(
             agent_id, body.user_id, skill_id_list, skill_names=skill_name_map
         )
-        sync_skills_to_agent(agent_id, market_ids)
+        await sync_skills_to_agent(agent_id, market_ids)
     return ApiResponse.success(data={"agent_id": agent_id})
 
 
@@ -225,17 +233,28 @@ async def get_agent(
 
             all_raw = await _fetch_external_mcp_all_list(user_id, x_auth_value)
             all_catalog = [_normalize_mcp_item(item) for item in all_raw]
-            catalog_ids = {
-                int(m.get("componentId") or 0)
-                for m in all_catalog
-                if m.get("componentId")
-            }
+            # 绑定 ID 有两种来源：能力市场存组件 id（componentId），
+            # 智能体创建表单存目录条目 id。两者都视为"存在"，
+            # 否则 id 与 componentId 不同的绑定会被全部误判为已下架。
+            catalog_ids = set()
+            for m in all_catalog:
+                for key in ("id", "componentId"):
+                    try:
+                        cid = int(m.get(key) or 0)
+                    except (TypeError, ValueError):
+                        cid = 0
+                    if cid:
+                        catalog_ids.add(cid)
+            if not catalog_ids:
+                # 目录为空说明外部接口异常返回，无法判定删除状态
+                catalog_ids = None
             for mid in mcp_ids:
                 if mid in name_map and name_map[mid]:
                     continue
                 name = next(
                     (m.get("name") for m in all_catalog
-                     if int(m.get("componentId") or 0) == mid and m.get("name")),
+                     if ((int(m.get("id") or 0) == mid or int(m.get("componentId") or 0) == mid)
+                         and m.get("name"))),
                     None,
                 )
                 if name:
@@ -325,7 +344,7 @@ async def update_agent(
         market_ids = await deep_storage.set_agent_skill_bindings(
             agent_id, user_id, skill_id_list, skill_names=skill_name_map
         )
-        sync_skills_to_agent(agent_id, market_ids)
+        await sync_skills_to_agent(agent_id, market_ids)
     if not ok and body.mcp_ids is None and body.mcps is None and body.skill_ids is None and body.skills is None:
         return ApiResponse.error(msg="无更新或 Agent 不存在", code=404)
     # 订阅会话标题跟随智能体名称：改名后同步到该智能体的全部订阅会话

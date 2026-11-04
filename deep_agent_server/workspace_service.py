@@ -636,13 +636,16 @@ async def reconcile_user_workspace(user_id: str) -> Dict[str, Any]:
 
 async def index_skill_tree(user_id: str, skill_dir_name: str) -> None:
     """登记 skill 目录下所有文件到索引。"""
-    base = get_skills_dir(user_id) / skill_dir_name
+    from deep_agent_server.skills.dirs import resolve_dir_name
+
+    skills_root = get_skills_dir(user_id)
+    base = skills_root / resolve_dir_name(skills_root, skill_dir_name)
     if not base.exists():
         return
     for root, _dirs, files in os.walk(base):
         for name in files:
             fp = Path(root) / name
-            rel = fp.relative_to(get_skills_dir(user_id)).as_posix()
+            rel = fp.relative_to(skills_root).as_posix()
             try:
                 sha = compute_sha256(fp)
                 size = fp.stat().st_size

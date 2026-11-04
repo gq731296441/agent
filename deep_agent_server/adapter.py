@@ -1972,6 +1972,7 @@ class DeepEventAdapter:
         from deep_agent_server.conversation_files import (
             agent_path_to_virtual,
             find_recent_document_files,
+            is_card_eligible_agent_path,
             is_write_success,
             resolve_agent_file_path,
             resolve_execute_output_tool,
@@ -2017,6 +2018,8 @@ class DeepEventAdapter:
             )
             return
         for ap in agent_paths:
+            if not is_card_eligible_agent_path(ap):
+                continue
             virtual_path = agent_path_to_virtual(self.session_id, ap)
             if not virtual_path:
                 continue

@@ -142,3 +142,8 @@ tiktoken_cache/
 !skill-repo/
 .icodemate/
 test/
+
+# s3canner 扫描器：Linux 二进制随代码入库（部署环境无法进入容器手工解压）；
+# Windows 可执行文件与原始 zip 不入库
+vendor/s3canner/s3canner.exe
+vendor/s3canner/*.zip

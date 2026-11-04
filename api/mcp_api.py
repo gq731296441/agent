@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, HTTPException, Header, Query
 from pydantic import BaseModel, Field
-from mcp_server.mcp_manager import McpToolService
+from mcp_server.mcp_manager import McpToolService, is_mcp_blocked
 from mcp_server.mcp_mock import get_default_mock_mcp_list, merge_mock_mcp_list
 from common.schemas import ApiResponse, ListApiResponse
 from config import get_logger, app_config
@@ -189,6 +189,7 @@ async def _resolve_mcp_source_list(user_id: str, auth_token: str = "") -> tuple[
     try:
         external_raw = await _fetch_external_mcp_list(user_id, auth_token)
         normalized = [_normalize_mcp_item(item) for item in external_raw]
+        normalized = [item for item in normalized if not is_mcp_blocked(item)]
         if app_config.MCP_FALLBACK_TO_MOCK:
             merged = merge_mock_mcp_list(normalized)
             source = "external+mock" if len(merged) > len(normalized) else "external"
@@ -341,6 +342,7 @@ async def get_all_mcp_tools(
         emp_no = x_emp_no or user_id
         external_raw = await _fetch_external_mcp_all_list(emp_no, x_auth_value)
         mcp_list = [_normalize_mcp_item(item) for item in external_raw]
+        mcp_list = [item for item in mcp_list if not is_mcp_blocked(item)]
         logger.info(f"[MCP API] 外部 all 接口返回 {len(mcp_list)} 个 MCP 工具")
 
         if not validate:

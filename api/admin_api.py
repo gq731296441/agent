@@ -1,4 +1,4 @@
-"""Skill 管理员 API：审批队列管理、管理员 CRUD。"""
+"""Skill 管理员 API：审批队列管理、管理员 CRUD、隔离。"""
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -12,6 +12,9 @@ from deep_agent_server.skills.admin_service import (
     list_pending_reviews,
     reject_action,
 )
+from deep_agent_server.skills.marketplace.publish_service import PublishError, get_publish_service
+from deep_agent_server.skills.marketplace.review import approve_version, reject_version
+from deep_agent_server.skills.marketplace import storage as ms
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -27,6 +30,11 @@ class AddAdminBody(BaseModel):
     role: str = "admin"
 
 
+class QuarantineBody(BaseModel):
+    reviewer_user_id: str
+    comment: str = ""
+
+
 # ── 管理员身份 ──
 
 
@@ -36,7 +44,59 @@ async def check_admin(user_id: str = Query(...)):
     return ApiResponse.success(data={"is_admin": is_admin})
 
 
-# ── 审批队列 ──
+# ── 新版：按 version_id 人审 ──
+
+
+@router.get("/skill-reviews", response_model=PaginatedApiResponse)
+async def list_skill_reviews(
+    user_id: str = Query(..., description="管理员 user_id"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+):
+    try:
+        await assert_admin(user_id)
+    except AdminServiceError as e:
+        raise HTTPException(status_code=e.code, detail=str(e)) from e
+
+    items, total = await ms.list_pending_version_reviews(page=page, page_size=page_size)
+    for it in items:
+        sid = it.get("submission_id")
+        if sid:
+            it["findings"] = await ms.list_findings(str(sid))
+    return PaginatedApiResponse.success(items, total, page, page_size)
+
+
+@router.post("/skill-versions/{version_id}/approve", response_model=ApiResponse)
+async def approve_skill_version(version_id: str, body: ReviewAction):
+    try:
+        result = await approve_version(version_id, body.reviewer_user_id, body.comment)
+        return ApiResponse.success(data=result, msg="审批通过并已发布")
+    except (AdminServiceError, PublishError) as e:
+        code = getattr(e, "code", 400)
+        raise HTTPException(status_code=code, detail=str(e)) from e
+
+
+@router.post("/skill-versions/{version_id}/reject", response_model=ApiResponse)
+async def reject_skill_version(version_id: str, body: ReviewAction):
+    try:
+        result = await reject_version(version_id, body.reviewer_user_id, body.comment)
+        return ApiResponse.success(data=result, msg="已拒绝")
+    except (AdminServiceError, PublishError) as e:
+        code = getattr(e, "code", 400)
+        raise HTTPException(status_code=code, detail=str(e)) from e
+
+
+@router.post("/skill-versions/{version_id}/quarantine", response_model=ApiResponse)
+async def quarantine_skill_version(version_id: str, body: QuarantineBody):
+    try:
+        result = await get_publish_service().quarantine(version_id, body.reviewer_user_id)
+        return ApiResponse.success(data=result, msg="已隔离")
+    except (AdminServiceError, PublishError) as e:
+        code = getattr(e, "code", 400)
+        raise HTTPException(status_code=code, detail=str(e)) from e
+
+
+# ── 旧审批队列（兼容 pending_skill_actions）──
 
 
 @router.get("/pending-actions", response_model=PaginatedApiResponse)

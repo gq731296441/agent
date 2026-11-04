@@ -46,6 +46,24 @@ class BaseConfig(BaseSettings):
     )
     LLM_AUX_API_KEY: Optional[str] = Field(default=None, description="辅助模型 API Key（请在 .env 中配置）")
 
+    # ==================== 多模态图片识别配置 ====================
+    VISION_API_URL: str = Field(
+        default="https://maas-apigateway.dt.zte.com.cn/model/qwen3-vl-32b-instruct/v1/chat/completions",
+        description="多模态图片识别 API 地址",
+    )
+    VISION_MODEL: str = Field(
+        default="Qwen3-VL-32B-Instruct",
+        description="多模态图片识别模型名称",
+    )
+    VISION_API_KEY: Optional[str] = Field(
+        default=None,
+        description="多模态图片识别 API Key（Bearer 认证，请在 .env 中配置）",
+    )
+    VISION_TIMEOUT: int = Field(
+        default=120,
+        description="多模态图片识别超时（秒）",
+    )
+
     # ==================== MCP 配置 ====================
     MCP_TOOLS_API_URL: str = Field(
         default="https://aip.zte.com.cn/trial/cmtool/api/v1/component/mcp/mine",
@@ -62,6 +80,14 @@ class BaseConfig(BaseSettings):
     MCP_FALLBACK_TO_MOCK: bool = Field(
         default=False,
         description="外部接口失败时是否回退到 Mock MCP 列表（开发环境可开启）",
+    )
+    MCP_BLOCKED_IDS: str = Field(
+        default="",
+        description="本地屏蔽的 MCP ID，逗号分隔（已下线/不可用工具，例如 20）",
+    )
+    MCP_BLOCKED_NAMES: str = Field(
+        default="星云研发大模型图像理解",
+        description="本地屏蔽的 MCP 名称，逗号分隔（已下线/不可用工具）",
     )
     MCP_MRM_SERVER_URL: str = Field(
         default="http://127.0.0.1:6002/mcp",
@@ -321,6 +347,57 @@ class BaseConfig(BaseSettings):
         default=500,
         description="Skill ZIP 内文件数上限",
     )
+    SKILL_UPLOAD_MAX_UNPACKED_BYTES: int = Field(
+        default=209715200,
+        description="Skill ZIP 真实解压累计上限（200MB）",
+    )
+    SKILL_UPLOAD_MAX_COMPRESSION_RATIO: float = Field(
+        default=100.0,
+        description="解压/压缩体积比上限",
+    )
+    SKILL_UPLOAD_MAX_FILE_BYTES: int = Field(
+        default=33554432,
+        description="Skill 单文件真实大小上限（32MB）",
+    )
+    SKILL_UPLOAD_MAX_INFLIGHT: int = Field(
+        default=2,
+        description="每用户进行中提交上限",
+    )
+    SKILL_UPLOAD_RATE_PER_HOUR: int = Field(
+        default=10,
+        description="每用户每小时上传次数上限",
+    )
+    SKILL_SCAN_TIMEOUT_SECONDS: int = Field(default=120, description="s3canner 超时秒数")
+    SKILL_SCAN_STARTUP_TIMEOUT_SECONDS: int = Field(
+        default=45,
+        description="扫描器启动/规则加载阶段独立超时秒数（0 表示不单独限制）",
+    )
+    SKILL_SCAN_FIXTURE_PASS: bool = Field(
+        default=False,
+        description="仅 dev/test：无扫描器时夹具直接通过（生产禁止开启）",
+    )
+    SKILL_S3CANNER_BIN: Optional[str] = Field(
+        default=None,
+        description="s3canner 可执行文件；默认 vendor/s3canner/s3canner(.exe)",
+    )
+    SKILL_S3CANNER_EXCLUDE: str = Field(
+        default="SPEC-006",
+        description="逗号分隔的 s3canner 规则排除列表",
+    )
+    SKILL_S3CANNER_RULES: Optional[str] = Field(
+        default=None,
+        description="完整 s3canner 规则 YAML；空则从二进制 --generate-rules 缓存",
+    )
+    SKILL_S3CANNER_RULES_OVERLAY: Optional[str] = Field(
+        default=None,
+        description="叠加规则 YAML；默认 scan/s3can_rules_overlay.yaml",
+    )
+    SKILL_SCAN_BLOCK_MIN_SEVERITY: str = Field(
+        default="high",
+        description="达到该级别及以上则 BLOCKED（critical|high|medium）",
+    )
+    SKILL_BUILDS_TTL_DAYS: int = Field(default=14, description="skill-builds TTL 天")
+    SKILL_MARKETPLACE_WORKER: bool = Field(default=True, description="启动进程内提交 Worker")
     FILE_UPLOAD_MAX_BYTES: int = Field(
         default=10485760,
         description="普通文件上传最大字节数（10MB）",

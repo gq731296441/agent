@@ -1,11 +1,11 @@
-"""内置工具：图片阅读（通过 nebulacoder-v8.0 vision API）。
+"""内置工具：图片阅读（通过 Qwen3-VL 多模态 API）。
 
 用于读取用户上传的图片文件（.jpg/.png/.gif 等），
-将图片以 base64 编码发送给 nebulacoder vision 模型进行理解和描述。
+将图片以 base64 编码发送给多模态模型进行理解和描述。
 
-API: http://10.57.230.76:40082/v1/chat/completions
-Model: nebulacoder-v8.0
-Auth: 纯工号（无 "Bearer " 前缀）
+API: https://maas-apigateway.dt.zte.com.cn/model/qwen3-vl-32b-instruct/v1/chat/completions
+Model: Qwen3-VL-32B-Instruct
+Auth: Bearer <VISION_API_KEY>（在 .env 中配置）
 
 依赖: deep_agent_server.vision_service.analyze_image()
 """
@@ -63,7 +63,7 @@ def _resolve_physical_path(user_id: str, virtual_path: str, session_id: str = ""
 def create_read_image(user_id: str, user_token: str = "", session_id: str = ""):
     """工厂函数：创建绑定了用户身份和会话上下文的 read_image 工具。
 
-    使用新的 nebulacoder-v8.0 Vision API（10.57.230.76:40082），
+    使用 Qwen3-VL-32B-Instruct 多模态 API，
     底层委托给 deep_agent_server.vision_service.analyze_image()。
     """
     _current_user_id = user_id

@@ -62,17 +62,27 @@ def filter_skill_dirs_by_ids(
 
     - skill_ids is None：不过滤（兼容旧客户端）
     - skill_ids == []：空池，不加载任何 skill
-    - 否则：仅保留 market_skill_id / 目录名匹配的 skill
+    - 否则：目录名或 .install-meta.json 中的 package_id 命中即保留
+
+    market 包的安装目录使用英文名（见 skills/dirs.py），
+    前端传的仍是 package_id（uskill-...），因此需要反查目录元数据。
     """
     if skill_ids is None:
         return candidate_dirs
     allowed = {str(s).strip().lower() for s in skill_ids if str(s).strip()}
     if not allowed:
         return []
+    from deep_agent_server.skills.dirs import read_install_meta
+
     filtered: List[str] = []
     for d in candidate_dirs:
         name = Path(d).name.lower()
         if name in allowed:
+            filtered.append(d)
+            continue
+        meta = read_install_meta(Path(d))
+        meta_id = str(meta.get("package_id") or meta.get("skill_id") or "").strip().lower()
+        if meta_id and meta_id in allowed:
             filtered.append(d)
     return filtered
 
@@ -162,7 +172,7 @@ def ensure_builtin_skills_for_all_users() -> dict:
     """启动时批量安装：扫描所有用户目录，安装/更新内置技能。"""
     from pathlib import Path as _Path
 
-    root = _Path(app_config.WORKSPACE_ROOT)
+    root = _Path(app_config.get_workspace_root())
     if not root.is_dir():
         logger.warning(f"[BuiltinSkill] WORKSPACE_ROOT 不存在: {root}")
         return {"users": 0, "installed": 0}

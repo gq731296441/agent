@@ -50,20 +50,49 @@ def scan_skill_repo(repo_root: str | Path | None = None) -> List[SkillCatalogEnt
         if skill_id in BUILTIN_SKILL_IDS:
             logger.debug(f"[SkillSync] 跳过内置技能: {skill_id}")
             continue
-        if not (child / "SKILL.md").is_file():
+
+        skill_dir = child
+        repo_rel = skill_id
+        # marketplace 布局：releases/{semver}/SKILL.md
+        releases = child / "releases"
+        if releases.is_dir() and not (child / "SKILL.md").is_file():
+            from deep_agent_server.skills.marketplace.semver import compare_semver
+
+            candidates = [
+                d
+                for d in releases.iterdir()
+                if d.is_dir()
+                and not d.name.endswith(".publishing")
+                and (d / "SKILL.md").is_file()
+            ]
+            if not candidates:
+                continue
+            best = candidates[0]
+            for c in candidates[1:]:
+                if compare_semver(c.name, best.name) > 0:
+                    best = c
+            skill_dir = best
+            repo_rel = f"{skill_id}/releases/{best.name}"
+
+        if not (skill_dir / "SKILL.md").is_file():
             continue
-        meta = parse_skill_md(str(child))
+        meta = parse_skill_md(str(skill_dir))
         if not meta:
             continue
+        # releases 布局以目录名为发行号优先（API declared_version）
+        if skill_dir.parent.name == "releases":
+            version = skill_dir.name
+        else:
+            version = meta.version or "1.0.0"
         entries.append(
             SkillCatalogEntry(
                 skill_id=skill_id,
                 name=meta.name or skill_id,
                 description=meta.description or "",
-                version=meta.version or "1.0.0",
+                version=version,
                 tags=list(meta.tags or []),
                 author=meta.author or "",
-                repo_rel_path=skill_id,
+                repo_rel_path=repo_rel,
             )
         )
     return entries
@@ -83,9 +112,29 @@ async def sync_catalog_from_repo(repo_root: str | Path | None = None) -> dict:
         )
         return {"synced": 0, "deleted": 0, "skill_ids": []}
 
+    delisted_ids = set()
+    market_package_ids: set = set()
+    try:
+        from deep_agent_server.skills.marketplace import storage as ms
+
+        delisted_ids = set(await ms.list_delisted_package_ids())
+        market_package_ids = set(await ms.list_package_ids())
+    except Exception:
+        logger.exception("[SkillSync] 读取市场包状态失败，继续同步")
+
     present_ids: List[str] = []
     for entry in entries:
         present_ids.append(entry.skill_id)
+        # 用户上传包由审核发布写入 catalog，repo 同步不得覆盖中文名/标签
+        if str(entry.skill_id).startswith("uskill-"):
+            continue
+        # 已转为市场包的 repo 技能：catalog 由发布流程维护，
+        # 避免仓库扁平目录覆盖版本/名称（迁移后即使扁平目录仍在也安全）
+        if entry.skill_id in market_package_ids:
+            continue
+        if entry.skill_id in delisted_ids:
+            await deep_storage.set_skill_catalog_status(entry.skill_id, "archived")
+            continue
         await deep_storage.upsert_skill_catalog(
             entry.skill_id,
             entry.name,
@@ -95,6 +144,7 @@ async def sync_catalog_from_repo(repo_root: str | Path | None = None) -> dict:
             entry.author,
             entry.repo_rel_path,
             status="published",
+            name_en=entry.name or entry.skill_id,
         )
     deleted = await deep_storage.delete_missing_skills(present_ids)
     logger.info(
