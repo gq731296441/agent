@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -33,6 +34,17 @@ from deep_agent_server.skills.marketplace.identity import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _submission_meta(sub: Dict[str, Any]) -> Dict[str, Any]:
+    """读取 submission.meta（jsonb 可能以 str 返回）。"""
+    meta = (sub or {}).get("meta")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except ValueError:
+            meta = {}
+    return meta if isinstance(meta, dict) else {}
 
 
 async def _purge_withdrawn_repo(package_id: str, pkg: Optional[Dict[str, Any]] = None) -> bool:
@@ -207,7 +219,17 @@ class PublishService:
             "scan_progress": copy.deepcopy(scan_progress),
         }
 
-    async def retry_scan(self, submission_id: str, user_id: str) -> Dict[str, Any]:
+    async def retry_scan(
+        self,
+        submission_id: str,
+        user_id: str,
+        declared_meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """重试失败的提交，复用已上传的 ZIP。
+
+        declared_meta 允许修正名称/描述/标签/作者等声明字段（例如英文名称与
+        SKILL.md name 不一致导致的结构校验失败），无需用户重新上传文件。
+        """
         sub = await ms.get_submission(submission_id)
         if not sub:
             raise PublishError("提交不存在", 404)
@@ -216,8 +238,50 @@ class PublishService:
 
             if not await deep_storage.is_admin(user_id):
                 raise PublishError("无权操作", 403)
-        if sub.get("status") != "FAILED" or sub.get("failure_reason") != "SCAN_UNAVAILABLE":
-            raise PublishError("仅 SCAN_UNAVAILABLE 可 retry", 400)
+
+        status = sub.get("status") or ""
+        if status not in ("FAILED", "REJECTED"):
+            raise PublishError("仅失败或被拒绝的提交可重试", 400)
+
+        # 已上传的 ZIP 仍在才可复用；被清理时要求用户重新上传
+        build = submission_build_dir(submission_id)
+        zip_path = Path(sub.get("zip_uri") or (build / "upload.zip"))
+        if not zip_path.is_file():
+            raise PublishError("上传文件已清理，请重新上传 ZIP", 410)
+
+        # 允许在重试时修正声明字段
+        if declared_meta:
+            meta = _submission_meta(sub)
+            declared = normalize_declared(
+                name_zh=declared_meta.get("name_zh")
+                if declared_meta.get("name_zh") is not None
+                else (meta.get("name_zh") or ""),
+                name_en=declared_meta.get("name_en")
+                if declared_meta.get("name_en") is not None
+                else (meta.get("name_en") or ""),
+                description=declared_meta.get("description")
+                if declared_meta.get("description") is not None
+                else (meta.get("description") or ""),
+                tags=declared_meta.get("tags")
+                if declared_meta.get("tags") is not None
+                else meta.get("tags"),
+                author=declared_meta.get("author")
+                if declared_meta.get("author") is not None
+                else (meta.get("author") or ""),
+                submitter_id=sub.get("submitter_id") or "",
+            )
+            err = validate_declared(declared)
+            if err:
+                raise PublishError(err, 400)
+            await ms.merge_submission_meta(submission_id, declared)
+
+        # 重试复用同一 submission id：清空上一次失败留下的 findings，
+        # 否则审核页/详情页会继续展示旧问题（如 STRUCT-004），与实际结果不符
+        try:
+            await ms.delete_findings(submission_id)
+        except Exception:
+            logger.exception("清理旧 findings 失败 submission=%s", submission_id)
+
         scan_progress = new_scan_progress()
         await ms.update_submission(
             submission_id,
@@ -226,7 +290,10 @@ class PublishService:
             lease_owner=None,
             lease_until=None,
         )
-        await ms.merge_submission_meta(submission_id, {"scan_progress": scan_progress})
+        await ms.merge_submission_meta(
+            submission_id,
+            {"scan_progress": scan_progress, "scan_rules": {}},
+        )
         return {
             "submission_id": submission_id,
             "status": "QUEUED",

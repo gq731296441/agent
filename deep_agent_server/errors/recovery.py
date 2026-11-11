@@ -51,6 +51,15 @@ def classify_deep_error(exc: Exception) -> DeepErrorClassification:
             "沙箱服务暂时不可用，本次未执行代码。请稍后重试；若持续出现请联系管理员。",
         )
 
+    # 模型接口 404：模型名称或 Base URL 不存在，属于配置错误，重试无效。
+    # 放在认证判断之前，避免落入 unknown 后只给用户原始 "Error code: 404"。
+    if "notfounderror" in exc_name.lower() or "404" in msg:
+        return DeepErrorClassification(
+            False,
+            "model_config",
+            "模型配置错误：模型名称或接口地址不存在，请检查模型配置。",
+        )
+
     if (
         "authentication" in exc_name.lower()
         or "auth" in exc_name.lower()

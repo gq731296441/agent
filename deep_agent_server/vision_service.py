@@ -3,15 +3,16 @@
 封装多模态图片识别调用，被 file_parser.py（后端解析）和
 builtin_tools/image_reader.py（Agent 工具）共用。
 
-默认 API（可在 .env 中覆盖）:
+固定 API（定义在 config/config.py，随代码更新，不读 .env / 环境变量）:
   URL:     https://maas-apigateway.dt.zte.com.cn/model/qwen3-vl-32b-instruct/v1/chat/completions
   Model:   Qwen3-VL-32B-Instruct
-  Auth:    Bearer <VISION_API_KEY>
+  Timeout: 120s
+  Auth:    Bearer <VISION_API_KEY>（仅 API Key 在 .env 中配置）
 
 兼容说明：
   - 配置了 VISION_API_KEY 时使用 `Authorization: Bearer <key>`；
-  - 未配置时回退为旧 nebulacoder 的“纯工号”认证（需同时把
-    VISION_API_URL / VISION_MODEL 指回旧接口），否则会认证失败。
+  - 未配置时回退为旧 nebulacoder 的“纯工号”认证。由于 URL / Model
+    已固定在代码中并指向新接口，该回退路径已不可用，缺少 Key 会认证失败。
 """
 
 import base64
@@ -141,7 +142,7 @@ async def analyze_image(
         headers["Authorization"] = str(user_id)
         logger.warning(
             "VISION_API_KEY 未配置，使用纯工号认证；"
-            "仅当 VISION_API_URL 指向旧 nebulacoder 接口时可用"
+            "固定 VISION_API_URL 指向新接口，缺少 Key 将认证失败"
         )
 
     payload = {

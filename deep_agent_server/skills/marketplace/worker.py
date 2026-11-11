@@ -58,6 +58,46 @@ def _findings_from_structure_error(err: StructureError) -> list:
     return items
 
 
+_IDENTITY_RULES = {
+    "STRUCT-004": ("英文名称与 SKILL.md 一致", "high", "填写的英文名称须与 SKILL.md 的 name 完全一致"),
+    "STRUCT-011": ("版本号与 SKILL.md 一致", "high", "填写的版本号须与 SKILL.md frontmatter 的 version 完全一致"),
+    "DUP-001": ("英文名称不与市场已有技能重名", "high", "市场不允许两个同名 Skill"),
+    "DUP-002": ("制品内容不重复", "high", "不能与已发布 Skill 内容完全相同"),
+    "DUP-003": ("中文名称不与市场已有技能重名", "high", "市场不允许两个同名 Skill"),
+}
+
+
+def _identity_rule_items(findings: list, version_ok: bool) -> list:
+    """身份校验阶段的规则项（s3canner 未运行时用于报告规则清单）。"""
+    failed_ids = set()
+    for f in findings or []:
+        rid = getattr(f, "rule_id", None) if not isinstance(f, dict) else f.get("rule_id")
+        if rid:
+            failed_ids.add(str(rid))
+    items = []
+    for rid, (name, severity, desc) in _IDENTITY_RULES.items():
+        passed = rid not in failed_ids
+        if rid == "STRUCT-011" and not version_ok:
+            passed = False
+        items.append(
+            {
+                "id": rid,
+                "name": name,
+                "passed": passed,
+                "category": "spec",
+                "severity": severity,
+                "description": desc,
+            }
+        )
+    return items
+
+
+def _scan_rules_payload(items: list) -> dict:
+    total = len(items)
+    passed = sum(1 for i in items if isinstance(i, dict) and i.get("passed"))
+    return {"items": items, "total": total, "passed": passed, "failed": total - passed}
+
+
 async def _fail_validation(
     sid: str,
     prev_meta: dict,
@@ -65,6 +105,7 @@ async def _fail_validation(
     reason: str,
     findings: list,
     attempt: int = 1,
+    scan_rules: Optional[dict] = None,
 ) -> None:
     n = len(findings) or 1
     scan_progress = apply_scan_stage(scan_progress, "validate", "done", findings=n)
@@ -79,11 +120,14 @@ async def _fail_validation(
     except Exception as e:
         logger.warning("[SkillWorker] create validation scan_run failed: %s", e)
     await ms.insert_findings(sid, scan_run_id, findings)
+    meta = {**prev_meta, "scan_progress": scan_progress}
+    if scan_rules is not None:
+        meta["scan_rules"] = scan_rules
     await ms.update_submission(
         sid,
         status="FAILED",
         failure_reason=reason[:500],
-        meta={**prev_meta, "scan_progress": scan_progress},
+        meta=meta,
     )
 
 
@@ -184,6 +228,19 @@ async def process_submission(sub: dict) -> None:
                     "SKILL.md",
                 )
             )
+        # 版本号必须与 SKILL.md frontmatter 的 version 一致
+        md_version = (meta.get("skill_md_version") or "").strip()
+        declared_version = str(version or "").strip()
+        version_ok = declared_version == md_version
+        if not version_ok:
+            identity_findings.append(
+                _pkg_finding(
+                    "STRUCT-011",
+                    f"填写的版本号「{declared_version or '（未填写）'}」"
+                    f"与 SKILL.md 的 version「{md_version or '（缺失）'}」不一致，须保持相同",
+                    "SKILL.md",
+                )
+            )
         content_sha = hash_skill_payload(unpacked)
         dup_content = await ms.find_content_duplicate(
             content_sha, exclude_package_id=package_id, exclude_version=version
@@ -247,8 +304,17 @@ async def process_submission(sub: dict) -> None:
             reason = "DUPLICATE" if any(
                 (f.rule_id or "").startswith("DUP") for f in identity_findings
             ) else identity_findings[0].message
+            identity_rules = _scan_rules_payload(
+                _identity_rule_items(identity_findings, version_ok)
+            )
             await _fail_validation(
-                sid, prev_meta, scan_progress, reason[:500], identity_findings, attempt=attempt
+                sid,
+                prev_meta,
+                scan_progress,
+                reason[:500],
+                identity_findings,
+                attempt=attempt,
+                scan_rules=identity_rules,
             )
             if unpacked.exists():
                 shutil.rmtree(unpacked, ignore_errors=True)
@@ -279,9 +345,23 @@ async def process_submission(sub: dict) -> None:
         final_progress = (outcome.details or {}).get("scan_progress")
         if isinstance(final_progress, dict):
             await ms.merge_submission_meta(sid, {"scan_progress": final_progress})
-        # 完整规则检查结果（含通过项），供前端展示扫描覆盖面
+        # 完整规则检查结果（含通过项），供前端展示扫描覆盖面；
+        # 追加身份校验规则（版本一致性），与 s3canner 规则同屏展示
         scan_rules = (outcome.details or {}).get("scan_rules")
-        if isinstance(scan_rules, dict) and scan_rules.get("items"):
+        if isinstance(scan_rules, dict) and isinstance(scan_rules.get("items"), list):
+            items = scan_rules["items"]
+            if not any(isinstance(i, dict) and i.get("id") == "STRUCT-011" for i in items):
+                items.append(
+                    {
+                        "id": "STRUCT-011",
+                        "name": "版本号与 SKILL.md 一致",
+                        "passed": True,
+                        "category": "spec",
+                        "severity": "high",
+                        "description": "填写的版本号须与 SKILL.md frontmatter 的 version 完全一致",
+                    }
+                )
+            scan_rules.update(_scan_rules_payload(items))
             await ms.merge_submission_meta(sid, {"scan_rules": scan_rules})
 
         if outcome.unavailable:

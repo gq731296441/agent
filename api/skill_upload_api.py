@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, File, Form, Header, Query, UploadFile
+from fastapi import APIRouter, Body, File, Form, Header, Query, UploadFile
+from pydantic import BaseModel, Field
 
 from common.schemas import ApiResponse, ListApiResponse
 from deep_agent_server.skills.marketplace import storage as ms
@@ -178,10 +179,27 @@ async def upload_skill(
         return ApiResponse.error(msg=f"上传失败: {e}", code=500)
 
 
+class RetryBody(BaseModel):
+    """重试时可选修正的声明字段（复用已上传 ZIP，无需重新上传）。"""
+
+    name_zh: Optional[str] = None
+    name_en: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[Any] = None
+    author: Optional[str] = None
+
+
 @router.post("/submissions/{submission_id}/retry", response_model=ApiResponse)
-async def retry_submission(submission_id: str, user_id: str = Query(...)):
+async def retry_submission(
+    submission_id: str,
+    user_id: str = Query(...),
+    body: Optional[RetryBody] = Body(None),
+):
     try:
-        result = await get_publish_service().retry_scan(submission_id, user_id)
+        declared = body.model_dump(exclude_none=True) if body else None
+        result = await get_publish_service().retry_scan(
+            submission_id, user_id, declared or None
+        )
         return ApiResponse.success(data=result, msg="已重新入队")
     except PublishError as e:
         return ApiResponse.error(msg=e.message, code=e.code)

@@ -206,6 +206,15 @@ def _format_exc_message(exc: Exception) -> str:
     text = str(exc).strip()
     exc_name = type(exc).__name__.lower()
     text_lower = text.lower()
+    detail = f"（{text[:200]}）" if text else ""
+
+    # 模型接口 404：模型名称或 Base URL 不存在（常见于配置填错）。
+    # 文案包含「配置模型 API Key」，前端据此展示“去配置模型”入口。
+    if "notfounderror" in exc_name or "404" in text:
+        return (
+            f"模型配置错误：模型名称或接口地址不存在（404）{detail}。"
+            "请检查模型名称与 Base URL，并在「模型配置」中重新配置模型 API Key 后重试。"
+        )
 
     # 认证/鉴权错误 → 用户可读提示
     if (
@@ -217,8 +226,9 @@ def _format_exc_message(exc: Exception) -> str:
         or "permission" in text_lower
     ):
         return (
-            f"模型认证失败（{text}），请检查 API Key 是否正确、是否过期，"
-            "或 Base URL / 模型名称是否填写有误。可在「模型配置」中修改后重试。"
+            f"模型配置错误：认证失败{detail}，请检查 API Key 是否正确、是否过期，"
+            "以及 Base URL / 模型名称是否填写有误。"
+            "请在「模型配置」中重新配置模型 API Key 后重试。"
         )
 
     if text:

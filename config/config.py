@@ -1,7 +1,7 @@
 # config/config.py - 统一配置模块
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
+from typing import ClassVar, Optional
 from decouple import config as decouple_config
 
 
@@ -47,21 +47,18 @@ class BaseConfig(BaseSettings):
     LLM_AUX_API_KEY: Optional[str] = Field(default=None, description="辅助模型 API Key（请在 .env 中配置）")
 
     # ==================== 多模态图片识别配置 ====================
-    VISION_API_URL: str = Field(
-        default="https://maas-apigateway.dt.zte.com.cn/model/qwen3-vl-32b-instruct/v1/chat/completions",
-        description="多模态图片识别 API 地址",
+    # URL / 模型 / 超时 随代码固定，不读取 .env 和环境变量；
+    # 需要调整时直接改这里的常量并随代码发布，避免部署配置漂移。
+    VISION_API_URL: ClassVar[str] = (
+        "https://maas-apigateway.dt.zte.com.cn/model/qwen3-vl-32b-instruct/v1/chat/completions"
     )
-    VISION_MODEL: str = Field(
-        default="Qwen3-VL-32B-Instruct",
-        description="多模态图片识别模型名称",
-    )
+    VISION_MODEL: ClassVar[str] = "Qwen3-VL-32B-Instruct"
+    VISION_TIMEOUT: ClassVar[int] = 120
+
+    # 仅 API Key 通过 .env 注入（敏感信息，不入库）
     VISION_API_KEY: Optional[str] = Field(
         default=None,
-        description="多模态图片识别 API Key（Bearer 认证，请在 .env 中配置）",
-    )
-    VISION_TIMEOUT: int = Field(
-        default=120,
-        description="多模态图片识别超时（秒）",
+        description="多模态图片识别 API Key（Bearer 认证，仅此项在 .env 中配置）",
     )
 
     # ==================== MCP 配置 ====================

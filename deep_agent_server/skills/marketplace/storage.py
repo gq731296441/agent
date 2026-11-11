@@ -581,6 +581,20 @@ async def list_findings(submission_id: str) -> List[Dict[str, Any]]:
         return [_row(r) for r in rows]
 
 
+async def delete_findings(submission_id: str) -> int:
+    """清空某个提交的 findings（重试复用同一 submission 时使用）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM skill_findings WHERE submission_id = $1::uuid",
+            submission_id,
+        )
+        try:
+            return int(result.split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
+
 async def create_scan_run(submission_id: str, attempt: int = 1) -> str:
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
