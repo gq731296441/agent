@@ -27,6 +27,19 @@ logger = get_logger(__name__)
 AGENT_TIMEOUT = 300  # 非流式请求超时（秒）
 
 
+def _parse_bool_flag(value: Any, default: bool = False) -> bool:
+    """宽松解析布尔参数（JSON bool / 数字 / "true"/"1"/"yes"/"on"）。"""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return default
+
+
 async def _persist_hitl_resume_to_history(
     session_id: str,
     request_id: str,
@@ -555,7 +568,20 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
         "stream": true
     }
 
-    3. resume_hitl / stop 同样支持 stream 参数。
+    3. 每次调用都先清空上下文（订阅智能体「开始新会话」）：
+    {
+        "action": "ask",
+        "user_id": "user_123",
+        "agent_id": "agent_xyz",
+        "question": "...",
+        "stream": true,
+        "new_session": true
+    }
+    new_session=true 时，先清空该订阅会话的 LangGraph 上下文（保留历史并
+    插入分割线，等价于 POST /sessions/{id}/new-context），再开始本轮提问。
+    仅 action=ask 且会话为订阅智能体时生效；新会话/空会话无需清空，自动跳过。
+
+    4. resume_hitl / stop 同样支持 stream 参数。
 
     非流式返回（JSON）：
     {
@@ -586,6 +612,8 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
     question = params.get("question", "")
     stream_mode = params.get("stream", False)
     agent_id = (params.get("agent_id") or "").strip() or None
+    # 订阅智能体：true 时每次调用先清空上下文再开始（等价「开始新会话」）
+    new_session = _parse_bool_flag(params.get("new_session"), default=False)
 
     # ==================== 参数校验 ====================
     if not str(user_id).strip():
@@ -675,6 +703,39 @@ async def stream_search_results(request: Request, params: Any = Body(None)):
 
     # 取消该 session 的旧任务（避免并发冲突）
     manager_agents.stop_task(session_id, user_id=user_id)
+
+    # ==================== 可选：先清空上下文（开始新会话） ====================
+    # new_session=true 仅对 ask 生效；新会话/空会话本身没有上下文，跳过避免多插分割线。
+    # 复用「开始新会话」的同一实现（清理 checkpointer/store + 递增 context_epoch + 分割线）。
+    is_ask_action = action == ActionType.ASK or action == ActionType.ASK.value
+    if new_session and is_ask_action and not is_first_message:
+        from api.session_api import (
+            SessionContextResetError,
+            reset_subscription_context,
+        )
+
+        try:
+            new_epoch = await reset_subscription_context(
+                user_id=user_id,
+                session_id=session_id,
+                checkpointer=getattr(manager_agents, "checkpointer", None),
+                kv_store=getattr(manager_agents, "store", None),
+                manager=manager_agents,
+            )
+            logger.info(
+                f"[Session] new_session=true 已清空上下文 "
+                f"session={session_id} epoch={new_epoch}"
+            )
+        except SessionContextResetError as e:
+            return JSONResponse(
+                status_code=e.code,
+                content={"session_id": session_id, "error": e.message},
+            )
+    elif new_session and not is_ask_action:
+        logger.warning(
+            f"[Session] new_session 仅对 action=ask 生效，已忽略 "
+            f"session={session_id} action={action}"
+        )
 
     # ==================== 流式路径 ====================
     if stream_mode:

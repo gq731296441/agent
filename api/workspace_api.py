@@ -25,6 +25,9 @@ from deep_agent_server.html_inline import inline_html_references
 from deep_agent_server.html_share_snapshot import (
     SNAPSHOT_DIR_NAME,
     SNAPSHOT_INDEX_NAME,
+    SnapshotBuildResult,
+    missing_assets_changed,
+    normalize_missing_assets,
     write_share_snapshot,
 )
 from deep_agent_server.workspace import get_workspace_dir
@@ -283,7 +286,7 @@ async def create_html_share(data: HtmlShareRequest):
         # ── 资源快照：复制引用到快照目录，改写 HTML 指向快照 ──
         # 复用/新建均重建快照（内容跟随最新创建时刻）
         try:
-            await _build_share_snapshot(
+            result = await _build_share_snapshot(
                 user_id=data.user_id,
                 html_text=html_bytes.decode("utf-8", errors="replace"),
                 vpath=vpath,
@@ -295,7 +298,9 @@ async def create_html_share(data: HtmlShareRequest):
             logger.exception(f"[HtmlShare] 快照构建失败 token={token} path={vpath}: {e}")
             raise HTTPException(status_code=500, detail="分享快照构建失败")
 
-        await update_share_source(token, vpath, sha)
+        await update_share_source(
+            token, vpath, sha, missing_assets=result.missing
+        )
 
     logger.info(
         f"[HtmlShare] 分享创建/复用完成 token={token} path={vpath} reused={reused} reason={reason}"
@@ -311,13 +316,13 @@ async def _build_share_snapshot(
     sid: str,
     token: str,
     agent_id: Optional[str],
-) -> None:
+) -> SnapshotBuildResult:
     """构建分享快照：复制图片到快照目录，快照 HTML 引用指向快照。
 
     实际实现见 deep_agent_server.html_share_snapshot.write_share_snapshot
     （与 Agent 自动分享、访问时懒重建共用同一入口）。
     """
-    await write_share_snapshot(
+    return await write_share_snapshot(
         user_id=user_id,
         html_text=html_text,
         vpath=vpath,
@@ -414,27 +419,48 @@ async def view_html_share(token: str):
             except ValueError:
                 pass
 
-    # ── (b) 懒重建：快照缺失 / 源内容变化 / 路径迁移 时重建 ──
+    # ── (b) 懒重建：快照缺失 / 源内容变化 / 路径迁移 / 缺失资源已出现 时重建 ──
     if source_abs is not None and source_abs.is_file():
-        sha = hashlib.sha256(source_abs.read_bytes()).hexdigest()
-        needs_rebuild = (not snapshot_exists) or migrated or (last_sha != sha)
-        if needs_rebuild:
+        source_bytes = source_abs.read_bytes()
+        sha = hashlib.sha256(source_bytes).hexdigest()
+
+        def _snapshot_is_current(rec: dict, snap_present: bool) -> bool:
+            """快照存在、源内容一致，且缺失资源状态已知且无变化。"""
+            missing_now = normalize_missing_assets(rec.get("snapshot_missing_assets"))
+            # missing_now is None：旧数据未记录缺失状态 → 重建一次以自愈
+            #   （历史上 HTML 先写完、CSS/JS 后落盘时，快照会缺资源且永不刷新）
+            # missing_assets_changed：构建时缺失的 CSS/JS/图片后来出现 → 重建
+            return (
+                snap_present
+                and not migrated
+                and rec.get("last_source_sha256") == sha
+                and missing_now is not None
+                and not missing_assets_changed(user_id, missing_now, agent_id=agent_id)
+            )
+
+        if not _snapshot_is_current(record, snapshot_exists):
             async with _lock_for(_html_share_rebuild_locks, token):
-                # 锁内复检（并发下另一请求可能已重建）
-                try:
-                    await _build_share_snapshot(
-                        user_id=user_id,
-                        html_text=source_abs.read_bytes().decode("utf-8", errors="replace"),
-                        vpath=source_vpath,
-                        sid=sid,
-                        token=token,
-                        agent_id=agent_id,
-                    )
-                    await update_share_source(token, source_vpath, sha)
-                    snapshot_exists = True
-                except Exception as e:
-                    # 重建失败降级：继续渲染现有快照（源并发删除等场景）
-                    logger.warning(f"[HtmlShare] 快照重建失败 token={token}: {e}")
+                # 锁内复检：并发请求可能已重建，避免重复复制资源
+                fresh = (await get_share_token(token)) or record or {}
+                fresh_snap_exists = snapshot_abs.is_file()
+                if not _snapshot_is_current(fresh, fresh_snap_exists):
+                    try:
+                        result = await _build_share_snapshot(
+                            user_id=user_id,
+                            html_text=source_bytes.decode("utf-8", errors="replace"),
+                            vpath=source_vpath,
+                            sid=sid,
+                            token=token,
+                            agent_id=agent_id,
+                        )
+                        await update_share_source(
+                            token, source_vpath, sha, missing_assets=result.missing
+                        )
+                        fresh_snap_exists = True
+                    except Exception as e:
+                        # 重建失败降级：继续渲染现有快照（源并发删除等场景）
+                        logger.warning(f"[HtmlShare] 快照重建失败 token={token}: {e}")
+                snapshot_exists = fresh_snap_exists
 
     # ── (c) 渲染 ──
     html_virtual_path = snapshot_path if snapshot_exists else source_vpath

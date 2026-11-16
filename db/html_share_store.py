@@ -4,6 +4,7 @@
 由 create_or_reuse_share_token 的四级复用链保证（路径 → 内容 sha → 唯一 basename → 新建）。
 """
 
+import json
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
@@ -50,6 +51,12 @@ async def _ensure_table():
         await conn.execute(
             "ALTER TABLE html_share_tokens "
             "ADD COLUMN IF NOT EXISTS last_source_sha256 TEXT"
+        )
+        # 快照缺失资源状态：JSON [[虚拟路径, size:mtime_ns], ...]
+        # NULL = 旧数据未记录（访问时重建一次以自愈）
+        await conn.execute(
+            "ALTER TABLE html_share_tokens "
+            "ADD COLUMN IF NOT EXISTS snapshot_missing_assets TEXT"
         )
 
 
@@ -199,20 +206,43 @@ async def update_share_source(
     token: str,
     file_path: str,
     sha256: Optional[str],
+    *,
+    missing_assets: Optional[List[Tuple[str, str]]] = None,
 ) -> bool:
-    """更新分享源文件路径与内容指纹（路径迁移 / 快照重建后记录）。"""
+    """更新分享源文件路径与内容指纹（路径迁移 / 快照重建后记录）。
+
+    missing_assets 非 None 时同步记录快照构建时缺失的资源（含文件签名）：
+    NULL 表示状态未知，访问分享页时会被动重建一次。
+    """
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
-        result = await conn.execute(
-            """
-            UPDATE html_share_tokens
-            SET file_path = $1,
-                file_key = COALESCE(file_key, $1),
-                last_source_sha256 = $2
-            WHERE token = $3
-            """,
-            file_path, sha256, token,
-        )
+        if missing_assets is None:
+            result = await conn.execute(
+                """
+                UPDATE html_share_tokens
+                SET file_path = $1,
+                    file_key = COALESCE(file_key, $1),
+                    last_source_sha256 = $2
+                WHERE token = $3
+                """,
+                file_path, sha256, token,
+            )
+        else:
+            result = await conn.execute(
+                """
+                UPDATE html_share_tokens
+                SET file_path = $1,
+                    file_key = COALESCE(file_key, $1),
+                    last_source_sha256 = $2,
+                    snapshot_missing_assets = $4
+                WHERE token = $3
+                """,
+                file_path, sha256, token,
+                json.dumps(
+                    [[vp, sig] for vp, sig in missing_assets],
+                    ensure_ascii=False,
+                ),
+            )
         return result == "UPDATE 1"
 
 
@@ -225,7 +255,7 @@ async def get_share_token(token: str) -> Optional[Dict]:
         row = await conn.fetchrow(
             """
             SELECT token, user_id, session_id, file_path, file_key,
-                   last_source_sha256, created_at,
+                   last_source_sha256, snapshot_missing_assets, created_at,
                    expires_at, access_count, last_access
             FROM html_share_tokens
             WHERE token = $1

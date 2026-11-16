@@ -27,6 +27,8 @@ from db.html_share_store import (
 from deep_agent_server.html_share_snapshot import (
     SNAPSHOT_DIR_NAME,
     SNAPSHOT_INDEX_NAME,
+    missing_assets_changed,
+    normalize_missing_assets,
     write_share_snapshot,
 )
 from deep_agent_server.workspace_service import resolve_virtual_path
@@ -111,8 +113,6 @@ async def _ensure_snapshot(
             f"workspace/{session_id}/{SNAPSHOT_DIR_NAME}/{token}/{SNAPSHOT_INDEX_NAME}"
         )
         snap_abs, *_ = resolve_virtual_path(user_id, snapshot_vpath)
-        if last_sha == sha and snap_abs.is_file():
-            return  # 快照已是最新，跳过（高频写入时避免重复复制资源）
 
         agent_id = None
         try:
@@ -122,8 +122,23 @@ async def _ensure_snapshot(
         except Exception:
             pass
 
+        # 快照新鲜度 = HTML 内容指纹 + 缺失资源状态：
+        #   - missing is None：旧数据/状态未知 → 重建一次（自愈历史上
+        #     「HTML 先写完、CSS/JS 尚未落盘」时生成的快照）
+        #   - 缺失资源签名变化（文件后来出现/被替换）→ 重建
+        missing = normalize_missing_assets(
+            record.get("snapshot_missing_assets") if record else None
+        )
+        if (
+            last_sha == sha
+            and snap_abs.is_file()
+            and missing is not None
+            and not missing_assets_changed(user_id, missing, agent_id=agent_id)
+        ):
+            return  # 快照已是最新，跳过（高频写入时避免重复复制资源）
+
         async with asyncio.timeout(SNAPSHOT_BUILD_TIMEOUT):
-            await write_share_snapshot(
+            result = await write_share_snapshot(
                 user_id=user_id,
                 html_text=content,
                 vpath=vpath,
@@ -131,7 +146,9 @@ async def _ensure_snapshot(
                 token=token,
                 agent_id=agent_id,
             )
-            await update_share_source(token, vpath, sha)
+            await update_share_source(
+                token, vpath, sha, missing_assets=result.missing
+            )
     except asyncio.TimeoutError:
         logger.warning(
             f"[HtmlShare] 快照构建超时（{SNAPSHOT_BUILD_TIMEOUT}s）token={token} "

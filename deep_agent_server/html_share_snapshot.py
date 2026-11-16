@@ -9,9 +9,11 @@
 """
 
 import hashlib
+import json
 import mimetypes
 import re
 import shutil
+from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -37,6 +39,76 @@ SNAPSHOT_INDEX_NAME = "index.html"
 MAX_SNAPSHOT_ASSETS = 50        # 单次分享快照文件数上限
 MAX_SNAPSHOT_BYTES = 30 * 1024 * 1024  # 单次分享快照总字节上限
 MAX_ESM_IMPORT_DEPTH = 3        # module 脚本 import 依赖递归深度上限
+
+
+@dataclass
+class SnapshotBuildResult:
+    """快照写入结果。
+
+    missing: 构建时被 HTML/CSS/JS 引用、但源文件读不到的资源
+             [(源虚拟路径, 文件签名), ...]。签名用于判断之后文件是否出现/变化，
+             空串表示构建时文件不存在。
+    """
+    copied: int
+    missing: List[Tuple[str, str]]
+
+
+def source_signature(
+    user_id: str,
+    src_vpath: str,
+    *,
+    agent_id: Optional[str] = None,
+) -> str:
+    """源文件签名 size:mtime_ns；不存在/不可访问返回空串。"""
+    try:
+        abs_path, *_ = resolve_virtual_path(user_id, src_vpath, agent_id=agent_id)
+        st = abs_path.stat()
+    except (ValueError, OSError):
+        return ""
+    return f"{st.st_size}:{st.st_mtime_ns}"
+
+
+def normalize_missing_assets(raw: Optional[str]) -> Optional[List[Tuple[str, str]]]:
+    """DB 的 snapshot_missing_assets → [(vpath, 签名)]。
+
+    返回 None 表示「状态未知」（旧数据未记录 / 字段损坏），调用方应重建一次。
+    """
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, list):
+        return None
+    out: List[Tuple[str, str]] = []
+    for item in data:
+        if isinstance(item, (list, tuple)) and item:
+            vpath = str(item[0] or "")
+            sig = str(item[1]) if len(item) > 1 and item[1] is not None else ""
+            if vpath:
+                out.append((vpath, sig))
+    return out
+
+
+def missing_assets_changed(
+    user_id: str,
+    missing: Optional[List[Tuple[str, str]]],
+    *,
+    agent_id: Optional[str] = None,
+) -> bool:
+    """构建时缺失的依赖是否已出现/变化 —— 需要重建快照。
+
+    仅当文件签名与构建时记录不同（含「当时不存在、现在存在」）才返回 True，
+    避免文件持续缺失时每次访问都重建。
+    """
+    if not missing:
+        return False
+    for vpath, recorded_sig in missing:
+        if source_signature(user_id, vpath, agent_id=agent_id) != recorded_sig:
+            return True
+    return False
+
 
 # ESM 静态 import/export from 与动态 import() 的相对路径提取
 _ESM_IMPORT_RE = re.compile(
@@ -72,7 +144,7 @@ def build_html_share_snapshot(
     session_id: str,
     snapshot_root: str,
     read_source: Callable[[str], Optional[bytes]],
-) -> Tuple[str, List[Tuple[str, str, bytes]]]:
+) -> Tuple[str, List[Tuple[str, str, bytes]], List[str]]:
     """构建分享快照：解析图片引用 → 生成改写后 HTML 与待复制文件清单。
 
     Args:
@@ -83,14 +155,24 @@ def build_html_share_snapshot(
         read_source: 读取源资源字节（不存在/越界返回 None），调用方注入
 
     Returns:
-        (改写后 HTML, [(src_vpath, dst_vpath, bytes), ...])
+        (改写后 HTML, [(src_vpath, dst_vpath, bytes), ...], [缺失源虚拟路径, ...])
         改写后 HTML 中图片引用指向快照绝对虚拟路径（/workspace/{sid}/.html-share-assets/{token}/...）。
         超限/读取失败的引用保留原样（对应图片在分享页 404，其余不受影响）。
+        缺失列表只包含「源文件读不到」的引用（不含超限跳过），
+        供调用方记录状态：文件之后出现时重建快照。
     """
     src_vpaths = _extract_asset_refs(html_text, dir_vpath, session_id)
     mapping: dict = {}
     copies: List[Tuple[str, str, bytes]] = []
     total_bytes = 0
+    missing_vpaths: List[str] = []
+    missing_seen: set = set()
+
+    def mark_missing(src: str) -> None:
+        """记录源文件读取失败的引用（去重保序）。"""
+        if src and src not in missing_seen:
+            missing_seen.add(src)
+            missing_vpaths.append(src)
 
     def add_copy(src: str, data: bytes) -> Optional[str]:
         """登记一个快照副本，返回快照绝对虚拟路径（超限返回 None）。"""
@@ -118,6 +200,8 @@ def build_html_share_snapshot(
         data = read_source(src)
         if data is not None:
             add_copy(src, data)
+        else:
+            mark_missing(src)
 
     # 2. 外部 CSS：内部 url() 图片一并快照，CSS 自身也复制为快照（url() 改写为快照绝对路径）
     css_mapping: dict = {}
@@ -129,6 +213,7 @@ def build_html_share_snapshot(
             continue
         css_bytes = read_source(src_css)
         if css_bytes is None:
+            mark_missing(src_css)
             continue
         css_dir = src_css[: src_css.rfind("/") + 1]
 
@@ -138,6 +223,7 @@ def build_html_share_snapshot(
                 return None
             data = read_source(vpath)
             if data is None:
+                mark_missing(vpath)
                 return None
             dst = add_copy(vpath, data)
             return "/" + dst if dst else None
@@ -184,6 +270,7 @@ def build_html_share_snapshot(
                 return None
             data = read_source(vpath)
             if data is None:
+                mark_missing(vpath)
                 return None
             if add_copy(vpath, data) is None:
                 return None
@@ -213,6 +300,7 @@ def build_html_share_snapshot(
             continue
         js_bytes = read_source(src_js)
         if js_bytes is None:
+            mark_missing(src_js)
             continue
         dst_js = add_copy(src_js, js_bytes)
         if dst_js:
@@ -264,7 +352,7 @@ def build_html_share_snapshot(
             flags=re.IGNORECASE,
         )
 
-    return new_html, copies
+    return new_html, copies, missing_vpaths
 
 
 async def write_share_snapshot(
@@ -275,11 +363,14 @@ async def write_share_snapshot(
     session_id: str,
     token: str,
     agent_id: Optional[str] = None,
-) -> int:
-    """构建并写入分享快照（先清旧快照再写），返回复制的资源文件数。
+) -> SnapshotBuildResult:
+    """构建并写入分享快照（先清旧快照再写）。
 
     分享创建（前端手动 / Agent 写入后自动）与访问时懒重建共用此入口，
     保证快照内容与生命周期管理只有一份实现。
+
+    Returns:
+        SnapshotBuildResult(copied=复制的资源数, missing=构建时读不到的源文件签名)
 
     Args:
         html_text: 源 HTML 当前内容
@@ -298,7 +389,7 @@ async def write_share_snapshot(
             logger.warning(f"[HtmlShareSnapshot] 快照源读取失败 src={src_vpath}")
             return None
 
-    new_html, copies = build_html_share_snapshot(
+    new_html, copies, missing_vpaths = build_html_share_snapshot(
         html_text=html_text,
         dir_vpath=dir_vpath,
         session_id=session_id,
@@ -322,8 +413,12 @@ async def write_share_snapshot(
     )
     index_abs.write_text(new_html, encoding="utf-8")
 
+    missing = [
+        (vp, source_signature(user_id, vp, agent_id=agent_id))
+        for vp in missing_vpaths
+    ]
     logger.info(
         f"[HtmlShareSnapshot] 快照写入完成 token={token} path={vpath} "
-        f"copied={len(copies)}"
+        f"copied={len(copies)} missing={len(missing)}"
     )
-    return len(copies)
+    return SnapshotBuildResult(copied=len(copies), missing=missing)

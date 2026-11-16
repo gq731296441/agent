@@ -1,6 +1,6 @@
 from datetime import timezone, timedelta
 from fastapi import APIRouter, Body, HTTPException, Request, Query
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 from db import storage, deep_storage
 from uuid import UUID
@@ -510,6 +510,75 @@ def _clear_agent_cache_for_session(manager, session_id: str) -> None:
         manager._agent_cache.pop(k, None)
 
 
+class SessionContextResetError(Exception):
+    """开始新会话（清空上下文）失败，code 为对外 HTTP 状态码。"""
+
+    def __init__(self, message: str, code: int = 400):
+        self.message = message
+        self.code = code
+        super().__init__(message)
+
+
+async def reset_subscription_context(
+    *,
+    user_id: str,
+    session_id: str,
+    expected_epoch: Optional[int] = None,
+    checkpointer=None,
+    kv_store=None,
+    manager=None,
+    validate_access: bool = True,
+) -> int:
+    """清空订阅智能体会话的 LangGraph 上下文，保留历史并插入分割线。
+
+    「开始新会话」的唯一实现，供以下调用方共用：
+      - POST /sessions/{id}/new-context（expected_epoch 由前端传入，冲突返回 409）
+      - SSE POST /agent/chat 的 new_session=true（expected_epoch 为空，取最新值重试一次）
+
+    Returns:
+        新的 context_epoch
+
+    Raises:
+        SessionContextResetError: 无权限 / 非订阅会话 / 已冻结 / epoch 冲突
+    """
+    if validate_access and not await validate_session_access(user_id, session_id):
+        raise SessionContextResetError(SESSION_ACCESS_DENIED_MSG, 403)
+
+    meta = await storage.get_session_meta(session_id)
+    if not meta:
+        raise SessionContextResetError("Session not found", 404)
+    if meta.get("agent_kind") != "subscription":
+        raise SessionContextResetError("仅订阅智能体会话支持开始新会话", 400)
+    if meta.get("subscription_frozen"):
+        raise SessionContextResetError("会话已冻结，无法开始新会话", 403)
+
+    # 乐观锁递增 epoch：调用方持有 epoch 时严格校验；未持有时取最新值重试一次
+    current_epoch = (
+        expected_epoch
+        if expected_epoch is not None
+        else int(meta.get("context_epoch") or 1)
+    )
+    new_epoch = await storage.increment_context_epoch(session_id, current_epoch)
+    if new_epoch is None and expected_epoch is None:
+        latest = await storage.get_session_meta(session_id) or {}
+        current_epoch = int(latest.get("context_epoch") or 1)
+        new_epoch = await storage.increment_context_epoch(session_id, current_epoch)
+    if new_epoch is None:
+        raise SessionContextResetError("context_epoch 冲突，请刷新后重试", 409)
+
+    thread_id = f"{user_id}#{session_id}"
+    await _cleanup_langgraph_data(
+        checkpointer,
+        kv_store,
+        thread_id,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    _clear_agent_cache_for_session(manager, session_id)
+    await storage.insert_context_divider(session_id, user_id, new_epoch)
+    return new_epoch
+
+
 @router.post("/{session_id}/new-context", response_model=ApiResponse)
 async def new_context(
     request: Request,
@@ -518,34 +587,17 @@ async def new_context(
     expected_epoch: int = Query(..., description="当前 context_epoch，乐观锁"),
 ):
     """订阅智能体：清空 LangGraph 上下文，保留历史并插入分割线。"""
-    if not await validate_session_access(user_id, session_id):
-        return ApiResponse.error(msg=SESSION_ACCESS_DENIED_MSG, code=403)
-
-    meta = await storage.get_session_meta(session_id)
-    if not meta:
-        return ApiResponse.error(msg="Session not found", code=404)
-    if meta.get("agent_kind") != "subscription":
-        return ApiResponse.error(msg="仅订阅智能体会话支持开始新会话", code=400)
-    if meta.get("subscription_frozen"):
-        return ApiResponse.error(msg="会话已冻结，无法开始新会话", code=403)
-
-    new_epoch = await storage.increment_context_epoch(session_id, expected_epoch)
-    if new_epoch is None:
-        return ApiResponse.error(msg="context_epoch 冲突，请刷新后重试", code=409)
-
-    thread_id = f"{user_id}#{session_id}"
-    await _cleanup_langgraph_data(
-        getattr(request.app.state, "checkpointer", None),
-        getattr(request.app.state, "kv_store", None),
-        thread_id,
-        user_id=user_id,
-        session_id=session_id,
-    )
-
-    manager = getattr(request.app.state, "manager_agents", None)
-    _clear_agent_cache_for_session(manager, session_id)
-
-    await storage.insert_context_divider(session_id, user_id, new_epoch)
+    try:
+        new_epoch = await reset_subscription_context(
+            user_id=user_id,
+            session_id=session_id,
+            expected_epoch=expected_epoch,
+            checkpointer=getattr(request.app.state, "checkpointer", None),
+            kv_store=getattr(request.app.state, "kv_store", None),
+            manager=getattr(request.app.state, "manager_agents", None),
+        )
+    except SessionContextResetError as e:
+        return ApiResponse.error(msg=e.message, code=e.code)
 
     return ApiResponse.success(data={
         "session_id": session_id,
