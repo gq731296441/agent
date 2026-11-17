@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>组件验证报告 - {{ filename }}</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f7fa;
+            color: #333;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+        .header {
+            border-bottom: 2px solid #e8e8e8;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        h1 {
+            margin: 0 0 10px 0;
+            color: #1890ff;
+            font-size: 24px;
+        }
+        .meta {
+            color: #666;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+        .section {
+            margin-bottom: 30px;
+        }
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 15px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #e8e8e8;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            border-radius: 6px;
+            padding: 15px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 28px;
+            font-weight: bold;
+            color: #1890ff;
+            margin: 10px 0;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+        }
+        .stats-grid .pass .stat-value { color: #52c41a; }
+        .stats-grid .fail .stat-value { color: #ff4d4f; }
+        .stats-grid .correction .stat-value { color: #fa8c16; }
+        .stats-grid .api-success .stat-value { color: #1890ff; }
+        .stats-grid .api-fail .stat-value { color: #ff4d4f; }
+
+        .summary-text {
+            background: #f8f9fa;
+            border-left: 4px solid #1890ff;
+            padding: 15px;
+            margin-bottom: 20px;
+            white-space: pre-wrap;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #e8e8e8;
+        }
+        th {
+            background: #fafafa;
+            font-weight: 600;
+            color: #333;
+        }
+        tr:hover {
+            background: #f8f9fa;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .badge-error { background: #fff1f0; color: #ff4d4f; border: 1px solid #ffa39e; }
+        .badge-correction { background: #fff7e6; color: #fa8c16; border: 1px solid #ffd591; }
+        .badge-warning { background: #feffe6; color: #faad14; border: 1px solid #ffe58f; }
+
+        .error-type {
+            font-weight: 500;
+            color: #d32f2f;
+            font-family: Monaco, Menlo, monospace;
+            font-size: 12px;
+        }
+
+        .details {
+            margin-left: 20px;
+            color: #666;
+            font-size: 13px;
+        }
+
+        .footer {
+            border-top: 1px solid #e8e8e8;
+            padding-top: 20px;
+            margin-top: 30px;
+            text-align: center;
+            color: #999;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📋 组件清单验证报告</h1>
+            <div class="meta">
+                <div><strong>文件名:</strong> {{ filename }}</div>
+                <div><strong>工作表:</strong> {{ sheet_name }}</div>
+                <div><strong>生成时间:</strong> {{ generated_at }}</div>
+                <div><strong>处理时长:</strong> {{ processing_time }} 秒</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">📊 统计数据</div>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">总行数</div>
+                    <div class="stat-value">{{ statistics.total_rows }}</div>
+                </div>
+                <div class="stat-card pass">
+                    <div class="stat-label">验证通过</div>
+                    <div class="stat-value">{{ statistics.passed }}</div>
+                </div>
+                <div class="stat-card fail">
+                    <div class="stat-label">验证失败</div>
+                    <div class="stat-value">{{ statistics.failed }}</div>
+                </div>
+                <div class="stat-card correction">
+                    <div class="stat-label">已修正</div>
+                    <div class="stat-value">{{ statistics.corrected }}</div>
+                </div>
+                <div class="stat-card api-success">
+                    <div class="stat-label">API成功</div>
+                    <div class="stat-value">{{ statistics.api_success }}</div>
+                </div>
+                <div class="stat-card api-fail">
+                    <div class="stat-label">API失败</div>
+                    <div class="stat-value">{{ statistics.api_failed }}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">📝 汇总摘要</div>
+            <div class="summary-text">{{ summary }}</div>
+        </div>
+
+        {{ errors_section }}
+
+        {{ corrections_section }}
+
+        <div class="section">
+            <div class="section-title">🔧 系统信息</div>
+            <table>
+                <tr><th>配置项</th><th>值</th></tr>
+                <tr><td>Python版本</td><td>{{ system_info.python_version }}</td></tr>
+                <tr><td>pandas版本</td><td>{{ system_info.pandas_version }}</td></tr>
+                <tr><td>openpyxl版本</td><td>{{ system_info.openpyxl_version }}</td></tr>
+                <tr><td>requests版本</td><td>{{ system_info.requests_version }}</td></tr>
+            </table>
+        </div>
+
+        <div class="footer">
+            <div>报告生成工具: wx-sw-component-list-check</div>
+            <div>如有疑问，请联系系统管理员</div>
+        </div>
+    </div>
+</body>
+</html>

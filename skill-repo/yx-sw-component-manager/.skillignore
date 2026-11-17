@@ -1,0 +1,23 @@
+# 打包/贡献商城时排除的运行产物与缓存
+# 规则：排除运行期生成的数据文件、日志、字节码、临时目录
+__pycache__/
+*.pyc
+logs/
+output/
+cache/
+.skill_usage_cache/
+VerifyResult/
+*.zip
+*.tar.gz
+*.log
+
+# 运行产物（含真实业务数据，禁止进包）
+*_查询结果_*.xlsx
+*_回填后_*.xlsx
+*_差异对比_*.xlsx
+*_差异对比_*.csv
+*_审核报告_*.xlsx
+*_审核报告_*.html
+*_审核报告_*.json
+*_report.*
+*_错误详情_*.xlsx

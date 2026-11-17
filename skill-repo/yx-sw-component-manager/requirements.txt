@@ -1,0 +1,16 @@
+# yx-sw-component-manager 依赖库（融合自三个技能）
+
+# 校验模块（wx-sw-component-list-check + component-manifest-verify-addDir）
+pandas>=1.3.0,<2.1
+openpyxl>=3.0.0,<4.0
+requests>=2.25.0,<3.0
+pyyaml>=5.4.0,<7.0
+xlsxwriter>=1.3.0,<4.0
+
+# 查询回填模块（pdm-query2report-skill）
+# 已包含 requests / openpyxl
+
+# 补充缺失依赖（云端全新环境必需显式声明）
+numpy>=1.21,<2.0          # report_generator.py 序列化使用
+beautifulsoup4>=4.11,<5.0 # pdm_query HTML 结果文件回填
+tqdm>=4.60,<5.0           # pdm_query 进度条

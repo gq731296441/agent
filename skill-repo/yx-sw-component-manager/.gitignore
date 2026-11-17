@@ -1,0 +1,21 @@
+# 本地运行产生的缓存与产物（与 .skillignore 保持一致）
+__pycache__/
+*.pyc
+logs/
+output/
+cache/
+VerifyResult/
+*.zip
+*.tar.gz
+*.log
+
+# 运行产物（含真实业务数据，禁止提交/打包）
+*_查询结果_*.xlsx
+*_回填后_*.xlsx
+*_差异对比_*.xlsx
+*_差异对比_*.csv
+*_审核报告_*.xlsx
+*_审核报告_*.html
+*_审核报告_*.json
+*_report.*
+*_错误详情_*.xlsx

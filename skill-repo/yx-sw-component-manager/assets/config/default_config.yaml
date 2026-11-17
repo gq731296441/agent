@@ -1,0 +1,88 @@
+# wx-sw-component-list-check 默认配置文件
+
+# 验证配置
+validation:
+  required_columns:
+    - "层次"
+    - "部件类别"
+    - "中文名称"
+    - "英文名称"
+    - "英文代号"
+    - "组件版本"
+    - "组件资产类型"
+    - "服务制品类型"
+    - "服务等级"
+    - "部件编号"
+    - "组件功能说明"
+    - "组件接口说明"
+    - "备注"
+  
+  component_categories:
+    - "系统"
+    - "软件"
+    - "软件子系统"
+    - "软件模块"
+    - "组件"
+    - "外部第三方组件"
+  
+  api:
+    timeout: 30
+    max_retries: 3
+    retry_delay: 1.0
+    backoff_factor: 2.0
+    # 部件API配置
+    part_api:
+      base_url: "http://pdmweb.zte.com.cn/zte-plm-iproduct-gbom/gbom/v2"
+      system_code: "100000461002"
+      version: "latest"
+      all_lifecycle: "1"
+    
+    # 第三方组件API配置
+    component_api:
+      base_url: "https://icomp.zte.com.cn/zte-plm-icomp-gateway/zte-plm-icomp-comp/inner"
+      page_size: 10
+      env_token_vars: ["X_Auth_Value", "coclaw_token"]
+      env_empno_vars: ["X_Emp-No", "coclaw_empno"]
+
+# 输出配置
+output:
+  create_corrected: false  # 是否生成修正后的Excel文件（已强制禁用，用户需手动修订）
+  # 注意: JSON报告和HTML报告总是会生成，不受配置控制
+  report_suffix: "_report.json"
+  html_suffix: "_report.html"
+
+# 日志配置
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  log_to_file: true
+  log_dir: "./logs"
+  detailed: true
+  console: true
+  max_file_size_mb: 10
+  backup_count: 5
+
+# 缓存配置
+cache:
+  enabled: true
+  cache_dir: "./cache"
+  max_memory_size: 1000
+  default_ttl: 3600  # 1小时，单位秒
+  persistence: true
+
+# 处理配置
+processing:
+  batch_size: 100  # 批处理大小（对于大文件）
+  first_row_level_must_be_zero: true
+  auto_correct_first_row: false  # 已强制禁用自动修正第一行层次
+  check_api_consistency: true
+  auto_correct_inconsistencies: false  # 已强制禁用所有自动修正（用户需手动修订）
+  continue_on_api_error: true  # API调用失败是否继续处理下一行
+  max_api_errors_per_file: 100  # 最大API错误数，超过则终止
+
+# 报告配置
+report:
+  include_html: true
+  html_template: "assets/templates/report_template.html"
+  include_consistency_details: true
+  include_validation_trace: false  # 是否包含详细的验证过程（文件较大）
+  max_errors_in_summary: 50  # 摘要中最多显示的错误数
