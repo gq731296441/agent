@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-import logging
 import os
 import re
 import shutil
@@ -17,9 +16,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from config import get_logger
 from config.config import app_config
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+# s3canner 子进程并发上限（避免多人同时扫描打满 CPU）
+_SCAN_SEM: Optional[asyncio.Semaphore] = None
+
+
+def _scan_sem() -> asyncio.Semaphore:
+    global _SCAN_SEM
+    if _SCAN_SEM is None:
+        _SCAN_SEM = asyncio.Semaphore(
+            max(1, int(getattr(app_config, "SKILL_SCAN_MAX_CONCURRENCY", 2)))
+        )
+    return _SCAN_SEM
 
 _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 
@@ -117,7 +129,7 @@ def apply_scan_stage(
                 item["status"] = "done"
                 item["at"] = item.get("at") or now
     if not reached:
-        logger.debug("scan stage not found: %s", stage_id)
+        logger.debug("scan stage not found: {}", stage_id)
     percent = _stage_percent(stage_id)
     if status == "running":
         percent = max(4, percent - 4)
@@ -270,7 +282,7 @@ def _run_cmd_streaming_sync(
             stdout_tail = b"".join(out_parts).decode("utf-8", errors="replace")[-600:]
             stderr_tail = b"".join(err_parts).decode("utf-8", errors="replace")[-400:]
             logger.warning(
-                "s3canner %s after %.0fs exit=%s stdout=%s stderr=%s",
+                "s3canner {} after {.0}s exit={} stdout={} stderr={}",
                 "startup timeout" if startup_expired else "timeout",
                 effective,
                 proc.returncode,
@@ -444,7 +456,7 @@ def _prepare_rules_file(bin_path: str, work_dir: Path) -> Optional[str]:
         try:
             base = _export_builtin_rules(bin_path)
         except Exception as e:
-            logger.warning("s3canner generate-rules failed: %s", e)
+            logger.warning("s3canner generate-rules failed: {}", e)
             return None
     if overlay is None:
         return str(base)
@@ -471,7 +483,7 @@ def _load_rule_labels(rules_path: Optional[str]) -> Dict[str, Dict[str, str]]:
 
         doc = yaml.safe_load(Path(rules_path).read_text(encoding="utf-8")) or {}
     except Exception as e:
-        logger.debug("load rule labels failed: %s", e)
+        logger.debug("load rule labels failed: {}", e)
         return {}
     labels: Dict[str, Dict[str, str]] = {}
     for rule in doc.get("rules") or []:
@@ -747,7 +759,7 @@ async def _run_s3canner(
                 return_exceptions=True,
             )
     except TimeoutError as e:
-        logger.warning("s3canner timed out after %.0fs", _scan_timeout())
+        logger.warning("s3canner timed out after {:.0f}s", _scan_timeout())
         return ScanOutcome(
             ok=False,
             unavailable=True,
@@ -833,4 +845,5 @@ async def run_security_scans(
         "test",
     ):
         return ScanOutcome(ok=True, findings=[], details={"fixture": True})
-    return await _run_s3canner(unpacked, report_dir, on_progress=on_progress)
+    async with _scan_sem():
+        return await _run_s3canner(unpacked, report_dir, on_progress=on_progress)

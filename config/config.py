@@ -395,6 +395,21 @@ class BaseConfig(BaseSettings):
     )
     SKILL_BUILDS_TTL_DAYS: int = Field(default=14, description="skill-builds TTL 天")
     SKILL_MARKETPLACE_WORKER: bool = Field(default=True, description="启动进程内提交 Worker")
+    SKILL_MAX_PENDING_REVIEW: int = Field(
+        default=5, description="每用户待审核提交上限（与 inflight 解耦）"
+    )
+    SKILL_MAX_ATTEMPTS: int = Field(
+        default=3, description="单提交最大处理次数（超过则置 FAILED，防无限重抢）"
+    )
+    SKILL_WORKER_CONCURRENCY: int = Field(
+        default=1, description="进程内 worker 并发数（默认 1，串行处理）"
+    )
+    SKILL_SCAN_MAX_CONCURRENCY: int = Field(
+        default=2, description="s3canner 子进程并发上限"
+    )
+    SKILL_GC_INTERVAL_HOURS: float = Field(
+        default=6.0, description="GC 周期（小时）；<=0 关闭周期 GC"
+    )
     FILE_UPLOAD_MAX_BYTES: int = Field(
         default=10485760,
         description="普通文件上传最大字节数（10MB）",

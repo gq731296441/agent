@@ -2012,7 +2012,7 @@ class DeepEventAdapter:
             from config import get_logger
 
             get_logger(__name__).debug(
-                "[DeepAdapter] skip conversation file record tool=%s call=%s",
+                "[DeepAdapter] skip conversation file record tool={} call={}",
                 tool_name,
                 tool_call_id,
             )

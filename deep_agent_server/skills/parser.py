@@ -106,6 +106,31 @@ def _resolve_version(fm: Dict[str, Any]) -> str:
     return "1.0.0"
 
 
+def read_skill_md_version(skill_dir: str) -> Optional[str]:
+    """读取 SKILL.md frontmatter 中显式声明的 version。
+
+    与 parse_skill_md 不同：未声明 version 时返回 None（而不是默认 "1.0.0"），
+    供上传接口判断「包内确实写了版本号」，避免把默认值当成真实声明。
+    """
+    path = Path(skill_dir) / "SKILL.md"
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding="utf-8-sig")
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return None
+    fm = _parse_yaml_frontmatter(m.group(1))
+    raw = fm.get("version")
+    if raw is None:
+        meta = fm.get("metadata")
+        if isinstance(meta, dict):
+            raw = meta.get("version")
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    return value or None
+
+
 def parse_skill_md(skill_dir: str) -> Optional[SkillMeta]:
     """解析 skill 目录下的 SKILL.md。"""
     path = Path(skill_dir) / "SKILL.md"

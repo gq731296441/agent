@@ -605,7 +605,7 @@ async def run_deep_agent(
 
             except RepetitionDetected as error:
                 logger.warning(
-                    "[DeepRunner] repetition detected session=%s run=%s period=%s retry=%s",
+                    "[DeepRunner] repetition detected session={} run={} period={} retry={}",
                     session_id, run_id, error.hit.period_chars, repetition_retries,
                 )
                 adapter.discard_model_segment()

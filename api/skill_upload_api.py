@@ -9,11 +9,14 @@ from fastapi import APIRouter, Body, File, Form, Header, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from common.schemas import ApiResponse, ListApiResponse
+from config import get_logger
 from deep_agent_server.skills.marketplace import storage as ms
 from deep_agent_server.skills.marketplace.publish_service import (
     PublishError,
     get_publish_service,
 )
+
+logger = get_logger(__name__)
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
@@ -99,9 +102,20 @@ async def get_my_upload(package_id: str, user_id: str = Query(...)):
 async def delete_my_upload(package_id: str, user_id: str = Query(...)):
     try:
         result = await get_publish_service().withdraw_package(package_id, user_id)
+        logger.info(
+            "[SkillAudit] action=withdraw user={} pkg={} installs={}",
+            user_id, package_id, result.get("install_count"),
+        )
         return ApiResponse.success(data=result, msg="已删除并下架")
     except PublishError as e:
+        logger.info(
+            "[SkillAudit] action=withdraw user={} pkg={} rejected code={} msg={}",
+            user_id, package_id, e.code, e.message,
+        )
         return ApiResponse.error(msg=e.message, code=e.code)
+    except Exception:
+        logger.exception("[SkillWithdraw] failed user={} pkg={}", user_id, package_id)
+        return ApiResponse.error(msg="操作失败，请稍后重试或联系管理员", code=500)
 
 
 @router.get("/submissions/{submission_id}", response_model=ApiResponse)
@@ -124,7 +138,7 @@ async def get_submission(submission_id: str, user_id: str = Query(...)):
 async def upload_skill(
     user_id: str = Query(...),
     file: UploadFile = File(...),
-    version: str = Form(...),
+    version: str = Form(""),
     package_id: str = Form(""),
     requested_visibility: str = Form("public"),
     name_zh: str = Form(""),
@@ -157,10 +171,11 @@ async def upload_skill(
             return ApiResponse.error(msg="空文件", code=400)
 
         svc = get_publish_service()
+        # version 可不传：服务端从 ZIP 内 SKILL.md 读取；传了则做一致性校验
         result = await svc.submit(
             submitter_id=user_id,
             zip_bytes=zip_bytes,
-            version=version.strip(),
+            version=(version or "").strip() or None,
             package_id=(package_id or "").strip() or None,
             requested_visibility="public",
             idempotency_key=key,
@@ -172,11 +187,26 @@ async def upload_skill(
                 "author": author or user_id,
             },
         )
+        logger.info(
+            "[SkillAudit] action=upload user={} submission={} pkg={} version={} status={}",
+            user_id,
+            result.get("submission_id"),
+            result.get("package_id"),
+            result.get("declared_version"),
+            result.get("status"),
+        )
         return ApiResponse.success(data=result, msg="已提交")
     except PublishError as e:
-        return ApiResponse.error(msg=e.message, code=e.code)
-    except Exception as e:
-        return ApiResponse.error(msg=f"上传失败: {e}", code=500)
+        logger.info(
+            "[SkillAudit] action=upload user={} rejected code={} msg={}",
+            user_id, e.code, e.message,
+        )
+        # 版本冲突等结构化错误：附带 error_type/detail，供前端精准展示
+        payload = e.to_payload() if (e.error_type or e.detail) else None
+        return ApiResponse.error(msg=e.message, code=e.code, data=payload)
+    except Exception:
+        logger.exception("[SkillUpload] submit failed user={}", user_id)
+        return ApiResponse.error(msg="上传失败，请稍后重试或联系管理员", code=500)
 
 
 class RetryBody(BaseModel):
@@ -200,18 +230,40 @@ async def retry_submission(
         result = await get_publish_service().retry_scan(
             submission_id, user_id, declared or None
         )
+        logger.info(
+            "[SkillAudit] action=retry user={} submission={} status={}",
+            user_id, submission_id, result.get("status"),
+        )
         return ApiResponse.success(data=result, msg="已重新入队")
     except PublishError as e:
+        logger.info(
+            "[SkillAudit] action=retry user={} submission={} rejected code={} msg={}",
+            user_id, submission_id, e.code, e.message,
+        )
         return ApiResponse.error(msg=e.message, code=e.code)
+    except Exception:
+        logger.exception("[SkillRetry] failed user={} submission={}", user_id, submission_id)
+        return ApiResponse.error(msg="重试失败，请稍后重试或联系管理员", code=500)
 
 
 @router.post("/submissions/{submission_id}/cancel", response_model=ApiResponse)
 async def cancel_submission(submission_id: str, user_id: str = Query(...)):
     try:
         result = await get_publish_service().cancel(submission_id, user_id)
+        logger.info(
+            "[SkillAudit] action=cancel user={} submission={} status={}",
+            user_id, submission_id, result.get("status"),
+        )
         return ApiResponse.success(data=result, msg="已取消")
     except PublishError as e:
+        logger.info(
+            "[SkillAudit] action=cancel user={} submission={} rejected code={} msg={}",
+            user_id, submission_id, e.code, e.message,
+        )
         return ApiResponse.error(msg=e.message, code=e.code)
+    except Exception:
+        logger.exception("[SkillCancel] failed user={} submission={}", user_id, submission_id)
+        return ApiResponse.error(msg="取消失败，请稍后重试或联系管理员", code=500)
 
 
 # 旧 update/delete/export：update 改为提示走新 submit；保留 export 兼容

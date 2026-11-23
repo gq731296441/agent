@@ -72,6 +72,15 @@ async def lifespan(app: FastAPI):
     global manager_agents
 
     # ==================== 启动阶段 ====================
+    # uvicorn 初始化时会重置 root logger，这里再兜底注册一次 stdlib → loguru 拦截器，
+    # 确保 marketplace 等使用 logging.getLogger 的模块日志能落盘（幂等）。
+    try:
+        from config.logging import install_stdlib_interceptor
+
+        install_stdlib_interceptor(app_config.log_level)
+    except Exception as e:  # 日志系统本身异常不应阻断启动
+        print(f"[app] install_stdlib_interceptor failed: {e}")
+
     logger.info("=" * 60)
     logger.info("【app】🚀 应用启动中...")
     logger.info("=" * 60)

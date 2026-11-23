@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-import logging
 import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
+from config import get_logger
 from db.database import db_manager
 from deep_agent_server.skills.dirs import install_dir_name
 from deep_agent_server.skills.marketplace.hash_payload import hash_skill_payload
@@ -15,7 +17,7 @@ from deep_agent_server.skills.marketplace.paths import release_dir
 from deep_agent_server.skills.marketplace import storage as ms
 from deep_agent_server.workspace import ensure_user_dirs, get_skills_dir, sync_skill_to_sandbox_bind_path
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class InstallError(Exception):
@@ -25,20 +27,66 @@ class InstallError(Exception):
         self.code = code
 
 
-async def _acquire_install_lock(user_id: str, package_id: str) -> None:
+@asynccontextmanager
+async def _install_lock(user_id: str, package_id: str):
+    """基于 PG advisory lock 的安装互斥（跨进程/多实例有效）。
+
+    必须独占一条连接持有锁：若放进事务块，连接归还后锁会悬挂。
+    """
     pool = await db_manager.get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT status FROM skill_installations
-            WHERE user_id = $1 AND package_id = $2
-            FOR UPDATE
-            """,
-            user_id,
-            package_id,
-        )
-        if row and row["status"] == "INSTALLING":
-            raise InstallError("安装进行中", 409)
+    conn = await pool.acquire()
+    key = f"skill-install:{user_id}:{package_id}"
+    got = False
+    try:
+        got = await conn.fetchval("SELECT pg_try_advisory_lock(hashtext($1))", key)
+        if not got:
+            raise InstallError("该技能正在安装中，请稍候", 409)
+        yield
+    finally:
+        if got:
+            try:
+                await conn.fetchval("SELECT pg_advisory_unlock(hashtext($1))", key)
+            except Exception:
+                logger.warning(
+                    "[SkillInstall] advisory unlock failed user={} pkg={}",
+                    user_id, package_id,
+                )
+        await pool.release(conn)
+
+
+def _install_files_sync(
+    src: Path,
+    installing: Path,
+    final: Path,
+    previous: Path,
+    expected: str,
+    meta_file: dict,
+) -> str:
+    """同步执行安装文件操作：copytree → 哈希校验 → 写 meta → 两次 rename。"""
+    if installing.exists():
+        shutil.rmtree(installing, ignore_errors=True)
+    shutil.copytree(src, installing, ignore=shutil.ignore_patterns("_meta"))
+    meta_dir = installing / "_meta"
+    if meta_dir.exists():
+        shutil.rmtree(meta_dir, ignore_errors=True)
+
+    actual = hash_skill_payload(installing)
+    if expected and actual != expected:
+        shutil.rmtree(installing, ignore_errors=True)
+        raise InstallError("安装哈希不匹配", 500)
+
+    (installing / ".install-meta.json").write_text(
+        json.dumps(meta_file, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    if previous.exists():
+        shutil.rmtree(previous, ignore_errors=True)
+    if final.exists():
+        final.rename(previous)
+    installing.rename(final)
+    if previous.exists():
+        shutil.rmtree(previous, ignore_errors=True)
+    return actual
 
 
 async def install_pinned_version(
@@ -86,34 +134,48 @@ async def install_pinned_version(
         installing = skills_root / f"{dir_name}.installing"
         previous = skills_root / f"{dir_name}.previous"
 
-        pool = await db_manager.get_pool()
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    """
-                    INSERT INTO skill_installations (user_id, package_id, status)
-                    VALUES ($1, $2, 'INSTALLING')
-                    ON CONFLICT (user_id, package_id) DO UPDATE
-                    SET status = 'INSTALLING'
-                    """,
-                    user_id,
-                    package_id,
-                )
+        # 同一用户对同一包并发安装会互相覆盖 .installing，用 advisory lock 串行化。
+        async with _install_lock(user_id, package_id):
+            return await _do_install(
+                user_id, package_id, ver, catalog, src, final, installing, previous, expected
+            )
+
+    # 无 marketplace version：旧路径
+    from deep_agent_server.skills.installer import install_skill_for_user
+
+    return await install_skill_for_user(user_id, package_id, overwrite=True)
+
+
+async def _do_install(
+    user_id: str,
+    package_id: str,
+    ver: dict,
+    catalog: Optional[dict],
+    src: Path,
+    final: Path,
+    installing: Path,
+    previous: Path,
+    expected: str,
+) -> dict:
+    """在持有安装锁的前提下执行安装（原 install_pinned_version 主体）。"""
+    from db import deep_storage
+
+    skills_root = get_skills_dir(user_id)
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO skill_installations (user_id, package_id, status)
+                VALUES ($1, $2, 'INSTALLING')
+                ON CONFLICT (user_id, package_id) DO UPDATE
+                SET status = 'INSTALLING'
+                """,
+                user_id,
+                package_id,
+            )
 
         try:
-            if installing.exists():
-                shutil.rmtree(installing, ignore_errors=True)
-            shutil.copytree(src, installing, ignore=shutil.ignore_patterns("_meta"))
-            # 去掉可能拷到的 _meta
-            meta = installing / "_meta"
-            if meta.exists():
-                shutil.rmtree(meta, ignore_errors=True)
-
-            actual = hash_skill_payload(installing)
-            if expected and actual != expected:
-                shutil.rmtree(installing, ignore_errors=True)
-                raise InstallError("安装哈希不匹配", 500)
-
             meta_src = catalog or ver or {}
             meta_file = {
                 "package_id": package_id,
@@ -122,19 +184,11 @@ async def install_pinned_version(
                 "name_zh": (meta_src.get("name_zh") or "").strip(),
                 "version_id": ver["id"],
                 "version": ver["version"],
-                "content_sha256": actual,
+                "content_sha256": expected,
             }
-            (installing / ".install-meta.json").write_text(
-                json.dumps(meta_file, ensure_ascii=False, indent=2), encoding="utf-8"
+            actual = await asyncio.to_thread(
+                _install_files_sync, src, installing, final, previous, expected, meta_file
             )
-
-            if previous.exists():
-                shutil.rmtree(previous, ignore_errors=True)
-            if final.exists():
-                final.rename(previous)
-            installing.rename(final)
-            if previous.exists():
-                shutil.rmtree(previous, ignore_errors=True)
 
             # 清理旧布局目录（目录名=package_id，迁移遗留）
             legacy = skills_root / package_id
@@ -142,9 +196,9 @@ async def install_pinned_version(
                 from deep_agent_server.skills.dirs import read_install_meta
 
                 if str(read_install_meta(legacy).get("package_id") or "") == package_id:
-                    shutil.rmtree(legacy, ignore_errors=True)
+                    await asyncio.to_thread(shutil.rmtree, legacy, True)
                     logger.info(
-                        "[SkillInstall] removed legacy dir user=%s pkg=%s dir=%s",
+                        "[SkillInstall] removed legacy dir user={} pkg={} dir={}",
                         user_id,
                         package_id,
                         legacy,
@@ -200,11 +254,6 @@ async def install_pinned_version(
             if previous.exists() and not final.exists():
                 previous.rename(final)
             raise InstallError(str(e), 500) from e
-
-    # 无 marketplace version：旧路径
-    from deep_agent_server.skills.installer import install_skill_for_user
-
-    return await install_skill_for_user(user_id, package_id, overwrite=True)
 
 
 async def recover_install_dirs(user_id: str, package_id: str) -> None:

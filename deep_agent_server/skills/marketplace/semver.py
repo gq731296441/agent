@@ -38,3 +38,16 @@ def compare_semver(a: str, b: str) -> int:
 
 def is_strictly_greater(candidate: str, baseline: str) -> bool:
     return compare_semver(candidate, baseline) > 0
+
+
+def suggest_next_minor(version: str) -> Optional[str]:
+    """给出一个「严格大于 baseline」的推荐版本号（MINOR + 1，PATCH 归零）。
+
+    仅用于报错提示，帮用户知道该把 SKILL.md 的 version 改成什么。
+    baseline 非法时返回 None。
+    """
+    parsed = parse_semver(version)
+    if parsed is None:
+        return None
+    major, minor, _patch = parsed
+    return f"{major}.{minor + 1}.0"

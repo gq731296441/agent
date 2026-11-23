@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import socket
 import shutil
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
+from config import get_logger
 from deep_agent_server.skills.marketplace import storage as ms
 from deep_agent_server.skills.marketplace.hash_payload import hash_skill_payload
 from deep_agent_server.skills.marketplace.identity import normalize_declared
@@ -27,11 +27,23 @@ from deep_agent_server.skills.marketplace.validate.structure import (
 )
 from deep_agent_server.skills.marketplace.validate.unpack import UnpackError, safe_unpack_zip
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _worker_task: Optional[asyncio.Task] = None
+_gc_task: Optional[asyncio.Task] = None
 _worker_id = f"{socket.gethostname()}-{uuid4().hex[:8]}"
 _stop = asyncio.Event()
+
+# 状态推进的合法来源集合。非法推进（如用户已取消）将被静默丢弃并记录 warning，
+# 避免 worker 覆盖外部状态变更。
+_ALLOWED_FROM = {
+    "VALIDATING": {"QUEUED", "RECEIVED", "VALIDATING", "SCANNING"},
+    "SCANNING": {"VALIDATING", "SCANNING"},
+    "AWAITING_REVIEW": {"SCANNING"},
+    "FAILED": {"QUEUED", "RECEIVED", "VALIDATING", "SCANNING"},
+    "BLOCKED": {"SCANNING"},
+    "PROMOTED": {"AWAITING_REVIEW"},
+}
 
 
 def _pkg_finding(rule_id: str, message: str, file: str = "SKILL.md", severity: str = "High") -> Finding:
@@ -60,14 +72,14 @@ def _findings_from_structure_error(err: StructureError) -> list:
 
 _IDENTITY_RULES = {
     "STRUCT-004": ("英文名称与 SKILL.md 一致", "high", "填写的英文名称须与 SKILL.md 的 name 完全一致"),
-    "STRUCT-011": ("版本号与 SKILL.md 一致", "high", "填写的版本号须与 SKILL.md frontmatter 的 version 完全一致"),
+    "STRUCT-011": ("版本号格式合法", "high", "SKILL.md frontmatter 的 version 须为 MAJOR.MINOR.PATCH 格式"),
     "DUP-001": ("英文名称不与市场已有技能重名", "high", "市场不允许两个同名 Skill"),
     "DUP-002": ("制品内容不重复", "high", "不能与已发布 Skill 内容完全相同"),
     "DUP-003": ("中文名称不与市场已有技能重名", "high", "市场不允许两个同名 Skill"),
 }
 
 
-def _identity_rule_items(findings: list, version_ok: bool) -> list:
+def _identity_rule_items(findings: list) -> list:
     """身份校验阶段的规则项（s3canner 未运行时用于报告规则清单）。"""
     failed_ids = set()
     for f in findings or []:
@@ -77,8 +89,6 @@ def _identity_rule_items(findings: list, version_ok: bool) -> list:
     items = []
     for rid, (name, severity, desc) in _IDENTITY_RULES.items():
         passed = rid not in failed_ids
-        if rid == "STRUCT-011" and not version_ok:
-            passed = False
         items.append(
             {
                 "id": rid,
@@ -118,13 +128,14 @@ async def _fail_validation(
             {"reason": reason, "scan_progress": scan_progress},
         )
     except Exception as e:
-        logger.warning("[SkillWorker] create validation scan_run failed: %s", e)
+        logger.warning("[SkillWorker] create validation scan_run failed: {}", e)
     await ms.insert_findings(sid, scan_run_id, findings)
     meta = {**prev_meta, "scan_progress": scan_progress}
     if scan_rules is not None:
         meta["scan_rules"] = scan_rules
     await ms.update_submission(
         sid,
+        expected_status=_ALLOWED_FROM["FAILED"],
         status="FAILED",
         failure_reason=reason[:500],
         meta=meta,
@@ -143,8 +154,9 @@ def _submission_meta(sub: dict) -> dict:
     return prev_meta if isinstance(prev_meta, dict) else {}
 
 
-async def process_submission(sub: dict) -> None:
+async def process_submission(sub: dict, worker_id: Optional[str] = None) -> None:
     sid = sub["id"]
+    worker_id = worker_id or _worker_id
     build = submission_build_dir(sid)
     zip_path = Path(sub.get("zip_uri") or (build / "upload.zip"))
     unpacked = build / "unpacked"
@@ -153,17 +165,26 @@ async def process_submission(sub: dict) -> None:
     try:
         per_scan = int(getattr(app_config, "SKILL_SCAN_TIMEOUT_SECONDS", 120) or 120)
         scan_lease = per_scan + 60
-        await ms.renew_lease(sid, _worker_id, lease_seconds=scan_lease)
+        if not await ms.renew_lease(sid, worker_id, lease_seconds=scan_lease):
+            logger.warning(
+                "[SkillWorker] submission={} lease lost before validate, abort", sid
+            )
+            return
         prev_meta = _submission_meta(sub)
         scan_progress = prev_meta.get("scan_progress")
         if not isinstance(scan_progress, dict):
             scan_progress = new_scan_progress()
         scan_progress = apply_scan_stage(scan_progress, "validate", "running")
-        await ms.update_submission(
+        if not await ms.update_submission(
             sid,
+            expected_status=_ALLOWED_FROM["VALIDATING"],
             status="VALIDATING",
             meta={**prev_meta, "scan_progress": scan_progress},
-        )
+        ):
+            logger.warning(
+                "[SkillWorker] submission={} status changed externally, skip validate", sid
+            )
+            return
 
         attempt = int(sub.get("attempt_count") or 1)
         if not zip_path.is_file():
@@ -228,20 +249,22 @@ async def process_submission(sub: dict) -> None:
                     "SKILL.md",
                 )
             )
-        # 版本号必须与 SKILL.md frontmatter 的 version 一致
+        # 版本号以 SKILL.md 为唯一来源：提交时已按包内 version 落库，
+        # 此处仅兜底校验格式（旧数据或历史提交可能缺失/非法）。
         md_version = (meta.get("skill_md_version") or "").strip()
         declared_version = str(version or "").strip()
-        version_ok = declared_version == md_version
-        if not version_ok:
+        from deep_agent_server.skills.marketplace.semver import is_valid_semver
+
+        if not is_valid_semver(declared_version):
             identity_findings.append(
                 _pkg_finding(
                     "STRUCT-011",
-                    f"填写的版本号「{declared_version or '（未填写）'}」"
-                    f"与 SKILL.md 的 version「{md_version or '（缺失）'}」不一致，须保持相同",
+                    f"SKILL.md 的 version「{md_version or declared_version or '（缺失）'}」"
+                    "不是合法的 MAJOR.MINOR.PATCH 版本号",
                     "SKILL.md",
                 )
             )
-        content_sha = hash_skill_payload(unpacked)
+        content_sha = await asyncio.to_thread(hash_skill_payload, unpacked)
         dup_content = await ms.find_content_duplicate(
             content_sha, exclude_package_id=package_id, exclude_version=version
         )
@@ -305,7 +328,7 @@ async def process_submission(sub: dict) -> None:
                 (f.rule_id or "").startswith("DUP") for f in identity_findings
             ) else identity_findings[0].message
             identity_rules = _scan_rules_payload(
-                _identity_rule_items(identity_findings, version_ok)
+                _identity_rule_items(identity_findings)
             )
             await _fail_validation(
                 sid,
@@ -322,12 +345,21 @@ async def process_submission(sub: dict) -> None:
 
         prev_meta = {**prev_meta, **meta, **declared, "content_sha256": content_sha}
         scan_progress = apply_scan_stage(scan_progress, "prepare", "running")
-        await ms.update_submission(
+        if not await ms.update_submission(
             sid,
+            expected_status=_ALLOWED_FROM["SCANNING"],
             status="SCANNING",
             meta={**prev_meta, "scan_progress": scan_progress},
-        )
-        await ms.renew_lease(sid, _worker_id, lease_seconds=scan_lease)
+        ):
+            logger.warning(
+                "[SkillWorker] submission={} status changed externally, skip scan", sid
+            )
+            return
+        if not await ms.renew_lease(sid, worker_id, lease_seconds=scan_lease):
+            logger.warning(
+                "[SkillWorker] submission={} lease lost before scan, abort", sid
+            )
+            return
 
         async def _on_scan_progress(payload: dict) -> None:
             await ms.merge_submission_meta(sid, {"scan_progress": payload})
@@ -351,14 +383,15 @@ async def process_submission(sub: dict) -> None:
         if isinstance(scan_rules, dict) and isinstance(scan_rules.get("items"), list):
             items = scan_rules["items"]
             if not any(isinstance(i, dict) and i.get("id") == "STRUCT-011" for i in items):
+                version_ok = is_valid_semver(str(version or "").strip())
                 items.append(
                     {
                         "id": "STRUCT-011",
-                        "name": "版本号与 SKILL.md 一致",
-                        "passed": True,
+                        "name": "版本号格式合法",
+                        "passed": version_ok,
                         "category": "spec",
                         "severity": "high",
-                        "description": "填写的版本号须与 SKILL.md frontmatter 的 version 完全一致",
+                        "description": "SKILL.md frontmatter 的 version 须为 MAJOR.MINOR.PATCH 格式",
                     }
                 )
             scan_rules.update(_scan_rules_payload(items))
@@ -366,27 +399,33 @@ async def process_submission(sub: dict) -> None:
 
         if outcome.unavailable:
             await ms.update_submission(
-                sid, status="FAILED", failure_reason="SCAN_UNAVAILABLE"
+                sid, expected_status=_ALLOWED_FROM["FAILED"],
+                status="FAILED", failure_reason="SCAN_UNAVAILABLE",
             )
             return
 
         if outcome.blocked:
             await ms.update_submission(
-                sid, status="BLOCKED", failure_reason="SECURITY_BLOCKED"
+                sid, expected_status=_ALLOWED_FROM["BLOCKED"],
+                status="BLOCKED", failure_reason="SECURITY_BLOCKED",
             )
             return
 
         # 晋升 version
-        content_sha = prev_meta.get("content_sha256") or hash_skill_payload(unpacked)
+        content_sha = prev_meta.get("content_sha256") or await asyncio.to_thread(
+            hash_skill_payload, unpacked
+        )
         package_id = sub["package_id"]
         version = sub["declared_version"]
 
         if await ms.is_version_occupied(package_id, version):
             await ms.update_submission(
-                sid, status="FAILED", failure_reason="VERSION_OCCUPIED"
+                sid, expected_status=_ALLOWED_FROM["FAILED"],
+                status="FAILED", failure_reason="VERSION_OCCUPIED",
             )
             return
 
+        from asyncpg.exceptions import UniqueViolationError
         from uuid import uuid4
 
         vid = str(uuid4())
@@ -408,33 +447,66 @@ async def process_submission(sub: dict) -> None:
                     "author": prev_meta.get("author") or sub.get("submitter_id", ""),
                 }
             )
-        except Exception as e:
-            logger.warning(f"insert version failed: {e}")
+        except UniqueViolationError:
+            logger.warning(
+                "[SkillWorker] submission={} version occupied pkg={} v={}",
+                sid, package_id, version,
+            )
             await ms.update_submission(
-                sid, status="FAILED", failure_reason="VERSION_OCCUPIED"
+                sid, expected_status=_ALLOWED_FROM["FAILED"],
+                status="FAILED", failure_reason="VERSION_OCCUPIED",
+            )
+            return
+        except Exception as e:
+            logger.exception(
+                "[SkillWorker] submission={} insert_version failed", sid
+            )
+            await ms.update_submission(
+                sid, expected_status=_ALLOWED_FROM["FAILED"],
+                status="FAILED", failure_reason=f"WORKER_ERROR:{e}"[:500],
             )
             return
 
         await ms.create_pending_review(vid)
-        await ms.update_submission(
-            sid, status="AWAITING_REVIEW", version_id=vid
-        )
+        if not await ms.update_submission(
+            sid,
+            expected_status=_ALLOWED_FROM["AWAITING_REVIEW"],
+            status="AWAITING_REVIEW",
+            version_id=vid,
+        ):
+            # 状态已被外部改变（用户取消/超时），回滚已插入的 version 与待审记录，
+            # 避免「已取消却进入审核队列」。
+            logger.warning(
+                "[SkillWorker] submission={} status changed, rollback version={}",
+                sid, vid,
+            )
+            try:
+                await ms.update_version(vid, status="CANCELLED")
+                await ms.cancel_pending_review(vid)
+            except Exception:
+                logger.exception(
+                    "[SkillWorker] rollback version failed submission={} version={}",
+                    sid, vid,
+                )
+            return
         logger.info(f"[SkillWorker] submission={sid} → AWAITING_REVIEW version={vid}")
 
     except Exception as e:
         logger.exception(f"[SkillWorker] submission={sid} error: {e}")
         await ms.update_submission(
-            sid, status="FAILED", failure_reason=f"WORKER_ERROR:{e}"[:500]
+            sid, expected_status=_ALLOWED_FROM["FAILED"],
+            status="FAILED", failure_reason=f"WORKER_ERROR:{e}"[:500],
         )
 
 
-async def _loop(poll_interval: float = 2.0) -> None:
-    logger.info(f"[SkillWorker] started id={_worker_id}")
+async def _loop(slot: int = 0, poll_interval: float = 2.0) -> None:
+    wid = f"{_worker_id}-{slot}"
+    logger.info(f"[SkillWorker] started id={wid}")
     while not _stop.is_set():
         try:
-            sub = await ms.claim_next_submission(_worker_id)
+            sub = await ms.claim_next_submission(wid)
             if sub:
-                await process_submission(sub)
+                await process_submission(sub, wid)
             else:
                 try:
                     await asyncio.wait_for(_stop.wait(), timeout=poll_interval)
@@ -445,24 +517,59 @@ async def _loop(poll_interval: float = 2.0) -> None:
         except Exception as e:
             logger.warning(f"[SkillWorker] loop error: {e}")
             await asyncio.sleep(poll_interval)
-    logger.info("[SkillWorker] stopped")
+    logger.info(f"[SkillWorker] stopped id={wid}")
+
+
+async def _gc_loop(interval_hours: float) -> None:
+    """周期执行 GC：清理过期 builds、回收无人引用的旧 release、补偿 catalog。"""
+    from deep_agent_server.skills.marketplace.gc import (
+        cleanup_expired_builds,
+        gc_unreferenced_releases,
+        reconcile_catalog,
+    )
+
+    if interval_hours <= 0:
+        return
+    logger.info(f"[SkillGC] started interval={interval_hours}h")
+    while not _stop.is_set():
+        try:
+            await cleanup_expired_builds()
+            await gc_unreferenced_releases()
+            await reconcile_catalog()
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("[SkillGC] run failed")
+        try:
+            await asyncio.wait_for(_stop.wait(), timeout=interval_hours * 3600)
+        except asyncio.TimeoutError:
+            pass
+    logger.info("[SkillGC] stopped")
 
 
 async def start_marketplace_worker() -> None:
-    global _worker_task
+    global _worker_task, _gc_task
     _stop.clear()
     if _worker_task and not _worker_task.done():
         return
-    _worker_task = asyncio.create_task(_loop())
+    concurrency = max(1, int(getattr(app_config, "SKILL_WORKER_CONCURRENCY", 1) or 1))
+    _worker_task = asyncio.create_task(_loop(0))  # 保留单任务句柄供 stop 使用
+    for slot in range(1, concurrency):
+        asyncio.create_task(_loop(slot))
+    gc_hours = float(getattr(app_config, "SKILL_GC_INTERVAL_HOURS", 6) or 0)
+    if gc_hours > 0:
+        _gc_task = asyncio.create_task(_gc_loop(gc_hours))
 
 
 async def stop_marketplace_worker() -> None:
-    global _worker_task
+    global _worker_task, _gc_task
     _stop.set()
-    if _worker_task:
-        _worker_task.cancel()
-        try:
-            await _worker_task
-        except asyncio.CancelledError:
-            pass
-        _worker_task = None
+    for task in (_worker_task, _gc_task):
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    _worker_task = None
+    _gc_task = None

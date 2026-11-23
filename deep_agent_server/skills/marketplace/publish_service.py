@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
-import logging
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
+from config import get_logger
 from config.config import app_config
 from deep_agent_server.skills.marketplace import storage as ms
 from deep_agent_server.skills.marketplace.hash_payload import hash_skill_payload
@@ -21,7 +23,11 @@ from deep_agent_server.skills.marketplace.paths import (
     release_dir,
     submission_build_dir,
 )
-from deep_agent_server.skills.marketplace.semver import is_strictly_greater, is_valid_semver
+from deep_agent_server.skills.marketplace.semver import (
+    is_strictly_greater,
+    is_valid_semver,
+    suggest_next_minor,
+)
 from deep_agent_server.skills.marketplace.validate.structure import (
     StructureError,
     validate_skill_structure,
@@ -33,7 +39,36 @@ from deep_agent_server.skills.marketplace.identity import (
     validate_declared,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+
+def _read_skill_md_version(zip_bytes: bytes) -> Optional[str]:
+    """从 ZIP 内 SKILL.md 的 frontmatter 读取 version。
+
+    版本号以 SKILL.md 为唯一来源，提交时即落库，避免用户填写值与包内不一致。
+    ZIP 尚未解包，这里只做最小解包（临时目录），复用 safe_unpack_zip 的全部安全
+    限制；任何失败都返回 None，交由 worker 的完整校验给出精确报错。
+    """
+    from deep_agent_server.skills.marketplace.validate.unpack import (
+        UnpackError,
+        safe_unpack_zip,
+    )
+    from deep_agent_server.skills.parser import read_skill_md_version
+
+    tmp = Path(tempfile.mkdtemp(prefix="skill-md-"))
+    try:
+        zip_path = tmp / "upload.zip"
+        zip_path.write_bytes(zip_bytes)
+        target = tmp / "unpacked"
+        safe_unpack_zip(zip_path, target)
+        return read_skill_md_version(str(target))
+    except UnpackError:
+        return None
+    except Exception:
+        logger.exception("[SkillSubmit] 读取 SKILL.md 版本失败")
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _submission_meta(sub: Dict[str, Any]) -> Dict[str, Any]:
@@ -60,18 +95,33 @@ async def _purge_withdrawn_repo(package_id: str, pkg: Optional[Dict[str, Any]] =
 
         removed = await delete_skill_from_repo(pid)
         if removed:
-            logger.info("[SkillWithdraw] 已删除仓库目录 package=%s", pid)
+            logger.info("[SkillWithdraw] 已删除仓库目录 package={}", pid)
         return bool(removed)
     except Exception:
-        logger.exception("[SkillWithdraw] 删除仓库目录失败 package=%s", pid)
+        logger.exception("[SkillWithdraw] 删除仓库目录失败 package={}", pid)
         return False
 
 
 class PublishError(Exception):
-    def __init__(self, message: str, code: int = 400):
+    def __init__(
+        self,
+        message: str,
+        code: int = 400,
+        *,
+        error_type: str = "",
+        detail: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(message)
         self.message = message
         self.code = code
+        # error_type：机器可读的错误分类（如 version_conflict），供前端做差异化展示
+        # detail：结构化补充信息（如当前最高版本、推荐版本），供前端精准提示
+        self.error_type = error_type
+        self.detail = detail or {}
+
+    def to_payload(self) -> Dict[str, Any]:
+        """转成 API 响应 data，前端可直接读取 error_type / detail。"""
+        return {"error_type": self.error_type, "detail": self.detail}
 
 
 class PublishService:
@@ -80,19 +130,21 @@ class PublishService:
         *,
         submitter_id: str,
         zip_bytes: bytes,
-        version: str,
+        version: Optional[str] = None,
         package_id: Optional[str] = None,
         requested_visibility: str = "public",
         idempotency_key: Optional[str] = None,
         declared_meta: Optional[dict] = None,
     ) -> Dict[str, Any]:
+        """提交新包/新版本。
+
+        版本号以 SKILL.md 为唯一来源：调用方可以不传 version，服务端在落盘后
+        从 ZIP 内的 SKILL.md frontmatter 读取；若调用方传了 version 且与包内
+        不一致，直接拒绝，避免出现「填 1.0.0、包内 1.1.1」的错配。
+        """
         if not submitter_id:
             raise PublishError("缺少 submitter_id", 400)
-        if not is_valid_semver(version):
-            raise PublishError("version 必须是 MAJOR.MINOR.PATCH", 400)
         requested_visibility = "public"
-        if requested_visibility not in ("private", "public"):
-            raise PublishError("requested_visibility 无效", 400)
 
         max_bytes = int(getattr(app_config, "SKILL_UPLOAD_MAX_BYTES", 52428800))
         if len(zip_bytes) > max_bytes:
@@ -101,11 +153,31 @@ class PublishService:
         inflight = await ms.count_inflight(submitter_id)
         if inflight >= int(getattr(app_config, "SKILL_UPLOAD_MAX_INFLIGHT", 2)):
             raise PublishError("进行中提交过多", 429)
+        # 待审数量独立限流（AWAITING_REVIEW 不计入 inflight，避免用户被卡死）
+        pending = await ms.count_pending_review(submitter_id)
+        if pending >= int(getattr(app_config, "SKILL_MAX_PENDING_REVIEW", 5)):
+            raise PublishError("待审核的提交过多，请等待审核完成后再上传", 429)
         hourly = await ms.count_uploads_last_hour(submitter_id)
         if hourly >= int(getattr(app_config, "SKILL_UPLOAD_RATE_PER_HOUR", 10)):
             raise PublishError("上传速率超限", 429)
 
         upload_sha = hashlib.sha256(zip_bytes).hexdigest()
+
+        # 版本号以 SKILL.md 为准：从包内读取，客户端传入值仅用于一致性校验
+        md_version = await asyncio.to_thread(_read_skill_md_version, zip_bytes)
+        declared_version = (version or "").strip()
+        if declared_version and md_version and declared_version != md_version:
+            raise PublishError(
+                f"版本号须与 SKILL.md 的 version「{md_version}」一致，请勿手工填写",
+                400,
+            )
+        version = md_version or declared_version
+        if not version:
+            raise PublishError("无法从 SKILL.md 读取 version，请检查 frontmatter", 400)
+        if not is_valid_semver(version):
+            raise PublishError(
+                f"SKILL.md 的 version「{version}」不是 MAJOR.MINOR.PATCH 格式", 400
+            )
 
         if idempotency_key:
             existing = await ms.find_by_idempotency(submitter_id, idempotency_key)
@@ -143,17 +215,32 @@ class PublishService:
             package_id = new_package_id()
             await ms.upsert_package(package_id, submitter_id, visibility="public")
 
-        # 递增检查
+        # 递增检查：版本号来自 ZIP 内 SKILL.md，用户看不到输入框，报错必须讲清
+        # 「版本从哪来 / 当前最高是多少 / 应该改成什么」，否则用户无从下手。
         max_v = await ms.max_occupied_semver(package_id)
         if max_v and not is_strictly_greater(version, max_v):
-            # 未占用则可重用：若占用则拒绝
-            if await ms.is_version_occupied(package_id, version):
-                raise PublishError(
-                    f"版本号必须高于已占用最高版本 {max_v}，且 {version} 已被占用",
-                    400,
-                )
-            if not is_strictly_greater(version, max_v):
-                raise PublishError(f"版本号必须严格高于 {max_v}", 400)
+            suggested = suggest_next_minor(max_v) or ""
+            tip = f"新版本号需严格大于当前最高版本 {max_v}"
+            if suggested:
+                tip += f"（例如 {suggested}）"
+            tip += "，请修改 ZIP 内 SKILL.md 的 version 后重新上传"
+            occupied = await ms.is_version_occupied(package_id, version)
+            head = (
+                f"版本 {version} 已被占用，"
+                if occupied
+                else f"版本 {version} 低于当前最高版本 {max_v}，"
+            )
+            raise PublishError(
+                head + tip,
+                400,
+                error_type="version_conflict",
+                detail={
+                    "declared_version": version,
+                    "max_version": max_v,
+                    "suggested_version": suggested,
+                    "occupied": occupied,
+                },
+            )
 
         # 处理中冲突
         active = await ms.find_active_same_version(package_id, version)
@@ -197,20 +284,39 @@ class PublishService:
         meta = dict(declared_meta or {})
         meta.update(declared)
         meta["scan_progress"] = scan_progress
-        row = await ms.insert_submission(
-            {
-                "id": sid,
-                "package_id": package_id,
-                "declared_version": version,
-                "submitter_id": submitter_id,
-                "upload_sha256": upload_sha,
-                "zip_uri": str(zip_path),
-                "status": "QUEUED",
-                "requested_visibility": requested_visibility,
-                "idempotency_key": idempotency_key,
-                "meta": meta,
-            }
-        )
+        from asyncpg.exceptions import UniqueViolationError
+
+        try:
+            row = await ms.insert_submission(
+                {
+                    "id": sid,
+                    "package_id": package_id,
+                    "declared_version": version,
+                    "submitter_id": submitter_id,
+                    "upload_sha256": upload_sha,
+                    "zip_uri": str(zip_path),
+                    "status": "QUEUED",
+                    "requested_visibility": requested_visibility,
+                    "idempotency_key": idempotency_key,
+                    "meta": meta,
+                }
+            )
+        except UniqueViolationError:
+            # 幂等键并发竞态：另一请求已先插入同键记录，返回其结果。
+            existing = (
+                await ms.find_by_idempotency(submitter_id, idempotency_key)
+                if idempotency_key
+                else None
+            )
+            if existing:
+                return {
+                    "submission_id": existing["id"],
+                    "package_id": existing.get("package_id"),
+                    "status": existing.get("status"),
+                    "declared_version": existing.get("declared_version"),
+                    "scan_progress": copy.deepcopy(scan_progress),
+                }
+            raise PublishError("提交冲突，请重试", 409)
         return {
             "submission_id": row["id"],
             "package_id": package_id,
@@ -249,6 +355,25 @@ class PublishService:
         if not zip_path.is_file():
             raise PublishError("上传文件已清理，请重新上传 ZIP", 410)
 
+        # 版本号以 SKILL.md 为唯一来源：历史提交可能因手工填写而落库了错配值，
+        # 重试时按当前 ZIP 重新读取并覆盖，避免旧值继续触发不一致校验。
+        try:
+            zip_bytes = await asyncio.to_thread(zip_path.read_bytes)
+            md_version = await asyncio.to_thread(_read_skill_md_version, zip_bytes)
+        except Exception:
+            logger.exception("读取 SKILL.md 版本失败 submission={}", submission_id)
+            md_version = None
+        if md_version:
+            current = str(sub.get("declared_version") or "").strip()
+            if md_version != current:
+                if not is_valid_semver(md_version):
+                    raise PublishError(
+                        f"SKILL.md 的 version「{md_version}」不是 MAJOR.MINOR.PATCH 格式",
+                        400,
+                    )
+                await ms.update_submission(submission_id, declared_version=md_version)
+                sub["declared_version"] = md_version
+
         # 允许在重试时修正声明字段
         if declared_meta:
             meta = _submission_meta(sub)
@@ -280,15 +405,18 @@ class PublishService:
         try:
             await ms.delete_findings(submission_id)
         except Exception:
-            logger.exception("清理旧 findings 失败 submission=%s", submission_id)
+            logger.exception("清理旧 findings 失败 submission={}", submission_id)
 
         scan_progress = new_scan_progress()
+        # 重试视为新的处理周期：重置 attempt_count，避免被 MAX_ATTEMPTS 立刻终结。
         await ms.update_submission(
             submission_id,
+            expected_status={"FAILED", "REJECTED"},
             status="QUEUED",
             failure_reason="",
             lease_owner=None,
             lease_until=None,
+            attempt_count=0,
         )
         await ms.merge_submission_meta(
             submission_id,
@@ -312,7 +440,14 @@ class PublishService:
             ver = await ms.get_version(sub["version_id"])
             if ver and ver["status"] == "REVIEW_PENDING":
                 await ms.update_version(sub["version_id"], status="CANCELLED")
-        await ms.update_submission(submission_id, status="CANCELLED")
+        # 状态守卫：仅当仍处于可取消状态时才置 CANCELLED，防止与 worker 竞态。
+        ok = await ms.update_submission(
+            submission_id,
+            expected_status={"AWAITING_REVIEW", "QUEUED", "VALIDATING", "SCANNING"},
+            status="CANCELLED",
+        )
+        if not ok:
+            raise PublishError("提交状态已变化，无法取消", 409)
         return {"submission_id": submission_id, "status": "CANCELLED"}
 
     async def withdraw_package(self, package_id: str, user_id: str) -> Dict[str, Any]:
@@ -349,7 +484,7 @@ class PublishService:
         await _purge_withdrawn_repo(package_id, pkg)
         install_count = await ms.count_package_installs(package_id)
         logger.info(
-            "[SkillWithdraw] package=%s by=%s reviewed=%s installs=%s",
+            "[SkillWithdraw] package={} by={} reviewed={} installs={}",
             package_id,
             user_id,
             reviewed,
@@ -477,9 +612,9 @@ class PublishService:
             }
         )
         await ms.update_submission(sid, version_id=vid)
-        rid = await ms.create_pending_review(vid)
-        await ms.decide_review(rid, operator, "approved", f"import:{policy}")
-        published = await atomic_publish(vid, unpacked)
+        # 先建 pending review，再由 atomic_publish 在同一事务内决定并发布
+        await ms.create_pending_review(vid)
+        published = await atomic_publish(vid, unpacked, operator, f"import:{policy}")
         return {
             "skipped": False,
             "package_id": package_id,

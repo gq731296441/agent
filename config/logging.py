@@ -3,12 +3,65 @@
 使用 loguru 提供统一的日志管理
 """
 
+import logging as _stdlib_logging
 import sys
 from pathlib import Path
 from typing import Optional
 from loguru import logger
 
 from .config import app_config
+
+
+class _InterceptHandler(_stdlib_logging.Handler):
+    """把标准库 logging 的记录转发到 loguru。
+
+    marketplace 等模块仍使用 `logging.getLogger(__name__)`，若不做拦截，
+    这些日志会走 stdlib 默认 handler（无输出/仅 stderr），无法落盘。
+    """
+
+    def emit(self, record: _stdlib_logging.LogRecord) -> None:
+        try:
+            level = logger.level(record.levelname).name
+        except (ValueError, KeyError):
+            level = record.levelno
+        # 动态定位调用栈中第一个「非 logging 内部」的帧，作为 loguru 的 depth，
+        # 使日志中的模块名/行号指向真实调用处而非 logging 内部。
+        frame = _stdlib_logging.currentframe()
+        depth = 1
+        while frame is not None:
+            frame = frame.f_back
+            if frame is None:
+                break
+            mod = frame.f_globals.get("__name__", "")
+            if mod != "logging" and not mod.startswith("logging."):
+                break
+            depth += 1
+        logger.opt(depth=depth, exception=record.exc_info).log(
+            level, record.getMessage()
+        )
+
+
+def install_stdlib_interceptor(level: str = "INFO") -> None:
+    """注册 stdlib → loguru 拦截器（幂等，可重复调用）。
+
+    uvicorn 初始化时会重置 root logger，因此除模块导入期外，
+    应用 lifespan 启动阶段需再调用一次兜底。
+    """
+    root = _stdlib_logging.getLogger()
+    for h in list(root.handlers):
+        if isinstance(h, _InterceptHandler):
+            return
+    root.addHandler(_InterceptHandler())
+    # root 的 effective level 在 NOTSET 时会退化为 WARNING，
+    # 必须显式设置，否则 INFO 级业务日志仍会被丢弃。
+    root.setLevel(level.upper() if isinstance(level, str) else _stdlib_logging.INFO)
+    # 第三方库噪声压制（这些库的 DEBUG/INFO 会淹没业务日志）
+    for noisy in (
+        "urllib3", "httpx", "httpcore", "asyncio", "multipart",
+        "python_multipart", "watchfiles", "aiosqlite", "langchain",
+        "langgraph", "openai", "anthropic",
+    ):
+        _stdlib_logging.getLogger(noisy).setLevel(_stdlib_logging.WARNING)
 
 
 def setup_logging(
@@ -83,9 +136,12 @@ def setup_logging(
         enqueue=True,          # 异步写入，提高性能
     )
 
+    # 接管标准库 logging（marketplace 等模块使用 logging.getLogger）
+    install_stdlib_interceptor(log_level)
+
     # 抑制 LangGraph Store batch 后台 Task 被取消时的 asyncio 噪音警告
     # "Task was destroyed but it is pending!" — 无害，是 langgraph 内部清理时序问题
-    import logging as _stdlib_logging
+    # 注意：必须在 install_stdlib_interceptor 之后设置，否则会被 root level 覆盖
     _stdlib_logging.getLogger("asyncio").setLevel(_stdlib_logging.CRITICAL)
 
     logger.info(f"📝 日志系统初始化完成 - 级别: {log_level}, 文件: {log_file}")

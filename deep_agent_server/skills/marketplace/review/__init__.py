@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from deep_agent_server.skills.marketplace import storage as ms
 from deep_agent_server.skills.marketplace.paths import submission_build_dir
 from deep_agent_server.skills.marketplace.publish_service import PublishError
@@ -20,14 +18,19 @@ async def approve_version(version_id: str, reviewer_id: str, comment: str = "") 
     review = await ms.get_pending_review_for_version(version_id)
     if not review:
         raise PublishError("无待审记录", 400)
-    await ms.decide_review(review["id"], reviewer_id, "approved", comment)
 
     sub_id = ver.get("submission_id")
     unpacked = submission_build_dir(sub_id) / "unpacked"
     if not unpacked.is_dir():
         raise PublishError("构建产物缺失，无法发布", 500)
-    published = await atomic_publish(version_id, unpacked)
-    return {"version_id": version_id, "status": published["status"], "package_id": ver["package_id"]}
+
+    # 审核决策在 atomic_publish 的事务内完成：发布失败则 review 仍为 pending，可重试。
+    published = await atomic_publish(version_id, unpacked, reviewer_id, comment)
+    return {
+        "version_id": version_id,
+        "status": published["status"],
+        "package_id": ver["package_id"],
+    }
 
 
 async def reject_version(version_id: str, reviewer_id: str, comment: str = "") -> dict:

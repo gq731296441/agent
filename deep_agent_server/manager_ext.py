@@ -260,17 +260,32 @@ async def create_deep_agent_for_session(
 
         delisted_ids = set(await _ms.list_delisted_package_ids())
         if delisted_ids:
+            from deep_agent_server.skills.dirs import read_install_meta
+
+            def _pkg_of(d: str) -> str:
+                # 用户上传包安装目录名为英文名（见 skills/dirs.py），
+                # 需通过 .install-meta.json 反查 package_id；内置/历史布局目录名即 id。
+                name = _P(d).name
+                if name in delisted_ids:
+                    return name
+                meta = read_install_meta(_P(d))
+                return str(meta.get("package_id") or meta.get("skill_id") or "")
+
             original_dirs = list(skill_candidate_dirs)
-            skill_candidate_dirs = [
-                d for d in original_dirs if _P(d).name not in delisted_ids
-            ]
-            hit = []
+            kept: list = []
+            hit_ids: list = []
+            for d in original_dirs:
+                pid = _pkg_of(d)
+                if pid and pid in delisted_ids:
+                    hit_ids.append(pid)
+                else:
+                    kept.append(d)
+            skill_candidate_dirs = kept
             if selected_skill_ids:
-                hit = [s for s in selected_skill_ids if s in delisted_ids]
-                selected_skill_ids = [s for s in selected_skill_ids if s not in delisted_ids]
-            elif selected_skill_ids is None:
-                hit = [_P(d).name for d in original_dirs if _P(d).name in delisted_ids]
-            uniq = list(dict.fromkeys(hit))
+                selected_skill_ids = [
+                    s for s in selected_skill_ids if s not in delisted_ids
+                ]
+            uniq = list(dict.fromkeys(hit_ids))
             if uniq:
                 disabled_skill_labels = await _ms.package_display_names(uniq)
     except Exception:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -292,9 +293,17 @@ async def merge_submission_meta(submission_id: str, patch: dict) -> None:
         )
 
 
-async def update_submission(submission_id: str, **fields) -> None:
+async def update_submission(
+    submission_id: str, *, expected_status=None, **fields
+) -> bool:
+    """更新提交记录。
+
+    expected_status：状态守卫，可为 str 或可迭代。仅当当前 status 在期望集合内
+    才执行更新，返回 True；否则返回 False（说明状态已被外部推进/取消，调用方
+    应放弃本次写入）。避免 worker 覆盖用户的取消操作。
+    """
     if not fields:
-        return
+        return False
     cols = []
     vals = []
     i = 1
@@ -309,24 +318,53 @@ async def update_submission(submission_id: str, **fields) -> None:
     cols.append(f"updated_at = now()")
     vals.append(submission_id)
     sql = f"UPDATE skill_submissions SET {', '.join(cols)} WHERE id = ${i}::uuid"
+    if expected_status:
+        if isinstance(expected_status, str):
+            expected = [expected_status]
+        else:
+            expected = [str(s) for s in expected_status]
+        i += 1
+        sql += f" AND status = ANY(${i})"
+        vals.append(expected)
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
-        await conn.execute(sql, *vals)
+        result = await conn.execute(sql, *vals)
+        return result.endswith("1")
 
 
-async def claim_next_submission(worker_id: str, lease_seconds: int = 120) -> Optional[Dict[str, Any]]:
+async def claim_next_submission(
+    worker_id: str, lease_seconds: int = 120, max_attempts: Optional[int] = None
+) -> Optional[Dict[str, Any]]:
+    from config.config import app_config
+
+    max_attempts = max_attempts or int(
+        getattr(app_config, "SKILL_MAX_ATTEMPTS", 3) or 3
+    )
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
+        # 确定性崩溃兜底：达到上限仍未完成的提交直接终结，避免无限重抢。
+        await conn.execute(
+            """
+            UPDATE skill_submissions
+            SET status = 'FAILED', failure_reason = 'MAX_ATTEMPTS_EXCEEDED',
+                lease_owner = NULL, lease_until = NULL, updated_at = now()
+            WHERE status IN ('QUEUED', 'VALIDATING', 'SCANNING')
+              AND attempt_count >= $1
+            """,
+            max_attempts,
+        )
         async with conn.transaction():
             row = await conn.fetchrow(
                 """
                 SELECT id FROM skill_submissions
                 WHERE status IN ('QUEUED', 'VALIDATING', 'SCANNING')
+                  AND attempt_count < $1
                   AND (lease_until IS NULL OR lease_until < now())
                 ORDER BY created_at ASC
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1
-                """
+                """,
+                max_attempts,
             )
             if not row:
                 return None
@@ -365,17 +403,49 @@ async def renew_lease(submission_id: str, worker_id: str, lease_seconds: int = 1
 
 
 async def count_inflight(user_id: str) -> int:
+    """真正在流水线中运行的提交数。
+
+    注意：AWAITING_REVIEW 不计入，否则用户只要有两个包在待审就再也传不了新包。
+    待审数量由 count_pending_review 单独限流。
+    """
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         n = await conn.fetchval(
             """
             SELECT COUNT(*)::int FROM skill_submissions
             WHERE submitter_id = $1
-              AND status IN ('RECEIVED','QUEUED','VALIDATING','SCANNING','AWAITING_REVIEW')
+              AND status IN ('RECEIVED','QUEUED','VALIDATING','SCANNING')
             """,
             user_id,
         )
         return int(n or 0)
+
+
+async def count_pending_review(user_id: str) -> int:
+    """待管理员审核的提交数（独立限流，避免无上限堆积）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        n = await conn.fetchval(
+            """
+            SELECT COUNT(*)::int FROM skill_submissions
+            WHERE submitter_id = $1 AND status = 'AWAITING_REVIEW'
+            """,
+            user_id,
+        )
+        return int(n or 0)
+
+
+async def list_active_submission_ids() -> List[str]:
+    """仍在流程中的提交 id（GC 时保护其 build 目录）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id FROM skill_submissions
+            WHERE status IN ('QUEUED','VALIDATING','SCANNING','AWAITING_REVIEW')
+            """
+        )
+        return [str(r["id"]) for r in rows]
 
 
 async def count_uploads_last_hour(user_id: str) -> int:
@@ -637,6 +707,20 @@ async def create_pending_review(version_id: str) -> str:
         return str(rid)
 
 
+async def cancel_pending_review(version_id: str) -> None:
+    """回滚：把该 version 的 pending 审核记录标记为 cancelled。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE skill_reviews
+            SET decision = 'cancelled', decided_at = now()
+            WHERE version_id = $1::uuid AND decision = 'pending'
+            """,
+            version_id,
+        )
+
+
 async def get_pending_review_for_version(version_id: str) -> Optional[Dict[str, Any]]:
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
@@ -797,6 +881,7 @@ async def clear_catalog_if_no_current(package_id: str) -> None:
 
 
 async def set_package_delisted(package_id: str, delisted: bool = True) -> None:
+    global _DELISTED_CACHE
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -808,15 +893,28 @@ async def set_package_delisted(package_id: str, delisted: bool = True) -> None:
             package_id,
             bool(delisted),
         )
+    _DELISTED_CACHE = (0.0, [])  # 失效缓存
+
+
+# 下架 ID 在 agent 创建热路径上被频繁查询，做 30s 进程内缓存。
+_DELISTED_CACHE: Tuple[float, List[str]] = (0.0, [])
+_DELISTED_TTL_SECONDS = 30.0
 
 
 async def list_delisted_package_ids() -> List[str]:
+    global _DELISTED_CACHE
+    ts, cached = _DELISTED_CACHE
+    now = time.monotonic()
+    if cached and now - ts < _DELISTED_TTL_SECONDS:
+        return list(cached)
     pool = await db_manager.get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id FROM skill_packages WHERE delisted = TRUE"
         )
-        return [str(r["id"]) for r in rows]
+    ids = [str(r["id"]) for r in rows]
+    _DELISTED_CACHE = (now, ids)
+    return list(ids)
 
 
 async def list_package_ids() -> List[str]:
