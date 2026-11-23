@@ -1,0 +1,54 @@
+# Agent 容器 + 远程沙箱 VM 示例 compose
+#
+# 用法：
+#   1. 在 Agent 宿主机挂载 NFS：mount 10.57.69.129:/data/cmtool-trail-agent /data/cmtool-trail-agent
+#   2. 准备 secrets/sandbox_ssh/：id_ed25519 + known_hosts（含虚机 host key）
+#   3. 复制为 docker-compose.override.yml 或合并到生产 compose
+#
+# 注意：不要挂载 /var/run/docker.sock
+
+services:
+  langchain-agent:
+    image: langchain-agent:latest
+    container_name: langchain-agent
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    environment:
+      WORKSPACE_ROOT: /data/cmtool-trail-agent
+      SANDBOX_ENABLED: "true"
+      SANDBOX_DOCKER_HOST: ssh://sandbox@10.57.69.129
+      SANDBOX_WORKSPACE_ROOT: /data/cmtool-trail-agent
+      SANDBOX_MAX_CONCURRENT: "8"
+      SANDBOX_MAX_PER_USER: "2"
+    volumes:
+      # 宿主机已 NFS mount 虚机 /data/cmtool-trail-agent 后再 bind 进容器
+      - /data/cmtool-trail-agent:/data/cmtool-trail-agent
+      # SSH 私钥（只读），供 Docker SDK ssh:// 使用
+      - ./secrets/sandbox_ssh:/root/.ssh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # 明确禁止 docker.sock：
+    # volumes 中不要出现 - /var/run/docker.sock:/var/run/docker.sock
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: langchain-agent-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${CMTOOL_AGENT_DB_PASSWORD:-password}
+      POSTGRES_DB: postgres
+    volumes:
+      - langchain_agent_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  langchain_agent_pgdata:
