@@ -14,8 +14,10 @@ from db import deep_storage, storage
 from deep_agent_server.default_agent import build_default_agent_dict
 from deep_agent_server.factory import create_deep_agent_instance
 from deep_agent_server.sandbox.exceptions import SandboxUserLimitExceeded
-from deep_agent_server.skills.selection_guard import SkillSelectionLockedError
-from deep_agent_server.skills.session_mount import ensure_session_skill_mount
+from deep_agent_server.skills.selection_guard import (
+    SkillSelectionLockedError,
+    assert_skill_selection_change_allowed,
+)
 from deep_agent_server.skills.selector import (
     effective_selected_skill_ids,
     resolve_skill_dirs,
@@ -303,7 +305,10 @@ async def create_deep_agent_for_session(
 
     # 生成 selected_skill_ids 的缓存签名
     selection_sig = ",".join(sorted(selected_skill_ids)) if selected_skill_ids else "*"
-    sandbox_tag = "sbx-mount-v1" if app_config.SANDBOX_ENABLED else "no-sbx"
+    # lazy-sbx：Agent 带 execute，但容器要到第一次 execute 才创建。
+    sandbox_tag = (
+        "lazy-sbx" if app_config.SANDBOX_ENABLED and not skip_sandbox else "no-sbx"
+    )
 
     # 检测同 session 内 skill/MCP 是否变化（跨 turn），push 给 runner 注入通知
     state_key = f"{user_id}#{session_id}"
@@ -339,40 +344,29 @@ async def create_deep_agent_for_session(
         agent_skills_root = get_agent_skills_dir(resolved_agent_id)
         agent_id_for_sandbox = resolved_agent_id
 
-    # 沙箱生命周期独立于 Agent 缓存：即使缓存命中，也必须确保沙箱存活。
-    # 容器的 container_id 会随重建而变化，缓存的 Agent wrapper 可能持有旧 ID。
-    sandbox_recreated = False
+    # 不在这里启动容器。只做一次数据库级勾选锁定检查：
+    # 沙箱仍在跑且技能集合变了，直接拒绝，避免模型先开口再在 execute 里失败。
+    # 容器的创建、重建、技能挂载都推迟到第一次 execute。
     if app_config.SANDBOX_ENABLED and not skip_sandbox:
+        from deep_agent_server.skills.session_mount import (
+            compute_selection_key,
+            resolve_mounted_skill_ids,
+        )
+
         try:
-            mount_result = await ensure_session_skill_mount(
+            await assert_skill_selection_change_allowed(
                 user_id,
                 session_id,
-                skill_candidate_dirs,
-                selected_skill_ids,
+                compute_selection_key(skill_candidate_dirs, selected_skill_ids),
+                new_skill_ids=resolve_mounted_skill_ids(
+                    skill_candidate_dirs, selected_skill_ids
+                ),
                 manager=manager,
-                agent_id=agent_id_for_sandbox,
             )
-            sandbox_recreated = mount_result.recreated
         except SkillSelectionLockedError as lock_err:
             return None, lock_err.to_error_payload()
-        except SandboxUserLimitExceeded as limit_err:
-            # 配额超限是用户可感知、可自行处理的业务错误（前端有专门弹窗），
-            # 必须上报，不能被下面的降级分支吞成"无 execute 继续对话"。
-            return None, limit_err.to_error_payload()
-        except Exception as sandbox_err:
-            # 沙箱不可用时降级为"无 execute"继续构建，而不是让整个 run 失败。
-            # 常见诱因：Docker daemon 故障、ssh:// 隧道断开、远端账号异常（如密码过期）。
-            # 与 factory.py 中 get_sandbox_backend_factory_if_enabled 的降级语义保持一致。
-            from config import get_logger
 
-            get_logger(__name__).warning(
-                f"[Sandbox] 初始化失败，本次降级为无 execute: "
-                f"user={user_id} session={session_id} err={sandbox_err}"
-            )
-            skip_sandbox = True
-            sandbox_tag = "no-sbx"  # 让缓存 key 区分降级态，避免污染正常沙箱缓存
-
-    # cache_key 延后至此计算：沙箱降级会改写 sandbox_tag
+    # cache_key 含 sandbox_tag：skip_sandbox 的预热图不会被当成可 execute 的图复用
     cache_key = (
         f"deep:{session_id}:{cache_agent_key}:cfg{config_version}:llm{llm_fp}:"
         f"{mcp_hash}:{token_fp}:skills{selection_sig}:{sandbox_tag}"
@@ -380,7 +374,6 @@ async def create_deep_agent_for_session(
 
     if (
         app_config.AGENT_CACHE_ENABLED
-        and not sandbox_recreated  # 沙箱重建后必须刷新 Agent（container_id 变了）
         and cache_key in manager._agent_cache
     ):
         cached, cached_fp, cached_mh, cached_aid, cached_sel = manager._agent_cache[cache_key]
@@ -437,6 +430,7 @@ async def create_deep_agent_for_session(
             user_token=user_token,
             agent_skills_root=agent_skills_root,
             agent_id_for_sandbox=agent_id_for_sandbox,
+            skill_candidate_dirs=skill_candidate_dirs,
             llm=llm,
             config_changes=config_changes,
         )

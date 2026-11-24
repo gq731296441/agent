@@ -1,6 +1,6 @@
 """Session 级 skill 挂载编排：按勾选 bind mount，不再 copytree。
 
-供沙箱 execute 与 manifest 追踪使用；文件工具 read_file 直读用户级 {user}/skills/。
+在第一次 execute 前把勾选技能挂进容器；文件工具 read_file 直读用户级 {user}/skills/，不经过容器。
 """
 
 from __future__ import annotations
@@ -271,6 +271,17 @@ async def ensure_session_skill_mount(
                 else None
             )
             if bound is not None:
+                # 复用健康容器时也必须续期 idle TTL。
+                # 否则长任务中多次 execute 都走 skip，ttl_at 停在首次拉起时刻，
+                # 约 SANDBOX_IDLE_TTL_MINUTES（默认 20）后会被 cleanup 强杀，
+                # 后续 execute 出现「404 No such container」。
+                try:
+                    await svc._touch(user_id, session_id)
+                except Exception as e:
+                    logger.debug(
+                        f"[SkillMount] skip 路径续期 TTL 失败 user={user_id} "
+                        f"session={session_id}: {e}"
+                    )
                 return MountResult(
                     skipped=True,
                     selection_key=selection_key,

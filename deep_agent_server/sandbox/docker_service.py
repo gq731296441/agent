@@ -15,6 +15,10 @@ from typing import Dict, List, Optional, Tuple
 from config.config import app_config
 from config import get_logger
 from db import deep_storage
+from deep_agent_server.sandbox.admission import (
+    SandboxAdmissionTimeout,
+    sandbox_admission_queue,
+)
 from deep_agent_server.sandbox.exceptions import SandboxUserLimitExceeded
 from deep_agent_server.sandbox.models import SandboxHandle, SandboxStatus
 from deep_agent_server.sandbox.env import build_container_user_env, build_exec_user_env, shell_env_prefix
@@ -121,6 +125,7 @@ class DockerSandboxService(SandboxService):
                             agent_id=agent_id,
                         )
                         if bound is not None:
+                            await sandbox_admission_queue.acquire(user_id, session_id)
                             await self._update_status(user_id, session_id, SandboxStatus.RUNNING)
                             await self._touch(user_id, session_id, selection_key, bound)
                             await self._finalize_running_container(user_id, session_id, cid)
@@ -133,10 +138,12 @@ class DockerSandboxService(SandboxService):
                             agent_id=agent_id,
                         )
                         if bound is not None:
+                            await sandbox_admission_queue.force_hold(user_id, session_id)
                             await self._touch(user_id, session_id, selection_key, bound)
                             await self._finalize_running_container(user_id, session_id, cid)
                             return False
                     elif status == SandboxStatus.STOPPED.value and cid:
+                        await sandbox_admission_queue.acquire(user_id, session_id)
                         if await asyncio.to_thread(self._start_sync, cid):
                             bound = await self.resolve_verified_mounted_skill_ids(
                                 cid,
@@ -161,29 +168,33 @@ class DockerSandboxService(SandboxService):
                         )
 
                 old_cid = row.get("container_id") if row else None
-                await self.pause_oldest_if_at_capacity()
-                await asyncio.to_thread(self._destroy_named_container, user_id, session_id)
-                if old_cid:
-                    await asyncio.to_thread(self._destroy_container_sync, old_cid)
-                await asyncio.to_thread(purge_host_sandbox_skills_dir, user_id, session_id)
-                await ensure_session_dirs(user_id, session_id)
-                cid, bound_skill_ids = await asyncio.to_thread(
-                    self._create_container,
-                    user_id,
-                    session_id,
-                    mounted_skill_ids or [],
-                    agent_id,
-                )
-                ws_path = str(get_sandbox_workspace_dir(user_id, session_id))
-                await self._persist_container(
-                    user_id,
-                    session_id,
-                    cid,
-                    ws_path,
-                    selection_key=selection_key,
-                    mounted_skill_ids=bound_skill_ids,
-                )
-                await self._finalize_running_container(user_id, session_id, cid)
+                await sandbox_admission_queue.acquire(user_id, session_id)
+                try:
+                    await asyncio.to_thread(self._destroy_named_container, user_id, session_id)
+                    if old_cid:
+                        await asyncio.to_thread(self._destroy_container_sync, old_cid)
+                    await asyncio.to_thread(purge_host_sandbox_skills_dir, user_id, session_id)
+                    await ensure_session_dirs(user_id, session_id)
+                    cid, bound_skill_ids = await asyncio.to_thread(
+                        self._create_container,
+                        user_id,
+                        session_id,
+                        mounted_skill_ids or [],
+                        agent_id,
+                    )
+                    ws_path = str(get_sandbox_workspace_dir(user_id, session_id))
+                    await self._persist_container(
+                        user_id,
+                        session_id,
+                        cid,
+                        ws_path,
+                        selection_key=selection_key,
+                        mounted_skill_ids=bound_skill_ids,
+                    )
+                    await self._finalize_running_container(user_id, session_id, cid)
+                except Exception:
+                    await sandbox_admission_queue.release(session_id, user_id)
+                    raise
                 logger.info(
                     f"[Sandbox] recreated with skills user={user_id} session={session_id} "
                     f"skills={bound_skill_ids} key={selection_key[:12]}"
@@ -264,6 +275,7 @@ class DockerSandboxService(SandboxService):
                 cid = row["container_id"]
                 status = row.get("status") or "stopped"
                 if status == SandboxStatus.PAUSED.value:
+                    await sandbox_admission_queue.acquire(user_id, session_id)
                     await asyncio.to_thread(self._unpause_sync, cid)
                     await self._update_status(user_id, session_id, SandboxStatus.RUNNING)
                     await self._touch(user_id, session_id)
@@ -278,6 +290,7 @@ class DockerSandboxService(SandboxService):
                         status=SandboxStatus.RUNNING,
                     )
                 if await self._container_running(cid):
+                    await sandbox_admission_queue.force_hold(user_id, session_id)
                     await self._touch(user_id, session_id)
                     await self._finalize_running_container(user_id, session_id, cid)
                     return SandboxHandle(
@@ -287,6 +300,7 @@ class DockerSandboxService(SandboxService):
                         status=SandboxStatus.RUNNING,
                     )
                 if status == SandboxStatus.STOPPED.value:
+                    await sandbox_admission_queue.acquire(user_id, session_id)
                     if await asyncio.to_thread(self._start_sync, cid):
                         await self._touch(user_id, session_id)
                         await self._finalize_running_container(user_id, session_id, cid)
@@ -344,7 +358,7 @@ class DockerSandboxService(SandboxService):
                     )
 
             old_cid = row.get("container_id") if row else None
-            await self.pause_oldest_if_at_capacity()
+            await sandbox_admission_queue.acquire(user_id, session_id)
             await ensure_session_dirs(user_id, session_id)
             cid, bound_skill_ids = await asyncio.to_thread(
                 self._create_container,
@@ -379,6 +393,7 @@ class DockerSandboxService(SandboxService):
         try:
             await asyncio.to_thread(self._pause_sync, cid)
             await self._update_status(user_id, session_id, SandboxStatus.PAUSED)
+            await sandbox_admission_queue.release(session_id, user_id)
             await deep_storage.insert_audit_log(
                 user_id, "sandbox_paused", target=cid[:12], session_id=session_id
             )
@@ -393,6 +408,7 @@ class DockerSandboxService(SandboxService):
             return False
         cid = row["container_id"]
         try:
+            await sandbox_admission_queue.acquire(user_id, session_id)
             await asyncio.to_thread(self._unpause_sync, cid)
             await self._update_status(user_id, session_id, SandboxStatus.RUNNING)
             await self._touch(user_id, session_id)
@@ -415,11 +431,13 @@ class DockerSandboxService(SandboxService):
             else:
                 await asyncio.to_thread(self._stop_sync, cid)
                 await self._set_stopped_ttl(user_id, session_id)
+                await sandbox_admission_queue.release(session_id, user_id)
                 return
         if cid and app_config.SANDBOX_REMOVE_ON_STOP:
             await deep_storage.clear_sandbox_session(user_id, session_id)
         elif row.get("container_id") or row.get("status") != SandboxStatus.STOPPED.value:
             await self._set_stopped_ttl(user_id, session_id)
+        await sandbox_admission_queue.release(session_id, user_id)
 
     async def stop_all_for_user(self, user_id: str) -> None:
         """停止用户全部 session 沙箱。
@@ -462,6 +480,7 @@ class DockerSandboxService(SandboxService):
             return False
         await asyncio.to_thread(purge_host_sandbox_skills_dir, user_id, session_id)
         await self._set_stopped_ttl(user_id, session_id)
+        await sandbox_admission_queue.release(session_id, user_id)
         await deep_storage.insert_audit_log(
             user_id, "sandbox_released", target=cid[:12], session_id=session_id
         )
@@ -1038,7 +1057,12 @@ class DockerSandboxService(SandboxService):
             c.remove(force=True)
             return True
         except Exception as e:
-            logger.warning(f"[Sandbox] docker rm: {e}")
+            msg = str(e)
+            # TTL / 外部已删掉容器后再 recreate 时常见，不算故障
+            if "404" in msg or "No such container" in msg:
+                logger.debug(f"[Sandbox] docker rm 跳过（容器已不存在）: {container_id[:12]}")
+            else:
+                logger.warning(f"[Sandbox] docker rm: {e}")
             return False
 
     def _exec_in_container(

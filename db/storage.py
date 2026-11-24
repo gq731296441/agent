@@ -684,6 +684,202 @@ async def count_total_by_session(session_id: UUID) -> int:
             session_id
         )
 
+
+_PROCESS_TYPES = (
+    "reasoning",
+    "reasoning_final",
+    "tool_call",
+    "tool_result",
+    "fs_operation",
+    "execute",
+    "execute_result",
+    "todo_update",
+    "subagent_start",
+    "subagent_event",
+    "subagent_end",
+    "interrupt",
+)
+
+
+async def fetch_history_turns(
+    session_id: UUID,
+    *,
+    limit: int = 20,
+    before_created_at=None,
+    before_id: Optional[UUID] = None,
+) -> List[Dict[str, Any]]:
+    """按用户消息轮次倒序分页，每轮只带问题与最终回复摘要。
+
+    before_* 为上一页最老一轮用户消息的 (created_at, id)，用于游标分页。
+    """
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        if before_created_at is not None and before_id is not None:
+            user_rows = await conn.fetch(
+                """
+                SELECT id, sender, type, content, tool_call_id,
+                       conversation_id, group_id, step_index, created_at,
+                       context_epoch, run_id, subagent_run_id
+                FROM chat_history
+                WHERE session_id = $1
+                  AND (
+                    sender = 'user'
+                    OR type = 'context_divider'
+                  )
+                  AND (
+                    created_at < $2
+                    OR (created_at = $2 AND id < $3)
+                  )
+                ORDER BY created_at DESC, id DESC
+                LIMIT $4
+                """,
+                session_id,
+                before_created_at,
+                before_id,
+                limit,
+            )
+        else:
+            user_rows = await conn.fetch(
+                """
+                SELECT id, sender, type, content, tool_call_id,
+                       conversation_id, group_id, step_index, created_at,
+                       context_epoch, run_id, subagent_run_id
+                FROM chat_history
+                WHERE session_id = $1
+                  AND (
+                    sender = 'user'
+                    OR type = 'context_divider'
+                  )
+                ORDER BY created_at DESC, id DESC
+                LIMIT $2
+                """,
+                session_id,
+                limit,
+            )
+
+        turns: List[Dict[str, Any]] = []
+        for row in user_rows:
+            record = dict(row)
+            if record.get("type") == "context_divider":
+                turns.append(
+                    {
+                        "kind": "context_divider",
+                        "user": record,
+                        "assistant": None,
+                        "end": None,
+                        "has_process": False,
+                        "workspace_files": [],
+                    }
+                )
+                continue
+
+            conv_id = record.get("conversation_id")
+            assistant = None
+            end_row = None
+            has_process = False
+            workspace_files: List[Any] = []
+
+            if conv_id is not None:
+                assistant = await conn.fetchrow(
+                    """
+                    SELECT id, sender, type, content, tool_call_id,
+                           conversation_id, group_id, step_index, created_at,
+                           context_epoch, run_id, subagent_run_id
+                    FROM chat_history
+                    WHERE session_id = $1
+                      AND conversation_id = $2
+                      AND sender = 'assistant'
+                      AND type = 'chat'
+                    ORDER BY step_index DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                    """,
+                    session_id,
+                    conv_id,
+                )
+                end_row = await conn.fetchrow(
+                    """
+                    SELECT id, sender, type, content, tool_call_id,
+                           conversation_id, group_id, step_index, created_at,
+                           context_epoch, run_id, subagent_run_id
+                    FROM chat_history
+                    WHERE session_id = $1
+                      AND conversation_id = $2
+                      AND type = 'end'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    session_id,
+                    conv_id,
+                )
+                has_process = bool(
+                    await conn.fetchval(
+                        """
+                        SELECT 1
+                        FROM chat_history
+                        WHERE session_id = $1
+                          AND conversation_id = $2
+                          AND type = ANY($3::text[])
+                        LIMIT 1
+                        """,
+                        session_id,
+                        conv_id,
+                        list(_PROCESS_TYPES),
+                    )
+                )
+                wf_rows = await conn.fetch(
+                    """
+                    SELECT content
+                    FROM chat_history
+                    WHERE session_id = $1
+                      AND conversation_id = $2
+                      AND type = 'workspace_file'
+                    ORDER BY created_at ASC
+                    """,
+                    session_id,
+                    conv_id,
+                )
+                for wf in wf_rows:
+                    content = wf["content"]
+                    if isinstance(content, str):
+                        try:
+                            content = json.loads(content)
+                        except (ValueError, TypeError):
+                            content = {"text": content}
+                    workspace_files.append(content)
+
+            turns.append(
+                {
+                    "kind": "turn",
+                    "user": record,
+                    "assistant": dict(assistant) if assistant else None,
+                    "end": dict(end_row) if end_row else None,
+                    "has_process": has_process,
+                    "workspace_files": workspace_files,
+                }
+            )
+        return turns
+
+
+async def fetch_history_by_conversation(
+    session_id: UUID,
+    conversation_id: UUID,
+) -> List[asyncpg.Record]:
+    """返回某轮对话的全部原始记录（按 step_index / created_at）。"""
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT id, sender, type, content, tool_call_id,
+                   conversation_id, group_id, step_index, created_at, context_epoch,
+                   run_id, subagent_run_id
+            FROM chat_history
+            WHERE session_id = $1 AND conversation_id = $2
+            ORDER BY step_index ASC NULLS LAST, created_at ASC, id ASC
+            """,
+            session_id,
+            conversation_id,
+        )
+
 async def delete_history_by_session(session_id: str) -> bool:
     """删除指定会话的所有历史消息记录（物理删除）。"""
     pool = await db_manager.get_pool()

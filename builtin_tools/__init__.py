@@ -30,11 +30,13 @@ def get_builtin_tools(
     from builtin_tools.online_search import create_online_search
     from builtin_tools.image_reader import create_read_image
     from builtin_tools.scheduled_task_tool import create_scheduled_task_tool
+    from builtin_tools.html_share_link import create_get_html_share_link
 
     return [
         create_get_employee_info(user_id=user_id, user_token=user_token),
         create_online_search(user_id=user_id, user_token=user_token),
         create_read_image(user_id=user_id, user_token=user_token, session_id=session_id),
+        create_get_html_share_link(user_id=user_id, session_id=session_id),
         create_scheduled_task_tool(
             user_id=user_id,
             user_token=user_token,

@@ -110,6 +110,22 @@ class BaseConfig(BaseSettings):
         default=1002,
         description="本地鉴权回显 MCP 工具 ID",
     )
+    LOCAL_MCP_ENABLED: bool = Field(
+        default=False,
+        description="为 true 时 MCP 目录使用本机测试服务，不走 Mock 或外部网关",
+    )
+    LOCAL_TEST_MCP_URL: str = Field(
+        default="http://127.0.0.1:6010/mcp",
+        description="本地测试 MCP（local_test_mcp.py）HTTP 端点",
+    )
+    LOCAL_TEST_MCP_ID: int = Field(
+        default=6010,
+        description="本地测试 MCP 组件 ID",
+    )
+    LOCAL_TEST_MCP_NAME: str = Field(
+        default="local-test",
+        description="本地测试 MCP 名称",
+    )
 
     # ==================== 内置工具配置 ====================
     EMP_INFO_API_URL: str = Field(
@@ -175,7 +191,7 @@ class BaseConfig(BaseSettings):
         default=900, description="定时任务单次执行超时（秒）"
     )
     DEEP_GLOBAL_MAX_CONCURRENT: int = Field(default=20, description="全局 Deep 并发上限")
-    DEEP_USER_MAX_CONCURRENT: int = Field(default=3, description="每用户 Deep 并发上限")
+    DEEP_USER_MAX_CONCURRENT: int = Field(default=2, description="每用户 Deep 并发上限（并行会话数）")
     REASONING_STREAM_ENABLED: bool = Field(
         default=True,
         description="为 true 时 WebSocket 流式推送推理文本（reasoning chunk）；完整推理仍存 reasoning_final",
@@ -213,7 +229,7 @@ class BaseConfig(BaseSettings):
         description="沙箱基础镜像（系统依赖层：Node.js、Chromium、curl 等），由 deploy/sandbox/build_base.sh 构建",
     )
     SANDBOX_MAX_CONCURRENT: int = Field(default=25, description="全站同时 running 的沙箱数量上限")
-    SANDBOX_MAX_PER_USER: int = Field(default=3, description="每用户 running 沙箱容器上限")
+    SANDBOX_MAX_PER_USER: int = Field(default=2, description="每用户 running 沙箱容器上限")
     SANDBOX_STARTUP_GRACE_SECONDS: int = Field(default=15, description="沙箱 health check 轮询超时（秒）")
     SANDBOX_HARDEN: bool = Field(default=True, description="容器安全加固：只读根文件系统、降权、no-new-privileges")
     SANDBOX_PIP_CONF_PATH: Optional[str] = Field(

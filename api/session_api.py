@@ -73,6 +73,21 @@ class HistoryItem(BaseModel):
     subagent_run_id: str | None = Field(default=None, description="子智能体运行 ID")
 
 
+class HistoryTurnItem(BaseModel):
+    """精简历史轮次：用户问题 + 最终回复摘要。"""
+    kind: str = Field(default="turn", description="turn | context_divider")
+    conversation_id: str | None = None
+    run_id: str | None = None
+    context_epoch: int = 1
+    user: HistoryItem | None = None
+    assistant: HistoryItem | None = None
+    termination_status: str = Field(default="已完成任务")
+    has_process: bool = False
+    workspace_files: List[Any] = Field(default_factory=list)
+    cursor_created_at: str = Field(default="", description="游标：用户消息 created_at")
+    cursor_id: str = Field(default="", description="游标：用户消息 id")
+
+
 class SessionRunMetricsItem(BaseModel):
     """会话内单次 run 的指标（来自 agent_runs 表）"""
     run_id: str = Field(..., description="运行 ID")
@@ -160,6 +175,52 @@ async def get_user_sessions(
         return ListApiResponse.error(msg=f"获取会话列表失败: {str(e)}")
 
 
+def _row_to_history_item(r) -> HistoryItem:
+    content = r["content"]
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except (ValueError, TypeError):
+            content = {"text": content}
+    return HistoryItem(
+        id=str(r["id"]),
+        sender=r["sender"],
+        type=r["type"],
+        content=content,
+        tool_call_id=r.get("tool_call_id"),
+        conversation_id=str(r["conversation_id"]) if r.get("conversation_id") else None,
+        run_id=str(r["run_id"]) if r.get("run_id") else None,
+        group_id=r.get("group_id", 0) or 0,
+        step_index=r.get("step_index", 0) or 0,
+        create_time=_format_local_time(r["created_at"]),
+        context_epoch=int(r.get("context_epoch") or 1),
+        subagent_run_id=str(r["subagent_run_id"]) if r.get("subagent_run_id") else None,
+    )
+
+
+def _termination_from_end_row(end_row) -> str:
+    if not end_row:
+        return "已完成任务"
+    content = end_row.get("content")
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except (ValueError, TypeError):
+            content = {"text": content}
+    end_text = ""
+    if isinstance(content, dict):
+        end_text = content.get("text") or ""
+    elif isinstance(content, str):
+        end_text = content
+    if end_text == "stop":
+        return "已停止生成"
+    if end_text == "error":
+        return "任务执行出错"
+    if end_text:
+        return "已完成思考"
+    return "已完成任务"
+
+
 @router.get("/history", response_model=ListApiResponse[HistoryItem])
 async def get_session_history(
     userId: str = Query(..., description="用户ID"),
@@ -181,28 +242,123 @@ async def get_session_history(
         offset = (page - 1) * limit
         history = await storage.fetch_history_by_session(target_uuid, limit, offset)
 
-        history_items = [
-            HistoryItem(
-                id=str(r["id"]),
-                sender=r["sender"],
-                type=r["type"],
-                content=json.loads(r["content"]) if isinstance(r["content"], str) else r["content"],
-                tool_call_id=r["tool_call_id"],
-                conversation_id=str(r["conversation_id"]) if r.get("conversation_id") else None,
-                run_id=str(r["run_id"]) if r.get("run_id") else None,
-                group_id=r.get("group_id", 0) or 0,
-                step_index=r.get("step_index", 0) or 0,
-                create_time=_format_local_time(r["created_at"]),
-                context_epoch=int(r.get("context_epoch") or 1),
-                subagent_run_id=str(r["subagent_run_id"]) if r.get("subagent_run_id") else None,
-            )
-            for r in history
-        ]
+        history_items = [_row_to_history_item(r) for r in history]
 
         return ListApiResponse.success(data=history_items, msg="成功")
     except Exception as e:
         logger.error(f"[Session API] 获取会话历史失败: {e}")
         return ListApiResponse.error(msg=f"获取会话历史失败: {str(e)}")
+
+
+@router.get("/history/turns", response_model=ListApiResponse[HistoryTurnItem])
+async def get_session_history_turns(
+    userId: str = Query(..., description="用户ID"),
+    session_id: str = Query(..., description="会话ID"),
+    limit: int = Query(20, ge=1, le=100),
+    before: Optional[str] = Query(
+        None,
+        description="游标：上一页最老一轮的 created_at|id（ISO 时间|uuid）",
+    ),
+):
+    """按轮次精简历史：只含用户问题与最终回复。"""
+    try:
+        target_uuid = UUID(session_id)
+    except (ValueError, AttributeError):
+        return ListApiResponse.error(msg=f"无效的会话ID格式: {session_id}")
+
+    if not await validate_session_access(userId, session_id):
+        return ListApiResponse.error(msg=SESSION_ACCESS_DENIED_MSG, code=403)
+
+    before_created_at = None
+    before_id = None
+    if before:
+        try:
+            ts_part, id_part = before.split("|", 1)
+            from datetime import datetime
+
+            before_created_at = datetime.fromisoformat(ts_part.replace("Z", "+00:00"))
+            before_id = UUID(id_part)
+        except (ValueError, TypeError, AttributeError) as e:
+            return ListApiResponse.error(msg=f"无效的 before 游标: {e}")
+
+    try:
+        turns = await storage.fetch_history_turns(
+            target_uuid,
+            limit=limit,
+            before_created_at=before_created_at,
+            before_id=before_id,
+        )
+        items: List[HistoryTurnItem] = []
+        for turn in turns:
+            user_row = turn.get("user")
+            assistant_row = turn.get("assistant")
+            end_row = turn.get("end")
+            cursor_created_at = ""
+            cursor_id = ""
+            if user_row and user_row.get("created_at") is not None:
+                created = user_row["created_at"]
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                cursor_created_at = created.isoformat()
+                cursor_id = str(user_row["id"])
+            items.append(
+                HistoryTurnItem(
+                    kind=turn.get("kind") or "turn",
+                    conversation_id=(
+                        str(user_row["conversation_id"])
+                        if user_row and user_row.get("conversation_id")
+                        else None
+                    ),
+                    run_id=(
+                        str(user_row["run_id"])
+                        if user_row and user_row.get("run_id")
+                        else (
+                            str(assistant_row["run_id"])
+                            if assistant_row and assistant_row.get("run_id")
+                            else None
+                        )
+                    ),
+                    context_epoch=int((user_row or {}).get("context_epoch") or 1),
+                    user=_row_to_history_item(user_row) if user_row else None,
+                    assistant=_row_to_history_item(assistant_row) if assistant_row else None,
+                    termination_status=_termination_from_end_row(end_row),
+                    has_process=bool(turn.get("has_process")),
+                    workspace_files=turn.get("workspace_files") or [],
+                    cursor_created_at=cursor_created_at,
+                    cursor_id=cursor_id,
+                )
+            )
+        return ListApiResponse.success(data=items, msg="成功")
+    except Exception as e:
+        logger.error(f"[Session API] 获取精简历史失败: {e}")
+        return ListApiResponse.error(msg=f"获取精简历史失败: {str(e)}")
+
+
+@router.get("/history/turn-process", response_model=ListApiResponse[HistoryItem])
+async def get_session_turn_process(
+    userId: str = Query(..., description="用户ID"),
+    session_id: str = Query(..., description="会话ID"),
+    conversation_id: str = Query(..., description="对话轮次 ID"),
+):
+    """返回单轮全部原始记录（思考 / 工具 / 子智能体等）。"""
+    try:
+        target_uuid = UUID(session_id)
+        conv_uuid = UUID(conversation_id)
+    except (ValueError, AttributeError):
+        return ListApiResponse.error(msg="无效的 session_id 或 conversation_id")
+
+    if not await validate_session_access(userId, session_id):
+        return ListApiResponse.error(msg=SESSION_ACCESS_DENIED_MSG, code=403)
+
+    try:
+        rows = await storage.fetch_history_by_conversation(target_uuid, conv_uuid)
+        return ListApiResponse.success(
+            data=[_row_to_history_item(r) for r in rows],
+            msg="成功",
+        )
+    except Exception as e:
+        logger.error(f"[Session API] 获取轮次过程失败: {e}")
+        return ListApiResponse.error(msg=f"获取轮次过程失败: {str(e)}")
 
 
 @router.get("/run-metrics", response_model=ApiResponse[SessionRunMetricsData])

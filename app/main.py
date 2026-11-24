@@ -41,7 +41,10 @@ from api import user_llm_api, subscription_agent_api, user_memory_api, logs_api
 from api import admin_api, skill_upload_api, upload_api
 from api import scheduled_task_api
 from api.search_api import process_agent_stream
-from deep_agent_server.session.readiness import SessionReadinessService
+from deep_agent_server.session.readiness import (
+    SessionReadinessService,
+    format_warmup_error,
+)
 from config import setup_logging, get_logger, app_config
 from utils.session_utils import (
     get_or_create_session,
@@ -258,6 +261,7 @@ async def lifespan(app: FastAPI):
             logger.warning(f"【BuiltinSkill】启动安装失败: {e}")
 
         from deep_agent_server.sandbox.status_notify import set_sandbox_status_notifier
+        from deep_agent_server.sandbox.admission import set_sandbox_queue_notifier
         from deep_agent_server.hitl.sweeper import (
             set_hitl_ws_notifier,
             start_hitl_sweeper,
@@ -265,6 +269,7 @@ async def lifespan(app: FastAPI):
         )
 
         set_sandbox_status_notifier(manager.broadcast_sandbox_status)
+        set_sandbox_queue_notifier(manager.broadcast_sandbox_queue)
 
         from deep_agent_server.file_parse_notify import set_file_parse_notifier
         set_file_parse_notifier(manager.broadcast_file_parse_status)
@@ -813,6 +818,46 @@ async def ws_endpoint(websocket: WebSocket):
                 )
                 continue
 
+            # ==================== 断线续接 attach ====================
+            if msg.get("action") == "attach":
+                from deep_agent_server.events.run_event_hub import run_event_hub
+
+                attachments = msg.get("sessions") or []
+                # 兼容单会话：{action, session_id, last_seq}
+                if not attachments and msg.get("session_id"):
+                    attachments = [{
+                        "session_id": msg.get("session_id"),
+                        "last_seq": msg.get("last_seq") or 0,
+                    }]
+                for item in attachments:
+                    sid = (item.get("session_id") or "").strip()
+                    if not sid:
+                        continue
+                    if not await validate_session_access(user_id, sid):
+                        await websocket.send_json({
+                            "type": "error",
+                            "session_id": sid,
+                            "content": SESSION_ACCESS_DENIED_MSG,
+                        })
+                        continue
+                    manager.bind_session(websocket, sid)
+                    last_seq = int(item.get("last_seq") or 0)
+                    result = await run_event_hub.attach(sid, last_seq)
+                    if result.get("resync_required"):
+                        await websocket.send_json({
+                            "type": "resync_required",
+                            "session_id": sid,
+                            "content": {"session_id": sid, "last_seq": last_seq},
+                        })
+                        continue
+                    for frame in result.get("frames") or []:
+                        try:
+                            await websocket.send_json(frame)
+                        except Exception as e:
+                            logger.warning(f"【WebSocket】attach 补发失败 session={sid}: {e}")
+                            break
+                continue
+
             # 获取或创建 session_id
             resolved_agent_kind = "default"
             if client_session_id:
@@ -965,7 +1010,7 @@ async def ws_endpoint(websocket: WebSocket):
                             and (task.get("status") or "") == SessionStartStatus.ERROR.value
                             and task.get("error")
                         ):
-                            blocked_err = f"会话预热失败: {task['error'][:200]}"
+                            blocked_err = format_warmup_error(task["error"][:200])
                     except Exception as _e:
                         logger.debug(
                             f"【WebSocket】读取预热失败原因失败 session={session_id}: {_e}"

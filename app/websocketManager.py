@@ -155,6 +155,27 @@ class WebsocketConnectionManager:
         for ws in list(self.user_to_ws.get(uid, ())):
             await self.send_sandbox_status(ws, uid)
 
+    async def broadcast_sandbox_queue(
+        self, user_id: str, session_id: str, position: Optional[int]
+    ) -> None:
+        """推送沙箱排队位置；position 为 None 表示排队结束。"""
+        sid = (session_id or "").strip()
+        if not sid:
+            return
+        msg_type = "sandbox_queue_done" if position is None else "sandbox_queue"
+        payload = {
+            "type": msg_type,
+            "session_id": sid,
+            "content": {"session_id": sid, "position": position},
+        }
+        # 确保 session 已绑定到用户某条连接（若尚未 bind 则绑到该用户任一 ws）
+        if sid not in self.session_to_ws:
+            uid = (user_id or "").strip()
+            for ws in list(self.user_to_ws.get(uid, ())):
+                self.bind_session(ws, sid)
+                break
+        await self.send(payload, sid)
+
     # ── 文件解析状态推送 ──────────────────────────────────────────
 
     async def send_file_parse_status(
@@ -211,20 +232,33 @@ class WebsocketConnectionManager:
 
     async def send(self, msg: dict, session_id: str):
         """
-        发送消息到指定的 session_id 对应的 WebSocket
-        
-        Args:
-            msg: 消息字典
-            session_id: session_id（对应的 ws 会接收此消息）
+        发送消息到指定的 session_id 对应的 WebSocket。
+
+        推送前写入 RunEventHub（补 seq）；即使当前无 WS 连接，帧仍进入缓冲，
+        供断线后 attach 补发。
         """
+        out = msg
+        try:
+            from deep_agent_server.events.run_event_hub import run_event_hub
+
+            # 心跳/内部控制帧不入缓冲
+            if msg.get("type") not in ("ping", "pong", "get_sandbox_status"):
+                out = await run_event_hub.publish(session_id, msg)
+        except Exception as e:
+            logger.debug(f"【websocket】RunEventHub 写入跳过: {e}")
+            out = msg
+            if isinstance(out, dict) and "session_id" not in out:
+                out = dict(out)
+                out["session_id"] = session_id
+
         ws = self.session_to_ws.get(session_id)
         if ws and ws.application_state == WebSocketState.CONNECTED:
             try:
-                await ws.send_json(msg)
+                await ws.send_json(out)
             except Exception:
                 try:
                     import json as _json
-                    raw = _json.dumps(msg, ensure_ascii=False, default=str)
+                    raw = _json.dumps(out, ensure_ascii=False, default=str)
                     await ws.send_text(raw)
                     # 定位不可序列化的 key
                     bad_keys = []
@@ -240,16 +274,17 @@ class WebsocketConnectionManager:
                                 _json.dumps(obj)
                             except Exception:
                                 bad_keys.append(path)
-                    _find_bad(msg, "msg")
+                    _find_bad(out, "msg")
                     logger.warning(
                         f"【websocket】消息含不可序列化对象 (session={session_id}), "
-                        f"type={msg.get('type')}, keys={bad_keys}, 已用 default=str 兜底"
+                        f"type={out.get('type')}, keys={bad_keys}, 已用 default=str 兜底"
                     )
                 except Exception as e:
                     logger.error(f"【websocket】发送失败 (session={session_id}): {e}")
                 # 此处不主动 disconnect，由循环中的 WebSocketDisconnect 统一处理
         else:
-            logger.warning(f"【websocket】发送失败，找不到会话 {session_id} 对应的连接")
+            # 无连接时帧仍在 Hub 中，仅降级为 debug，避免刷屏
+            logger.debug(f"【websocket】会话 {session_id} 暂无连接，消息已写入缓冲")
 
     def get_sessions_by_ws(self, ws: WebSocket) -> list:
         """

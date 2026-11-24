@@ -14,6 +14,18 @@ from deep_agent_server.session.models import SessionStartStatus
 
 logger = get_logger(__name__)
 
+MODEL_CONFIG_REQUIRED_MSG = "请先配置模型 API Key 与 Base URL"
+
+
+def format_warmup_error(error: object) -> str:
+    """未配置模型时只返回配置提示，其它预热失败保留原因前缀。"""
+    text = str(error or "").strip()
+    if text.startswith("会话预热失败:"):
+        text = text[len("会话预热失败:"):].strip()
+    if MODEL_CONFIG_REQUIRED_MSG in text:
+        return MODEL_CONFIG_REQUIRED_MSG
+    return f"会话预热失败: {text}" if text else "会话预热失败"
+
 _warmup_tasks: Dict[str, asyncio.Task] = {}
 _session_locks: Dict[str, asyncio.Lock] = {}
 
@@ -96,8 +108,8 @@ class SessionReadinessService:
     ) -> None:
         """
         后台 warmup 核心流程：
-        1. WARMING_AGENT — 创建 agent（always_on skills，skip_sandbox）
-        2. WARMING_SANDBOX — 拉起 Docker 沙箱（可选）
+        1. WARMING_AGENT — 创建 agent（挂载懒启动沙箱，不拉容器）
+        2. WARMING_SANDBOX — 仅 SANDBOX_WARMUP_EAGER 时拉起 Docker 沙箱
         3. READY — 通知前端，触发 on_ready 回调 flush pending
         """
         lock = _get_lock(session_id)
@@ -118,7 +130,7 @@ class SessionReadinessService:
                     mcp_list,
                     agent_id,
                     always_on_only=True,
-                    skip_sandbox=True,
+                    skip_sandbox=False,
                     selected_skill_ids=selected_skill_ids,
                 )
                 if err:
@@ -206,7 +218,7 @@ class SessionReadinessService:
                 if isinstance(e, SandboxUserLimitExceeded):
                     err_content = e.to_error_payload()
                 else:
-                    err_content = f"会话预热失败: {e}"
+                    err_content = format_warmup_error(e)
                 try:
                     await deep_storage.upsert_session_start_task(
                         session_id, user_id, SessionStartStatus.ERROR.value, error=str(e)[:500]

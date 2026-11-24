@@ -253,6 +253,10 @@ class DatabaseManager:
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_chat_history_conversation
             ON chat_history(conversation_id);
+            CREATE INDEX IF NOT EXISTS idx_chat_history_session_sender_time
+            ON chat_history(session_id, sender, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_chat_history_session_conversation
+            ON chat_history(session_id, conversation_id);
         """)
         logger.debug("【数据库】✅ chat_history 表及索引初始化完成")
 

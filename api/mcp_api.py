@@ -180,7 +180,14 @@ async def _fetch_external_mcp_all_list(user_id: str = "", auth_token: str = "") 
 
 
 async def _resolve_mcp_source_list(user_id: str, auth_token: str = "") -> tuple[List[dict], str]:
-    """解析 MCP 来源：Mock / 外部 / 外部+Mock 合并 / 失败回退 Mock。"""
+    """解析 MCP 来源：本机测试服务 / Mock / 外部 / 外部+Mock 合并 / 失败回退 Mock。"""
+    if app_config.LOCAL_MCP_ENABLED:
+        from mcp_server.local_catalog import get_local_test_mcp_list
+
+        local_list = get_local_test_mcp_list()
+        logger.info(f"[MCP API] 使用本机测试 MCP（共 {len(local_list)} 个）")
+        return local_list, "local"
+
     if app_config.MCP_USE_MOCK:
         mock_list = get_default_mock_mcp_list()
         logger.info(f"[MCP API] 使用 Mock MCP 列表（共 {len(mock_list)} 个）")

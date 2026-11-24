@@ -25,7 +25,7 @@ from deep_agent_server.adapter import DeepEventAdapter, normalize_tool_call, tas
 from deep_agent_server.artifact import truncate_summary
 from deep_agent_server.memory.middleware import inject_user_memory_into_stream_input
 from deep_agent_server.repetition_guard import ModelTextGuard, RepetitionDetected
-from deep_agent_server.concurrency import DeepConcurrencyGuard
+from deep_agent_server.concurrency import DeepConcurrencyGuard, UserRunLimitError
 from deep_agent_server.errors.recovery import classify_deep_error, should_retry
 from deep_agent_server.events.bus import publish_event
 from deep_agent_server.events.normalizer import make_run_started, normalize_agent_message
@@ -571,7 +571,19 @@ async def run_deep_agent(
             yield msg
         yield adapter.end_message(reason)
 
-    async with DeepConcurrencyGuard(user_id):
+    try:
+        _concurrency_cm = DeepConcurrencyGuard(user_id, session_id)
+        await _concurrency_cm.acquire()
+    except UserRunLimitError as e:
+        yield AgentMessage.error(
+            session_id=session_id,
+            content=str(e),
+            save=True,
+        ).to_dict()
+        yield adapter.end_message(EndReason.ERROR)
+        return
+
+    try:
         while True:
             if stop_event and stop_event.is_set():
                 metrics = await _finalize_tokens("stopped")
@@ -712,6 +724,8 @@ async def run_deep_agent(
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.ERROR)
                 return
+    finally:
+        _concurrency_cm.release()
 
 
 async def _build_input(input_data: dict, user_id: str = ""):

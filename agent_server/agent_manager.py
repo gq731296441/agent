@@ -73,6 +73,7 @@ class AgentManager:
         self.tool_judge_llm = tool_judge_llm
 
         self._active_tasks: Dict[str, asyncio.Task] = {}
+        self._active_task_users: Dict[str, str] = {}  # session_id -> user_id
         self._stop_events: Dict[str, asyncio.Event] = {}
         # 已发出过停止请求（cancel）的任务：同一任务只取消一次，
         # 避免用户重复点击停止时二次 cancel 打断 runner 的优雅收尾（end 消息落库）
@@ -116,11 +117,18 @@ class AgentManager:
             except asyncio.CancelledError:
                 pass
 
-    def _register_session_run(self, session_id: str, stop_event: asyncio.Event) -> asyncio.Task:
+    def _register_session_run(
+        self,
+        session_id: str,
+        stop_event: asyncio.Event,
+        user_id: str = None,
+    ) -> asyncio.Task:
         self._stop_events[session_id] = stop_event
         current_task = asyncio.current_task()
         if current_task is not None:
             self._active_tasks[session_id] = current_task
+            if user_id:
+                self._active_task_users[session_id] = user_id
         return current_task
 
     def _cleanup_session_run(
@@ -133,12 +141,28 @@ class AgentManager:
             self._stop_events.pop(session_id, None)
         if task is not None and self._active_tasks.get(session_id) is task:
             self._active_tasks.pop(session_id, None)
+            self._active_task_users.pop(session_id, None)
         if task is not None and self._stop_requested.get(session_id) is task:
             self._stop_requested.pop(session_id, None)
 
         lock = self._session_locks.get(session_id)
         if lock is not None and lock.locked():
             lock.release()
+
+    def list_active_runs_for_user(self, user_id: str) -> list:
+        """返回该用户当前仍在执行的会话列表。"""
+        items = []
+        for sid, task in list(self._active_tasks.items()):
+            if task is None or task.done():
+                continue
+            if self._active_task_users.get(sid) != user_id:
+                continue
+            items.append({
+                "session_id": sid,
+                "user_id": user_id,
+                "status": "running",
+            })
+        return items
 
     async def create_agent(
         self,
@@ -362,7 +386,7 @@ class AgentManager:
 
         try:
             await self._prepare_session_run(session_id)
-            current_task = self._register_session_run(session_id, stop_event)
+            current_task = self._register_session_run(session_id, stop_event, user_id=user_id)
 
             if self.is_deep_runtime:
                 if is_resume:
@@ -595,7 +619,7 @@ class AgentManager:
 
         try:
             await self._prepare_session_run(session_id)
-            current_task = self._register_session_run(session_id, stop_event)
+            current_task = self._register_session_run(session_id, stop_event, user_id=user_id)
 
             if self.is_deep_runtime:
                 if is_resume:

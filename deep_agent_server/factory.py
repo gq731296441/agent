@@ -23,7 +23,6 @@ from agent_server.middleware.RateLimitMiddleware import RateLimitMiddleware
 from deep_agent_server.middleware.context_overflow_guard import ContextOverflowGuardMiddleware
 from deep_agent_server.middleware.html_share_link import HtmlShareLinkMiddleware
 from deep_agent_server.middleware.tool_result_ttl import ToolResultTTLMiddleware
-from deep_agent_server.sandbox import get_sandbox_backend_factory_if_enabled
 import deep_agent_server.tool_patches  # noqa: F401 — 模块导入即生效：替换 write_file/edit_file 描述为分块版本
 
 
@@ -670,6 +669,7 @@ async def create_deep_agent_instance(
     llm=None,
     agent_skills_root: Optional[Path] = None,
     agent_id_for_sandbox: Optional[str] = None,
+    skill_candidate_dirs: Optional[List[str]] = None,
     config_changes: Optional[Dict[str, bool]] = None,
 ) -> Tuple[Optional[DeepAgentWrapper], Optional[str]]:
     """
@@ -679,7 +679,7 @@ async def create_deep_agent_instance(
     渐进式披露由 SkillsMiddleware 自动处理。
 
     - selected_skill_ids：用户勾选的 skill ID 列表，控制 /skills/ 的可见性
-    - skip_sandbox=True：warmup 阶段跳过 Docker 拉起，execute 暂不可用
+    - skip_sandbox=True：不挂载 execute（降级）。否则挂载懒启动沙箱，容器在第一次 execute 时创建
     - config_changes：同 session 内 skill/MCP 变更标记，传给 runner 清状态+通知
     """
     try:
@@ -703,22 +703,32 @@ async def create_deep_agent_instance(
                     "若用户要求使用它们，请明确说明该技能已禁用、无法访问。"
                 )
         config = user_agent.get("config") or {}
-        sandbox_mode = False
         backend = build_backend_factory(
             user_id, session_id, store=store,
             agent_skills_root=agent_skills_root,
             selected_skill_ids=selected_skill_ids,
         )
-        if not skip_sandbox:
-            sandbox_backend_factory = await get_sandbox_backend_factory_if_enabled(
-                user_id, session_id=session_id, store=store, user_token=user_token,
-                agent_skills_root=agent_skills_root,
-                agent_id=agent_id_for_sandbox,
-                selected_skill_ids=selected_skill_ids,
-            )
-            if sandbox_backend_factory is not None:
-                backend = sandbox_backend_factory(None)
-                sandbox_mode = True
+        if not skip_sandbox and app_config.SANDBOX_ENABLED:
+            from deep_agent_server.sandbox import is_docker_sdk_available
+            from deep_agent_server.sandbox.docker_backend import build_lazy_sandbox_backend
+
+            if is_docker_sdk_available():
+                # 不在这里 ensure_running。container_id 在 execute 时再解析。
+                backend = build_lazy_sandbox_backend(
+                    user_id=user_id,
+                    session_id=session_id,
+                    store=store,
+                    user_token=user_token,
+                    agent_skills_root=agent_skills_root,
+                    agent_id=agent_id_for_sandbox,
+                    selected_skill_ids=selected_skill_ids,
+                    skill_candidate_dirs=skill_candidate_dirs,
+                )
+            else:
+                logger.warning(
+                    "[Sandbox] 未安装 docker 包，降级无 execute。"
+                    "请 pip install docker 或设置 SANDBOX_ENABLED=false"
+                )
 
         subagents = config.get("subagents") or None
         if subagents is None:

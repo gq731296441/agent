@@ -1,7 +1,8 @@
 """HTML 分享链接实时注入中间件 (HtmlShareLinkMiddleware)
 
 拦截 write_file / edit_file / execute 的工具结果：若本次调用写出了完整 HTML
-文件，则同步创建（或复用）分享链接与资源快照，并把链接追加到工具结果文本中。
+文件，或命令输出里列出了工作区里已经存在的 HTML（例如上一轮生成的报告被
+`ls` 出来），则同步创建（或复用）分享链接与资源快照，并把链接追加到工具结果中。
 
 为什么需要：
     分享 token 原先只在 adapter 消费工具事件时异步创建（fire-and-forget），
@@ -20,6 +21,7 @@
 """
 
 import asyncio
+import re
 import time
 from typing import Any, Dict, List, Optional, Set
 
@@ -35,6 +37,15 @@ _SHARE_TOOLS = frozenset({"write_file", "edit_file", "execute"})
 
 _HTML_EXTS = ("html", "htm")
 
+# 单次工具结果里最多补齐多少个已有 HTML 的分享链接，避免一次 ls 扫出大量文件时建快照过久
+_MAX_EXISTING_HTML = 20
+
+# 匹配命令输出里的 html 路径（绝对 /workspace/... 或相对 reports/a.html），排除 URL
+_HTML_PATH_RE = re.compile(
+    r"(?P<path>(?:\./)*(?:/workspace/)?[^\s'\"`<>]+?\.(?:html|htm))",
+    re.IGNORECASE,
+)
+
 # 追加到工具结果末尾的提示（引导 Agent 在最终回复中告知用户）
 _NOTICE_HEADER = (
     "\n\n---\n"
@@ -44,6 +55,32 @@ _NOTICE_HEADER = (
 
 def _is_html_path(path: str) -> bool:
     return (path or "").rsplit(".", 1)[-1].lower() in _HTML_EXTS
+
+
+def extract_html_paths_from_text(text: str) -> List[str]:
+    """从命令输出中提取工作区 HTML 路径。
+
+    脚本在上一轮写好的报告，本轮 `ls` 只会打印相对路径，路径里没有 html-share。
+    分享 token 存在数据库里，必须从这些路径再解析出来。
+    """
+    found: List[str] = []
+    seen = set()
+    source = text or ""
+    for match in _HTML_PATH_RE.finditer(source):
+        path = match.group("path").rstrip(").,;，。]")
+        start = match.start("path")
+        prefix = source[max(0, start - 12):start].lower()
+        if "://" in prefix or path.lower().startswith("http"):
+            continue
+        while path.startswith("./"):
+            path = path[2:]
+        if not path or not _is_html_path(path) or path in seen:
+            continue
+        seen.add(path)
+        found.append(path)
+        if len(found) >= _MAX_EXISTING_HTML:
+            break
+    return found
 
 
 def _tool_messages_of(result: Any) -> List[ToolMessage]:
@@ -252,6 +289,13 @@ class HtmlShareLinkMiddleware(AgentMiddleware):
             except Exception as e:
                 logger.debug(f"[HtmlShareLink] execute 文档扫描失败: {e}")
 
+        # 上一轮已经生成的 HTML：本轮 ls/脚本打印出路径时补齐分享链接。
+        # 这些文件的 mtime 早于本次命令，find_recent_document_files 扫不到。
+        for raw in extract_html_paths_from_text(result_text):
+            vpath = agent_path_to_virtual(self._session_id, raw)
+            if vpath and _is_html_path(vpath):
+                candidates.append(vpath)
+
         # 去重保序
         seen = set()
         unique = []
@@ -259,7 +303,7 @@ class HtmlShareLinkMiddleware(AgentMiddleware):
             if vpath not in seen:
                 seen.add(vpath)
                 unique.append(vpath)
-        return unique
+        return unique[:_MAX_EXISTING_HTML]
 
     # ── 链接创建 ──────────────────────────────────────────────────────────
 

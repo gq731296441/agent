@@ -1,6 +1,7 @@
 """HTML 分享链接统一创建入口。
 
-供三处调用：
+供这些调用：
+  - builtin_tools/html_share_link.py     —— Agent 主动获取或创建分享链接
   - deep_agent_server/adapter.py         —— Agent 写完 HTML 后自动创建（跨轮次兜底）
   - deep_agent_server/middleware/html_share_link.py —— 工具结果内实时注入链接
   - api/workspace_api.py                 —— 前端手动点「分享」（走自己的流程，

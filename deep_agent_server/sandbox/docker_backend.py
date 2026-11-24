@@ -1,5 +1,9 @@
 """Docker 沙箱 Backend — 实现 execute via docker exec。
 
+容器不在构建 Agent 时启动。第一次 execute / aexecute 才确保容器与技能挂载，
+并按会话读取当前 container_id（重建后 ID 会变，不能在建图时写死）。
+
+
 deepagents 要求 CompositeBackend.default 实现 SandboxBackendProtocol，
 否则 execute 工具会报 Execution not available。
 
@@ -10,9 +14,10 @@ deepagents 要求 CompositeBackend.default 实现 SandboxBackendProtocol，
 宿主机目录上产生 Permission denied（write_file 在宿主机以普通用户运行）。
 """
 
+import asyncio
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 # 宿主机进程 UID/GID，用于 docker exec 时以相同身份执行命令，
 # 确保 bind mount 目录中创建的文件 owner 与 FilesystemBackend 一致。
@@ -136,11 +141,15 @@ class DockerSandboxBackend(CompositeBackend):
         agent_skills_root: Optional[Path] = None,
         agent_id: Optional[str] = None,
         selected_skill_ids: Optional[list[str]] = None,
+        skill_candidate_dirs: Optional[List[str]] = None,
     ):
         self.user_id = user_id
         self.container_id = container_id
         self.session_id = session_id
         self.agent_id = agent_id
+        self.user_token = user_token
+        self.selected_skill_ids = selected_skill_ids
+        self.skill_candidate_dirs = list(skill_candidate_dirs or [])
         self._exec_backend = _DockerExecBackend(user_id, container_id, user_token=user_token)
         routes = build_filesystem_routes(
             user_id, session_id, store=store, skills_root=skills_root,
@@ -153,8 +162,72 @@ class DockerSandboxBackend(CompositeBackend):
         )
         logger.debug(
             f"[SandboxBackend] user={user_id} session={session_id} "
-            f"routes={list(routes.keys())} container={container_id[:12]}"
+            f"routes={list(routes.keys())} container={(container_id or '')[:12] or 'lazy'}"
         )
+
+    async def _ensure_container(self) -> Optional[str]:
+        """执行命令前确保容器在跑。成功返回 None，失败返回给模型的错误文本。"""
+        from deep_agent_server.sandbox import get_sandbox_service
+        from deep_agent_server.sandbox.admission import SandboxAdmissionTimeout
+        from deep_agent_server.sandbox.exceptions import SandboxUserLimitExceeded
+        from deep_agent_server.skills.selection_guard import SkillSelectionLockedError
+        from deep_agent_server.skills.session_mount import ensure_session_skill_mount
+
+        try:
+            result = await ensure_session_skill_mount(
+                self.user_id,
+                self.session_id,
+                self.skill_candidate_dirs,
+                self.selected_skill_ids,
+                agent_id=self.agent_id,
+            )
+        except SkillSelectionLockedError as e:
+            return e.message
+        except SandboxUserLimitExceeded as e:
+            return str(e)
+        except SandboxAdmissionTimeout as e:
+            return str(e)
+        except Exception as e:
+            logger.warning(
+                f"[Sandbox] execute 前启动失败 user={self.user_id} "
+                f"session={self.session_id}: {e}"
+            )
+            return f"沙箱启动失败: {e}"
+
+        if not result.skipped:
+            logger.info(
+                f"[Sandbox] execute 前已准备容器 user={self.user_id} "
+                f"session={self.session_id} recreated={result.recreated}"
+            )
+
+        try:
+            row = await get_sandbox_service()._get_db_session(self.user_id, self.session_id)
+        except Exception as e:
+            logger.warning(f"[Sandbox] 读取容器记录失败 session={self.session_id}: {e}")
+            return f"沙箱启动失败: {e}"
+
+        cid = ((row or {}).get("container_id") or "").strip()
+        status = (row or {}).get("status") or ""
+        if not cid or status != "running":
+            return "沙箱未能进入运行状态，命令未执行。"
+
+        self.container_id = cid
+        self._exec_backend.container_id = cid
+        return None
+
+    async def aexecute(
+        self,
+        command: str,
+        *,
+        timeout: int | None = None,
+    ) -> ExecuteResponse:
+        """先确保沙箱，再在容器里执行。文件工具不走这里。"""
+        err = await self._ensure_container()
+        if err:
+            return ExecuteResponse(output=err, exit_code=1, truncated=False)
+        if timeout is not None:
+            return await self._exec_backend.aexecute(command, timeout=timeout)
+        return await self._exec_backend.aexecute(command)
 
     def _list_virtual_roots(self) -> LsResult:
         """ls("/")：仅列出 /skills、/workspace 等虚拟路由，不调用 exec default。"""
@@ -628,3 +701,30 @@ class DockerSandboxBackend(CompositeBackend):
             return ws_backend, backend_path
 
         return backend, stripped_key
+
+
+def build_lazy_sandbox_backend(
+    *,
+    user_id: str,
+    session_id: str,
+    store: Any = None,
+    user_token: Optional[str] = None,
+    skills_root: Optional[Path] = None,
+    agent_skills_root: Optional[Path] = None,
+    agent_id: Optional[str] = None,
+    selected_skill_ids: Optional[list[str]] = None,
+    skill_candidate_dirs: Optional[List[str]] = None,
+) -> DockerSandboxBackend:
+    """构建带 execute 的后端，但不创建容器。"""
+    return DockerSandboxBackend(
+        user_id=user_id,
+        container_id="",
+        session_id=session_id,
+        store=store,
+        user_token=user_token,
+        skills_root=skills_root,
+        agent_skills_root=agent_skills_root,
+        agent_id=agent_id,
+        selected_skill_ids=selected_skill_ids,
+        skill_candidate_dirs=skill_candidate_dirs,
+    )
