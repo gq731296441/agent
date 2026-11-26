@@ -896,6 +896,116 @@ async def set_package_delisted(package_id: str, delisted: bool = True) -> None:
     _DELISTED_CACHE = (0.0, [])  # 失效缓存
 
 
+async def hard_delete_package(package_id: str) -> Dict[str, Any]:
+    """已下架包的物理删除：清理关联表与 package 行，使其从「我的上传」消失。
+
+    不删除 skill_version_numbers（终身版本号保留，防止同版本复用）。
+    """
+    global _DELISTED_CACHE
+    pid = (package_id or "").strip()
+    if not pid:
+        return {"package_id": "", "deleted": False}
+
+    from db import deep_storage
+
+    pool = await db_manager.get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # 解除 package → version 外键后再删版本
+            await conn.execute(
+                """
+                UPDATE skill_packages
+                SET current_published_version_id = NULL, updated_at = now()
+                WHERE id = $1
+                """,
+                pid,
+            )
+
+            sub_ids = [
+                str(r["id"])
+                for r in await conn.fetch(
+                    "SELECT id FROM skill_submissions WHERE package_id = $1",
+                    pid,
+                )
+            ]
+            ver_ids = [
+                str(r["id"])
+                for r in await conn.fetch(
+                    "SELECT id FROM skill_versions WHERE package_id = $1",
+                    pid,
+                )
+            ]
+
+            if sub_ids:
+                await conn.execute(
+                    "DELETE FROM skill_findings WHERE submission_id = ANY($1::uuid[])",
+                    sub_ids,
+                )
+                await conn.execute(
+                    "DELETE FROM skill_scan_runs WHERE submission_id = ANY($1::uuid[])",
+                    sub_ids,
+                )
+                await conn.execute(
+                    "DELETE FROM skill_build_runs WHERE submission_id = ANY($1::uuid[])",
+                    sub_ids,
+                )
+
+            if ver_ids:
+                await conn.execute(
+                    "DELETE FROM skill_reviews WHERE version_id = ANY($1::uuid[])",
+                    ver_ids,
+                )
+
+            await conn.execute(
+                "DELETE FROM skill_installations WHERE package_id = $1",
+                pid,
+            )
+
+            # 安装副本与智能体绑定：先清 bindings 再清 installs
+            await conn.execute(
+                """
+                DELETE FROM user_agent_skill_bindings
+                WHERE market_skill_id = $1
+                   OR installed_skill_id IN (
+                        SELECT id FROM user_installed_skills
+                        WHERE market_skill_id = $1
+                   )
+                """,
+                pid,
+            )
+            await conn.execute(
+                "DELETE FROM user_installed_skills WHERE market_skill_id = $1",
+                pid,
+            )
+
+            await conn.execute(
+                "DELETE FROM skill_versions WHERE package_id = $1",
+                pid,
+            )
+            await conn.execute(
+                "DELETE FROM skill_submissions WHERE package_id = $1",
+                pid,
+            )
+            await conn.execute(
+                "DELETE FROM skill_packages WHERE id = $1",
+                pid,
+            )
+
+    try:
+        await deep_storage.delete_skill_catalog_full(pid)
+    except Exception:
+        # catalog 可能本就不存在
+        pass
+
+    _DELISTED_CACHE = (0.0, [])
+    return {
+        "package_id": pid,
+        "deleted": True,
+        "submissions_removed": len(sub_ids),
+        "versions_removed": len(ver_ids),
+    }
+
+
 # 下架 ID 在 agent 创建热路径上被频繁查询，做 30s 进程内缓存。
 _DELISTED_CACHE: Tuple[float, List[str]] = (0.0, [])
 _DELISTED_TTL_SECONDS = 30.0

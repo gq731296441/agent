@@ -103,10 +103,14 @@ async def delete_my_upload(package_id: str, user_id: str = Query(...)):
     try:
         result = await get_publish_service().withdraw_package(package_id, user_id)
         logger.info(
-            "[SkillAudit] action=withdraw user={} pkg={} installs={}",
-            user_id, package_id, result.get("install_count"),
+            "[SkillAudit] action=withdraw user={} pkg={} installs={} hard_deleted={}",
+            user_id,
+            package_id,
+            result.get("install_count"),
+            result.get("hard_deleted"),
         )
-        return ApiResponse.success(data=result, msg="已删除并下架")
+        msg = "已删除" if result.get("hard_deleted") else "已删除并下架"
+        return ApiResponse.success(data=result, msg=msg)
     except PublishError as e:
         logger.info(
             "[SkillAudit] action=withdraw user={} pkg={} rejected code={} msg={}",

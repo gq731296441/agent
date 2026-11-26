@@ -461,8 +461,21 @@ class PublishService:
             if not await deep_storage.is_admin(user_id):
                 raise PublishError("无权操作", 403)
         if pkg.get("delisted"):
+            # 已下架：再次删除 = 物理清理 DB，避免「我的上传」里幽灵卡片
             await _purge_withdrawn_repo(package_id, pkg)
-            return {"package_id": package_id, "delisted": True, "install_count": 0}
+            purged = await ms.hard_delete_package(package_id)
+            logger.info(
+                "[SkillWithdraw] hard-delete delisted package={} by={} result={}",
+                package_id,
+                user_id,
+                purged,
+            )
+            return {
+                "package_id": package_id,
+                "delisted": True,
+                "hard_deleted": True,
+                "install_count": 0,
+            }
 
         versions = await ms.list_versions_for_package(package_id)
         reviewed = any(
