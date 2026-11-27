@@ -600,12 +600,13 @@ class DeepEventAdapter:
     def _emit_reasoning_msg(self, raw_type: str, content, save: bool, track_step: bool = False) -> dict:
         """产出推理消息；若在子 agent 上下文中自动包装为 SUBAGENT_EVENT。
 
-        主 agent 的 REASONING_FINAL（累积完整推理，save=True）仅落库不推送前端，
-        由 agent_manager 的类型过滤统一拦截。
+        主 agent 的 REASONING_FINAL（累积完整推理，save=True）会推前端，用于把
+        流式思考段从「正在思考」收尾为「思考过程」；内容已由 reasoning chunk
+        累积，前端只改 streaming 状态。
 
-        子 agent 的 REASONING_FINAL 也包装为 SUBAGENT_EVENT（确保 DB 中按
+        子 agent 的 REASONING_FINAL 包装为 SUBAGENT_EVENT（确保 DB 中按
         subagent_run_id 正确分组），由 agent_manager 按 subevent_type 过滤
-        避免推送到前端。
+        完整文本，避免与已推流式 chunk 重复。
 
         子 agent 上下文中的 content 会附加 subevent_type 字段，
         便于前端从历史记录加载时区分思考/回复。

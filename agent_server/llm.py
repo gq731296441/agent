@@ -1,6 +1,8 @@
+from collections.abc import AsyncIterator, Iterator
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessageChunk
-from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
+from pydantic import Field
 import httpx
 from httpx import Timeout, Limits
 from config import app_config, get_logger
@@ -20,7 +22,127 @@ async_client = httpx.AsyncClient(
 # 流式 chunk 诊断计数器（模块级变量，避免 Pydantic ModelPrivateAttr 问题）
 _llm_chunk_counters = {"total": 0, "tool_args_chunks": 0}
 
+_THINKING_REJECT_HINTS = ("chat_template_kwargs", "thinking", "extra_body")
+
+
+def _reasoning_extra_body(model: str) -> Optional[Dict[str, Any]]:
+    """按总开关 + 模型名白名单生成 thinking extra_body；不匹配返回 None。
+
+    REASONING_REQUEST_MODELS:
+      - "none"：关闭注入
+      - 空串：对所有模型生效
+      - 逗号分隔子串：模型名包含任一子串即注入（默认 deepseek）
+    """
+    if not getattr(app_config, "REASONING_REQUEST_ENABLED", True):
+        return None
+    raw = str(getattr(app_config, "REASONING_REQUEST_MODELS", "deepseek") or "")
+    stripped = raw.strip()
+    if stripped.lower() == "none":
+        return None
+    model_l = (model or "").lower()
+    if stripped:
+        tokens = [t.strip().lower() for t in stripped.split(",") if t.strip()]
+        if tokens and not any(token in model_l for token in tokens):
+            return None
+    return {"chat_template_kwargs": {"thinking": True}}
+
+
+def _apply_thinking(llm: BaseChatModel, model: str) -> BaseChatModel:
+    """把 thinking 参数挂到 LLM 实例 extra_body 上，并记录 thinking_extra_body。"""
+    extra = _reasoning_extra_body(model)
+    if not extra:
+        return llm
+    current = dict(getattr(llm, "extra_body", None) or {})
+    chat_kwargs = dict(current.get("chat_template_kwargs") or {})
+    chat_kwargs.update(extra.get("chat_template_kwargs") or {})
+    current["chat_template_kwargs"] = chat_kwargs
+    llm.extra_body = current
+    if isinstance(llm, ChatOpenAIWithReasoning):
+        llm.thinking_extra_body = extra
+    logger.info(
+        "[LLM] 已为模型 {} 注入 thinking extra_body={}",
+        getattr(llm, "model_name", model) or "?",
+        extra,
+    )
+    return llm
+
+
+def _http_status_code(exc: BaseException) -> Optional[int]:
+    seen: set[int] = set()
+    cur: Optional[BaseException] = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        status = getattr(cur, "status_code", None)
+        if isinstance(status, int):
+            return status
+        resp = getattr(cur, "response", None)
+        if resp is not None:
+            sc = getattr(resp, "status_code", None)
+            if isinstance(sc, int):
+                return sc
+        cur = cur.__cause__ or getattr(cur, "__context__", None)
+    return None
+
+
+def _error_text(exc: BaseException) -> str:
+    parts = [str(exc), type(exc).__name__]
+    message = getattr(exc, "message", None)
+    if message:
+        parts.append(str(message))
+    return " ".join(parts).lower()
+
+
+def _is_thinking_param_rejected(exc: BaseException, thinking_attached: bool) -> bool:
+    """上游 400 且报错提到 thinking / extra_body 时，才允许摘参重试。"""
+    if not thinking_attached:
+        return False
+    status = _http_status_code(exc)
+    text = _error_text(exc)
+    if status is None:
+        if "error code: 400" in text or "badrequesterror" in text or "bad request" in text:
+            status = 400
+    if status != 400:
+        return False
+    return any(hint in text for hint in _THINKING_REJECT_HINTS)
+
+
+def _extra_body_has_thinking(extra_body: Any) -> bool:
+    if not isinstance(extra_body, dict):
+        return False
+    chat_kwargs = extra_body.get("chat_template_kwargs")
+    return isinstance(chat_kwargs, dict) and bool(chat_kwargs.get("thinking"))
+
+
 class ChatOpenAIWithReasoning(ChatOpenAI):
+    # 记录本次注入的 thinking extra_body；上游 400 拒绝后据此摘参重试一次。
+    # 不用 PrivateAttr：langchain ChatOpenAI 在部分版本上会踩 ModelPrivateAttr。
+    thinking_extra_body: Optional[Dict[str, Any]] = Field(default=None, exclude=True)
+
+    def _thinking_attached(self) -> bool:
+        return bool(self.thinking_extra_body) or _extra_body_has_thinking(self.extra_body)
+
+    def _strip_thinking_extra_body(self) -> None:
+        extra = dict(self.extra_body or {})
+        chat_kwargs = dict(extra.get("chat_template_kwargs") or {})
+        chat_kwargs.pop("thinking", None)
+        if chat_kwargs:
+            extra["chat_template_kwargs"] = chat_kwargs
+        else:
+            extra.pop("chat_template_kwargs", None)
+        self.extra_body = extra or None
+        self.thinking_extra_body = None
+
+    def _should_retry_without_thinking(self, exc: BaseException) -> bool:
+        if not _is_thinking_param_rejected(exc, self._thinking_attached()):
+            return False
+        model_name = getattr(self, "model_name", "?")
+        logger.warning(
+            "[LLM] 上游拒绝 thinking 参数，已摘除 extra_body 后重试一次 model={} err={}",
+            model_name,
+            exc,
+        )
+        self._strip_thinking_extra_body()
+        return True
 
     def _convert_chunk_to_generation_chunk(
         self,
@@ -84,6 +206,46 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
 
         return gen_chunk
 
+    def _stream(self, *args: Any, **kwargs: Any) -> Iterator[ChatGenerationChunk]:
+        started = False
+        try:
+            for chunk in super()._stream(*args, **kwargs):
+                started = True
+                yield chunk
+        except Exception as exc:
+            if started or not self._should_retry_without_thinking(exc):
+                raise
+            yield from super()._stream(*args, **kwargs)
+
+    async def _astream(self, *args: Any, **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
+        started = False
+        try:
+            async for chunk in super()._astream(*args, **kwargs):
+                started = True
+                yield chunk
+        except Exception as exc:
+            if started or not self._should_retry_without_thinking(exc):
+                raise
+            async for chunk in super()._astream(*args, **kwargs):
+                yield chunk
+
+    def _generate(self, *args: Any, **kwargs: Any) -> ChatResult:
+        try:
+            return super()._generate(*args, **kwargs)
+        except Exception as exc:
+            if not self._should_retry_without_thinking(exc):
+                raise
+            return super()._generate(*args, **kwargs)
+
+    async def _agenerate(self, *args: Any, **kwargs: Any) -> ChatResult:
+        try:
+            return await super()._agenerate(*args, **kwargs)
+        except Exception as exc:
+            if not self._should_retry_without_thinking(exc):
+                raise
+            return await super()._agenerate(*args, **kwargs)
+
+
 def normalize_base_url(base_url: str) -> str:
     """把 Base URL 规范化为 OpenAI 客户端要求的「版本前缀」形式。
 
@@ -139,6 +301,7 @@ def _aux_llm_config(**overrides: Any) -> Dict[str, Any]:
 def create_agent_llm():
     try:
         llm = ChatOpenAIWithReasoning(**_agent_llm_config())
+        _apply_thinking(llm, app_config.LLM_AGENT_MODEL)
         logger.debug(f"✅ 模型创建成功")
         return llm
     except Exception as e:
@@ -189,6 +352,7 @@ def create_llm_from_config(
     temperature: float = 0.1,
     max_tokens: Optional[int] = None,
     use_reasoning: bool = True,
+    enable_thinking: bool = False,
 ) -> BaseChatModel:
     config = _base_llm_kwargs()
     config.update({
@@ -205,9 +369,10 @@ def create_llm_from_config(
         # （如 write 大文件）可能被截断导致 JSON 不完整执行失败。
         # 显式覆盖为更大的默认值；若模型真实上限低于此值，API 会报 400，再调低即可。
         config["max_tokens"] = 32768
-    if use_reasoning:
-        return ChatOpenAIWithReasoning(**config)
-    return ChatOpenAI(**config)
+    llm = ChatOpenAIWithReasoning(**config) if use_reasoning else ChatOpenAI(**config)
+    if enable_thinking:
+        _apply_thinking(llm, model)
+    return llm
 
 
 async def create_user_aux_llms(user_id: str) -> Dict[str, Any]:
@@ -271,6 +436,7 @@ async def create_agent_llm_for_user(user_id: str, agent_kind: str = "default"):
         model=profile["model"],
         base_url=profile["base_url"],
         api_key=profile["api_key"],
+        enable_thinking=True,
     )
 
 

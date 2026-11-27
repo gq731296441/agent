@@ -566,10 +566,30 @@ async def run_deep_agent(
         if files_msg:
             yield files_msg
 
-    async def _yield_run_end(reason: EndReason, finished_at: Optional[str] = None):
-        async for msg in _yield_workspace_files_async(finished_at):
-            yield msg
+    async def _emit_end_then_finalize(
+        reason: EndReason,
+        status: str,
+        *,
+        error: str = "",
+    ):
+        """先推 end 解除前端停止按钮，再做慢收尾（token/文件）。
+
+        以往顺序是 finalize → workspace 扫盘 → end，NFS/DB 慢时用户已看到最终
+        回复，但输入框仍卡在停止按钮。end 提前推送后，metrics / workspace_file
+        仍可迟到补齐；前端需容忍这些迟到帧，不得重新打开 isGenerating。
+        """
         yield adapter.end_message(reason)
+        try:
+            metrics = await _finalize_tokens(status, error=error)
+            yield await _yield_run_metrics(metrics)
+            async for msg in _yield_workspace_files_async(metrics["finished_at"]):
+                yield msg
+        except Exception as e:
+            logger.warning(
+                f"[DeepRunner] 收尾失败（end 已推送）session={session_id} "
+                f"run={run_id} status={status}: {e}",
+                exc_info=True,
+            )
 
     try:
         _concurrency_cm = DeepConcurrencyGuard(user_id, session_id)
@@ -586,9 +606,7 @@ async def run_deep_agent(
     try:
         while True:
             if stop_event and stop_event.is_set():
-                metrics = await _finalize_tokens("stopped")
-                yield await _yield_run_metrics(metrics)
-                async for msg in _yield_run_end(EndReason.STOP, metrics["finished_at"]):
+                async for msg in _emit_end_then_finalize(EndReason.STOP, "stopped"):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.STOP)
                 return
@@ -608,9 +626,7 @@ async def run_deep_agent(
                     yield await _yield_run_metrics(metrics)
                     return
 
-                metrics = await _finalize_tokens("completed")
-                yield await _yield_run_metrics(metrics)
-                async for msg in _yield_run_end(EndReason.COMPLETED, metrics["finished_at"]):
+                async for msg in _emit_end_then_finalize(EndReason.COMPLETED, "completed"):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.COMPLETED)
                 return
@@ -644,26 +660,24 @@ async def run_deep_agent(
                     content="模型再次重复输出，已停止本轮执行。此前已完成的工具操作仍保留。",
                     save=True,
                 ))
-                metrics = await _finalize_tokens("error", error="model_repetition_detected")
-                yield await _yield_run_metrics(metrics)
-                async for msg in _yield_run_end(EndReason.ERROR, metrics["finished_at"]):
+                async for msg in _emit_end_then_finalize(
+                    EndReason.ERROR, "error", error="model_repetition_detected"
+                ):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.ERROR)
                 return
 
             except DeepRunTimeoutError:
-                metrics = await _finalize_tokens("error", error="timeout")
-                yield await _yield_run_metrics(metrics)
-                async for msg in _yield_run_end(EndReason.ERROR, metrics["finished_at"]):
+                async for msg in _emit_end_then_finalize(
+                    EndReason.ERROR, "error", error="timeout"
+                ):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.ERROR)
                 return
 
             except asyncio.CancelledError:
                 logger.info(f"[DeepRunner] 会话 {session_id} 取消")
-                metrics = await _finalize_tokens("stopped")
-                yield await _yield_run_metrics(metrics)
-                async for msg in _yield_run_end(EndReason.STOP, metrics["finished_at"]):
+                async for msg in _emit_end_then_finalize(EndReason.STOP, "stopped"):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.STOP)
                 raise
@@ -718,9 +732,9 @@ async def run_deep_agent(
                     stream_input = {"messages": [HumanMessage(content="请继续完成之前的任务。")]}
                     continue
 
-                metrics = await _finalize_tokens("error", error=err_text)
-                yield await _yield_run_metrics(metrics)
-                async for msg in _yield_run_end(EndReason.ERROR, metrics["finished_at"]):
+                async for msg in _emit_end_then_finalize(
+                    EndReason.ERROR, "error", error=err_text
+                ):
                     yield msg
                 await _maybe_release_sandbox(user_id, session_id, EndReason.ERROR)
                 return

@@ -485,8 +485,9 @@ class AgentManager:
                     end_emitted = True
                 if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
                     continue
-                if msg_type == MessageType.REASONING_FINAL or msg_type == MessageType.REASONING_FINAL.value:
-                    continue
+                # REASONING_FINAL 必须推前端：流式 reasoning chunk 只带 streaming:true，
+                # 靠 final 把标题从「正在思考」收尾为「思考过程」。内容已在 chunk 中累积，
+                # 前端 FINISH_THINKING_STEP 只会改状态不会重复渲染块。
                 # 子智能体的落库消息（REASONING_FINAL / chat 完整文本）包装为
                 # SUBAGENT_EVENT 存库（确保按 subagent_run_id 分组），但 WS
                 # 推送时按 subevent_type + content 结构过滤——完整文本与已推的
@@ -723,8 +724,7 @@ class AgentManager:
                 msg_type = msg.get("type")
                 if msg_type == MessageType.LLM_TEXT_FINAL or msg_type == MessageType.LLM_TEXT_FINAL.value:
                     continue
-                if msg_type == MessageType.REASONING_FINAL or msg_type == MessageType.REASONING_FINAL.value:
-                    continue
+                # 与流式路径一致：REASONING_FINAL 需推前端以收尾思考态
                 if _should_skip_ws_subagent_event(msg):
                     continue
                 frontend_messages.append(msg)

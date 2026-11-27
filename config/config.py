@@ -196,6 +196,14 @@ class BaseConfig(BaseSettings):
         default=True,
         description="为 true 时 WebSocket 流式推送推理文本（reasoning chunk）；完整推理仍存 reasoning_final",
     )
+    REASONING_REQUEST_ENABLED: bool = Field(
+        default=True,
+        description="为 true 时按白名单向主模型请求注入 thinking 参数（chat_template_kwargs）",
+    )
+    REASONING_REQUEST_MODELS: str = Field(
+        default="deepseek",
+        description="模型名白名单（子串匹配，逗号分隔）。空串=全部模型；none=关闭注入",
+    )
     ARTIFACT_MAX_BYTES: int = Field(default=262144, description="Artifact 单条大小上限（256KB）")
     ARTIFACT_AUTO_STORE_ENABLED: bool = Field(
         default=False,
